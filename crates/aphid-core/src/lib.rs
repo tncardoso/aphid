@@ -64,6 +64,7 @@
 //! assert_eq!(transcript.len(), 4);
 //! ```
 
+pub mod api;
 mod arena;
 mod buffer;
 mod compat;
@@ -83,6 +84,7 @@ mod tool;
 mod transcript;
 mod view;
 
+pub use api::{CompletionStream, encode_request};
 pub use buffer::MessageBuffer;
 pub use compat::{Compat, MaxTokensField, OpenAiCompletionsCompat, ThinkingFormat};
 pub use content::BlockKind;

@@ -16,9 +16,13 @@ pub enum Error {
     #[error("no message at index {0}")]
     UnknownMessage(u32),
 
-    /// Tool-call arguments were not valid JSON.
+    /// Tool-call arguments, or a provider chunk, were not valid JSON.
     #[error("invalid JSON: {0}")]
     Json(#[from] JsonError),
+
+    /// A message holds content this wire protocol cannot represent.
+    #[error("{0} content is not supported by this API")]
+    UnsupportedContent(&'static str),
 }
 
 /// Convenience alias for fallible core operations.
