@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use aphid_agent::{Agent, AgentHandle, RunOutcome};
 use aphid_core::{Model, ThinkingLevel, Transcript};
-use aphid_plugin::ScriptBackend;
+use aphid_plugin::{ScriptBackend, SessionInfo};
 use compact_str::CompactString;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::crossterm::terminal::{
@@ -420,6 +420,7 @@ pub async fn run(
     }
     if !host.is_empty() {
         options.plugins.push(host.clone());
+        options.host = Some(host.clone());
     }
 
     // The session plugin has to be registered before the agent is built.
@@ -427,9 +428,19 @@ pub async fn run(
     let (session, resumed) = session::attach(&directory, &cwd, Some(&model_id), resume.as_deref())?;
     options.plugins.push(session.clone());
 
+    let session_id = session.id();
+    let session_path = session.path();
+    host.session_start(&SessionInfo {
+        id: session_id.as_deref(),
+        path: session_path.as_deref(),
+        reason: if resumed.is_some() { "resume" } else { "new" },
+        restored: 0,
+    });
+
     let mut harness = harness::build(options);
     let mut app = App::new(&harness, thinking);
     app.session = Some(session);
+    app.view.watch(host.clone());
 
     for note in &harness.notes {
         app.view.push_notice(note.clone());
@@ -472,6 +483,17 @@ pub async fn run(
     spawn_input_thread(events.clone());
     let result = drive(&mut terminal, &mut app, harness.agent, receiver).await;
     restore(&mut terminal)?;
+
+    // After the terminal is back: a session hook that writes to standard error
+    // then lands on a screen that is its own again. `session_end` also flushes
+    // every plugin's state, so this is the last thing to run.
+    host.session_end(&SessionInfo {
+        id: session_id.as_deref(),
+        path: session_path.as_deref(),
+        reason: "end",
+        restored: 0,
+    });
+
     result
 }
 

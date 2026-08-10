@@ -38,6 +38,10 @@ pub struct Capabilities {
     pub http: bool,
     pub timeout: Duration,
     pub max_operations: u64,
+    /// Directories searched for `<name>.json`, first hit wins.
+    pub config_dirs: Vec<PathBuf>,
+    /// Where `save_state` is persisted. `None` keeps state for the session only.
+    pub state_dir: Option<PathBuf>,
 }
 
 impl Default for Capabilities {
@@ -49,6 +53,8 @@ impl Default for Capabilities {
             http: false,
             timeout: DEFAULT_TIMEOUT,
             max_operations: DEFAULT_MAX_OPERATIONS,
+            config_dirs: Vec::new(),
+            state_dir: None,
         }
     }
 }
@@ -59,13 +65,24 @@ impl Capabilities {
     /// user installed on purpose buys nothing.
     #[must_use]
     pub fn full(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
+        let plugins = root.join(".aphid").join("plugins");
         Self {
-            root: Some(root.into()),
+            root: Some(root),
             write: true,
             exec: true,
             http: true,
+            config_dirs: vec![plugins.clone()],
+            state_dir: Some(plugins.join("state")),
             ..Self::default()
         }
+    }
+
+    /// Also read settings from a home directory, behind the project's.
+    #[must_use]
+    pub fn with_home(mut self, home: &Path) -> Self {
+        self.config_dirs.push(home.join(".aphid").join("plugins"));
+        self
     }
 }
 
@@ -140,6 +157,7 @@ pub(crate) fn register(
     caps: &Capabilities,
     sink: &Arc<dyn Sink>,
     worker: &Arc<Worker>,
+    store: &Arc<crate::store::Store>,
 ) {
     engine.set_max_operations(caps.max_operations);
     engine.set_max_call_levels(64);
@@ -153,6 +171,28 @@ pub(crate) fn register(
     register_fs(engine, caps);
     register_exec(engine, caps, worker);
     register_http(engine, caps, worker);
+    register_storage(engine, plugin, caps, store);
+}
+
+/// A plugin's settings and its memory.
+///
+/// Both are functions rather than variables because a Rhai script function
+/// cannot see the enclosing scope — it is closed over its parameters and nothing
+/// else, so there is no `state` variable a hook could reach.
+fn register_storage(
+    engine: &mut Engine,
+    plugin: &str,
+    caps: &Capabilities,
+    store: &Arc<crate::store::Store>,
+) {
+    let settings = crate::store::config(&caps.config_dirs, plugin);
+    engine.register_fn("config", move || settings.clone());
+
+    let reader = Arc::clone(store);
+    engine.register_fn("state", move || reader.get());
+
+    let writer = Arc::clone(store);
+    engine.register_fn("save_state", move |state: Map| writer.set(state));
 }
 
 /// The values a hook returns to steer the run.

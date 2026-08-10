@@ -171,8 +171,16 @@ pub async fn run(
         options.stream_fn = Some(backend);
     }
     if !host.is_empty() {
-        options.plugins.push(host);
+        options.plugins.push(host.clone());
+        options.host = Some(host.clone());
     }
+
+    host.session_start(&aphid_plugin::SessionInfo {
+        id: None,
+        path: None,
+        reason: if resumed.is_some() { "resume" } else { "new" },
+        restored: 0,
+    });
 
     let mut harness = harness::build(options);
     if let Some(transcript) = resumed {
@@ -181,6 +189,7 @@ pub async fn run(
     }
     for note in &harness.notes {
         eprintln!("aphid: {note}");
+        host.notice(note);
     }
     for diagnostic in &harness.diagnostics {
         eprintln!(
@@ -194,5 +203,15 @@ pub async fn run(
     }
 
     let outcome = harness.agent.prompt(prompt).await;
+
+    // One prompt is the whole session here, so it ends as soon as the run does.
+    // This flushes plugin state too.
+    host.session_end(&aphid_plugin::SessionInfo {
+        id: None,
+        path: None,
+        reason: "end",
+        restored: 0,
+    });
+
     (harness, outcome)
 }

@@ -14,6 +14,7 @@ use rhai::{AST, Dynamic, Engine, FuncArgs, Scope};
 
 use crate::caps::{Capabilities, Sink};
 use crate::discover::PluginFile;
+use crate::store::Store;
 use crate::worker::Worker;
 
 /// Every hook name the host knows, and the interest it implies.
@@ -57,6 +58,7 @@ pub struct ScriptPlugin {
     interests: Interest,
     hooks: Vec<String>,
     sink: Arc<dyn Sink>,
+    store: Arc<Store>,
 }
 
 impl ScriptPlugin {
@@ -79,8 +81,10 @@ impl ScriptPlugin {
         let text = std::fs::read_to_string(&file.path)
             .map_err(|error| format!("could not read: {error}"))?;
 
+        let store = Arc::new(Store::load(caps.state_dir.as_deref(), &file.name));
+
         let mut engine = Engine::new();
-        crate::caps::register(&mut engine, &file.name, caps, sink, worker);
+        crate::caps::register(&mut engine, &file.name, caps, sink, worker, &store);
 
         let ast = engine
             .compile(&text)
@@ -104,6 +108,7 @@ impl ScriptPlugin {
             interests,
             hooks,
             sink: Arc::clone(sink),
+            store,
         })
     }
 
@@ -144,6 +149,16 @@ impl ScriptPlugin {
     #[must_use]
     pub fn defines(&self, hook: &str) -> bool {
         self.hooks.iter().any(|name| name == hook)
+    }
+
+    /// Write this plugin's state back, if it changed.
+    ///
+    /// A failure is the plugin's to hear about, not the session's to stop for.
+    pub fn flush(&self) {
+        if let Err(error) = self.store.flush() {
+            self.sink
+                .notify(&self.name, &format!("could not save state: {error}"));
+        }
     }
 
     /// Call a hook.

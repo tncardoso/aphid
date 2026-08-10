@@ -35,14 +35,11 @@ impl ScriptBackend {
     /// backend it already had.
     #[must_use]
     pub fn install(host: &Arc<PluginHost>) -> Option<StreamFn> {
-        host.plugins()
-            .iter()
-            .any(|plugin| plugin.defines(HOOK))
-            .then(|| {
-                Arc::new(Self {
-                    host: Arc::clone(host),
-                }) as StreamFn
-            })
+        host.any_defines(HOOK).then(|| {
+            Arc::new(Self {
+                host: Arc::clone(host),
+            }) as StreamFn
+        })
     }
 
     /// Show an encoded body to every subscriber, in load order.
@@ -56,7 +53,7 @@ impl ScriptBackend {
         };
         let mut current = parsed;
 
-        for plugin in self.host.plugins().iter().filter(|p| p.defines(HOOK)) {
+        for plugin in self.host.defining(HOOK) {
             let payload = convert::object_to_map(&current);
             let Some(returned) = plugin.call(HOOK, (payload,)) else {
                 continue;

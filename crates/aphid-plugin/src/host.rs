@@ -42,6 +42,9 @@ pub struct PluginHost {
     plugins: Vec<Arc<ScriptPlugin>>,
     diagnostics: Vec<Diagnostic>,
     interests: Interest,
+    /// Set while a notice is being dispatched, so a hook that notifies cannot
+    /// call itself back.
+    in_notice: std::sync::atomic::AtomicBool,
 }
 
 impl PluginHost {
@@ -78,6 +81,7 @@ impl PluginHost {
             plugins,
             diagnostics: diagnostics.clone(),
             interests,
+            in_notice: std::sync::atomic::AtomicBool::new(false),
         };
         (host, diagnostics)
     }
@@ -89,6 +93,7 @@ impl PluginHost {
             plugins: Vec::new(),
             diagnostics: Vec::new(),
             interests: Interest::empty(),
+            in_notice: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -107,9 +112,33 @@ impl PluginHost {
         &self.diagnostics
     }
 
+    /// Whether any script defines a hook.
+    ///
+    /// Callers use this to skip building a decorator nobody would use — the
+    /// permission chain, the request backend — so the common case of a plugin
+    /// that watches one thing pays for that one thing only.
+    #[must_use]
+    pub fn any_defines(&self, hook: &str) -> bool {
+        self.plugins.iter().any(|plugin| plugin.defines(hook))
+    }
+
     /// The scripts that define a hook.
-    fn defining<'a>(&'a self, hook: &'a str) -> impl Iterator<Item = &'a Arc<ScriptPlugin>> {
+    pub(crate) fn defining<'a>(
+        &'a self,
+        hook: &'a str,
+    ) -> impl Iterator<Item = &'a Arc<ScriptPlugin>> {
         self.plugins.iter().filter(move |p| p.defines(hook))
+    }
+
+    /// Claim the notice path. `true` means somebody else already has it.
+    pub(crate) fn enter_notice(&self) -> bool {
+        self.in_notice
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn leave_notice(&self) {
+        self.in_notice
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Call a context-taking hook and apply whatever it recorded.
@@ -340,6 +369,11 @@ impl Plugin for PluginHost {
         );
 
         self.with_cx("on_run_end", cx, Some(Dynamic::from_map(payload)));
+
+        // A run is the natural save point: whatever a plugin learned this run is
+        // on disk before the next prompt, and a session that never ends cleanly
+        // still keeps everything up to its last turn.
+        self.flush();
     }
 }
 
@@ -371,6 +405,11 @@ fn verdict(value: &Dynamic) -> Option<(&'static str, String)> {
     .find(|name| *name == kind)?;
 
     Some((known, reason))
+}
+
+/// A `Dynamic` as a map, when it is one.
+pub(crate) fn map_of(value: &Dynamic) -> Option<Map> {
+    as_map(value)
 }
 
 fn as_map(value: &Dynamic) -> Option<Map> {

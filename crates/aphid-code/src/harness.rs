@@ -38,6 +38,8 @@ pub struct HarnessOptions {
     /// [`build`], because loading needs a [`Sink`](aphid_plugin::Sink) and only
     /// the front end knows where its output can safely go.
     pub plugin_files: Vec<aphid_plugin::PluginFile>,
+    /// The loaded scripts. Set by the front end, which does the loading.
+    pub host: Option<Arc<aphid_plugin::PluginHost>>,
     /// Replace the provider backend. `None` talks to the real provider; tests
     /// and replays pass a scripted one.
     pub stream_fn: Option<StreamFn>,
@@ -60,6 +62,7 @@ impl HarnessOptions {
             api_key: None,
             plugins: Vec::new(),
             plugin_files: Vec::new(),
+            host: None,
             stream_fn: None,
         }
     }
@@ -96,6 +99,7 @@ pub fn build(options: HarnessOptions) -> Harness {
         // Taken by the front end before it calls this, so anything left here
         // was never loaded and has nothing to contribute.
         plugin_files: _,
+        host,
         stream_fn,
     } = options;
 
@@ -121,7 +125,12 @@ pub fn build(options: HarnessOptions) -> Harness {
         context_files: context_files.clone(),
         skills: skills.clone(),
     };
-    let system_prompt = prompt::build(&prompt_options, &cwd);
+    let mut system_prompt = prompt::build(&prompt_options, &cwd);
+    // The last word on the prompt, and the only hook that runs before an agent
+    // exists — which is why it is here and not in the loop.
+    if let Some(host) = &host {
+        host.system_prompt(&mut system_prompt);
+    }
 
     let (thinking, note) = model::clamp_thinking(&model, thinking);
     if let Some(note) = note {
@@ -136,7 +145,7 @@ pub fn build(options: HarnessOptions) -> Harness {
     let mut builder = Agent::builder()
         .model(model)
         .system(system_prompt)
-        .tools(tools::all(&workspace))
+        .tools(tools::all(&workspace, host))
         .max_turns(max_turns);
 
     if let Some(level) = thinking {

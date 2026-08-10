@@ -5,8 +5,11 @@
 //! naming the ambiguity instead of a silently wrong edit, and one that supplies
 //! a stale snippet learns the file changed under it.
 
+use std::sync::Arc;
+
 use aphid_agent::{ToolHandler, ToolOutcome, tool_fn};
 use aphid_core::Json;
+use aphid_plugin::{Change, PluginHost};
 use serde::Deserialize;
 
 use super::paths::Workspace;
@@ -58,11 +61,12 @@ pub const DESCRIPTION: &str = "Edit a file by replacing exact spans of text. Eac
      part of the file is changed.";
 
 #[must_use]
-pub fn tool(workspace: &Workspace) -> impl ToolHandler {
+pub fn tool(workspace: &Workspace, host: Option<Arc<PluginHost>>) -> impl ToolHandler {
     let workspace = workspace.clone();
     tool_fn(NAME, DESCRIPTION, schema(), move |params: Params, _cx| {
         let workspace = workspace.clone();
-        async move { execute(&workspace, &params).await }
+        let host = host.clone();
+        async move { execute(&workspace, &params, host.as_deref()).await }
     })
 }
 
@@ -74,7 +78,7 @@ struct Applied {
     new: String,
 }
 
-async fn execute(workspace: &Workspace, params: &Params) -> ToolOutcome {
+async fn execute(workspace: &Workspace, params: &Params, host: Option<&PluginHost>) -> ToolOutcome {
     let path = match workspace.resolve(&params.path) {
         Ok(path) => path,
         Err(error) => return ToolOutcome::error(error),
@@ -139,6 +143,10 @@ async fn execute(workspace: &Workspace, params: &Params) -> ToolOutcome {
 
     if let Err(error) = tokio::fs::write(&path, &working).await {
         return ToolOutcome::error(format!("could not write {}: {error}", params.path));
+    }
+
+    if let Some(host) = host {
+        host.file_change(&path, Change::Edit, Some(&original), &working);
     }
 
     let relative = workspace.display(&path);

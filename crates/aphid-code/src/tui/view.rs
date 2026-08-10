@@ -42,6 +42,9 @@ pub enum Entry {
 #[derive(Default)]
 pub struct View {
     entries: Vec<Entry>,
+    /// Told about every notice, so a plugin can watch what the user is shown.
+    /// One field here beats a call at each of the fifteen places that push one.
+    host: Option<std::sync::Arc<aphid_plugin::PluginHost>>,
     /// Call id to entry index, so progress and results find their call.
     by_call: HashMap<String, usize>,
     /// Lines scrolled up from the bottom. Zero means pinned to the newest.
@@ -50,6 +53,13 @@ pub struct View {
 }
 
 impl View {
+    /// Report notices to these plugins.
+    pub fn watch(&mut self, host: std::sync::Arc<aphid_plugin::PluginHost>) {
+        if host.any_defines("on_notify") {
+            self.host = Some(host);
+        }
+    }
+
     #[must_use]
     pub fn entries(&self) -> &[Entry] {
         &self.entries
@@ -67,7 +77,11 @@ impl View {
     }
 
     pub fn push_notice(&mut self, text: impl Into<String>) {
-        self.entries.push(Entry::Notice(text.into()));
+        let text = text.into();
+        if let Some(host) = &self.host {
+            host.notice(&text);
+        }
+        self.entries.push(Entry::Notice(text));
         self.pin();
     }
 
