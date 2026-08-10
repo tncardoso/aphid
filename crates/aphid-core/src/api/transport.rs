@@ -22,7 +22,7 @@ use crate::view::MessageRef;
 
 /// One connection pool for the process. Building a client is expensive enough
 /// that a per-request one would show up in the startup budget.
-fn client() -> &'static reqwest::Client {
+pub(crate) fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()

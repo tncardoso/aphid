@@ -72,6 +72,34 @@ pub struct OpenAiCompletionsCompat {
 }
 
 impl OpenAiCompletionsCompat {
+    /// A generic third-party OpenAI-compatible endpoint.
+    ///
+    /// The 143 providers models.dev tags `@ai-sdk/openai-compatible` are servers
+    /// that implement the protocol rather than OpenAI itself, and the fields
+    /// they most reliably reject are the newest ones. This profile is OpenAI's
+    /// behaviour minus those: the legacy `max_tokens`, no `store`, no
+    /// `developer` role, no `strict` on tools, no long cache retention. It is a
+    /// starting point a user can sharpen, not a claim about any one endpoint.
+    #[must_use]
+    pub const fn compatible() -> Self {
+        Self {
+            supports_store: false,
+            supports_developer_role: false,
+            supports_reasoning_effort: true,
+            supports_usage_in_streaming: true,
+            supports_finish_reason: true,
+            supports_strict_mode: false,
+            supports_long_cache_retention: false,
+            requires_tool_result_name: false,
+            requires_assistant_after_tool_result: false,
+            requires_thinking_as_text: false,
+            requires_reasoning_content_on_assistant_messages: false,
+            supports_temperature_while_thinking: true,
+            max_tokens_field: MaxTokensField::MaxTokens,
+            thinking_format: ThinkingFormat::OpenAi,
+        }
+    }
+
     /// DeepSeek's profile.
     #[must_use]
     pub const fn deepseek() -> Self {

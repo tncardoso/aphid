@@ -8,137 +8,85 @@ use aphid_code::model::Catalog;
 use aphid_code::plugins::{DenyAll, Permissions};
 use aphid_code::session::{self, sessions_dir};
 use aphid_code::{Workspace, headless, tui};
-use aphid_core::{ThinkingLevel, providers::deepseek};
+use aphid_core::ThinkingLevel;
+use aphid_core::providers::deepseek;
 
-pub const USAGE: &str = "\
-aphid — a coding agent
+use crate::Think;
 
-USAGE:
-    aphid [OPTIONS]                 open the terminal UI
-    aphid [OPTIONS] -p <prompt>     run one prompt and print the result
-    aphid raw   [OPTIONS] <prompt>  stream a single completion, printing protocol events
-    aphid agent [OPTIONS] <prompt>  run the plain agent loop with a demo tool
-
-OPTIONS:
-    -p, --print <prompt>  run headless: stream to stdout and exit
-    --model <name>        model id, or a unique part of one (default: the first known)
-    --models              list the known models and exit
-    --think <level>       off | minimal | low | medium | high | xhigh | max
-    --system <text>       replace the built-in instructions
-    --append-system <t>   add to the instructions
-    --resume [id]         continue the newest session here, or one named by id
-    --sessions            list saved sessions for this workspace and exit
-    --confirm             ask before running anything that changes the workspace
-    --no-context          skip AGENTS.md and skills
-    --max-turns <n>       stop a run after this many provider requests
-    --quiet               headless: drop the line-by-line output of running tools
-    -h, --help            show this help
-
-ENVIRONMENT:
-    DEEPSEEK_API_KEY      required
-";
-
+/// The coding agent's options.
+///
+/// Flattened into the top-level command, so `aphid <prompt>` needs no
+/// subcommand at all.
+#[derive(Debug, clap::Args)]
 pub struct Args {
-    pub prompt: Option<String>,
+    /// Run headless: stream to stdout and exit
+    #[arg(short = 'p', long = "print", value_name = "PROMPT")]
+    pub print: Option<String>,
+    /// The prompt. Given one, aphid runs headless rather than opening the UI
+    #[arg(value_name = "PROMPT")]
+    pub words: Vec<String>,
+    /// Model id, or a unique part of one (default: the first known)
+    #[arg(long, value_name = "NAME")]
     pub model: Option<String>,
-    pub think: Option<String>,
-    pub system: Option<String>,
-    pub append_system: Option<String>,
-    /// `Some(None)` is `--resume` with no id: the newest session here.
-    pub resume: Option<Option<String>>,
-    pub confirm: bool,
-    pub no_context: bool,
-    pub max_turns: Option<u32>,
-    pub quiet: bool,
+    /// List the known models and exit
+    #[arg(long = "models")]
     pub list_models: bool,
+    /// How hard to think
+    #[arg(long, value_name = "LEVEL")]
+    pub think: Option<Think>,
+    /// Replace the built-in instructions
+    #[arg(long, value_name = "TEXT")]
+    pub system: Option<String>,
+    /// Add to the instructions
+    #[arg(long, value_name = "TEXT")]
+    pub append_system: Option<String>,
+    /// Continue the newest session here, or one named by id
+    #[arg(long, value_name = "ID", num_args = 0..=1)]
+    pub resume: Option<Option<String>>,
+    /// List saved sessions for this workspace and exit
+    #[arg(long = "sessions")]
     pub list_sessions: bool,
+    /// Ask before running anything that changes the workspace
+    #[arg(long)]
+    pub confirm: bool,
+    /// Skip AGENTS.md and skills
+    #[arg(long)]
+    pub no_context: bool,
+    /// Stop a run after this many provider requests
+    #[arg(long, value_name = "N")]
+    pub max_turns: Option<u32>,
+    /// Headless: drop the line-by-line output of running tools
+    #[arg(long)]
+    pub quiet: bool,
 }
 
 impl Args {
-    /// `Ok(None)` means help was requested.
-    pub fn parse(args: impl Iterator<Item = String>) -> Result<Option<Self>, String> {
-        let mut parsed = Args {
-            prompt: None,
-            model: None,
-            think: None,
-            system: None,
-            append_system: None,
-            resume: None,
-            confirm: false,
-            no_context: false,
-            max_turns: None,
-            quiet: false,
-            list_models: false,
-            list_sessions: false,
-        };
-        let mut args = args.peekable();
-
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "-h" | "--help" => return Ok(None),
-                "--confirm" => parsed.confirm = true,
-                "--no-context" => parsed.no_context = true,
-                "--quiet" => parsed.quiet = true,
-                "--models" => parsed.list_models = true,
-                "--sessions" => parsed.list_sessions = true,
-                "-p" | "--print" => parsed.prompt = Some(value(&mut args, "--print")?),
-                "--model" => parsed.model = Some(value(&mut args, "--model")?),
-                "--think" => parsed.think = Some(value(&mut args, "--think")?),
-                "--system" => parsed.system = Some(value(&mut args, "--system")?),
-                "--append-system" => {
-                    parsed.append_system = Some(value(&mut args, "--append-system")?);
-                }
-                "--max-turns" => {
-                    let raw = value(&mut args, "--max-turns")?;
-                    parsed.max_turns =
-                        Some(raw.parse().map_err(|_| format!("`{raw}` is not a count"))?);
-                }
-                "--resume" => {
-                    // The id is optional, so only take the next word when it is
-                    // not another flag.
-                    let id = match args.peek() {
-                        Some(next) if !next.starts_with('-') => args.next(),
-                        _ => None,
-                    };
-                    parsed.resume = Some(id);
-                }
-                other if other.starts_with('-') => {
-                    return Err(format!("unknown option `{other}`"));
-                }
-                // A bare word is the prompt, so `aphid "fix the test"` works.
-                word => match &mut parsed.prompt {
-                    Some(prompt) => {
-                        prompt.push(' ');
-                        prompt.push_str(word);
-                    }
-                    None => parsed.prompt = Some(word.to_owned()),
-                },
-            }
+    /// The prompt, however it was given.
+    ///
+    /// `-p` and bare words mean the same thing and always have: either one runs
+    /// headless. Only an empty prompt opens the terminal UI.
+    #[must_use]
+    pub fn prompt(&self) -> Option<String> {
+        if let Some(prompt) = &self.print {
+            return Some(prompt.clone());
         }
-
-        Ok(Some(parsed))
+        if self.words.is_empty() {
+            return None;
+        }
+        Some(self.words.join(" "))
     }
-}
 
-fn value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
-    args.next().ok_or_else(|| format!("`{flag}` needs a value"))
-}
-
-fn thinking_level(raw: &str) -> Result<Option<ThinkingLevel>, String> {
-    Ok(match raw {
-        "off" | "none" => None,
-        "minimal" => Some(ThinkingLevel::Minimal),
-        "low" => Some(ThinkingLevel::Low),
-        "medium" => Some(ThinkingLevel::Medium),
-        "high" => Some(ThinkingLevel::High),
-        "xhigh" => Some(ThinkingLevel::XHigh),
-        "max" => Some(ThinkingLevel::Max),
-        other => return Err(format!("`{other}` is not a thinking level")),
-    })
+    #[must_use]
+    pub fn thinking(&self) -> Option<ThinkingLevel> {
+        self.think.and_then(Think::level)
+    }
 }
 
 pub async fn run(args: Args) -> ExitCode {
     let catalog = Catalog::new();
+    for diagnostic in catalog.diagnostics() {
+        eprintln!("aphid: {diagnostic}");
+    }
 
     if args.list_models {
         for model in catalog.models() {
@@ -178,21 +126,17 @@ pub async fn run(args: Args) -> ExitCode {
         None => catalog.default_model(),
     };
 
-    let thinking = match args.think.as_deref().map(thinking_level).transpose() {
-        Ok(level) => level.flatten(),
+    let thinking = args.thinking();
+
+    let api_key = match api_key(&model) {
+        Ok(key) => key,
         Err(message) => {
             eprintln!("aphid: {message}");
-            return ExitCode::from(2);
-        }
-    };
-
-    let api_key = match std::env::var(deepseek::API_KEY_ENV) {
-        Ok(key) if !key.is_empty() => key,
-        _ => {
-            eprintln!("aphid: {} is not set", deepseek::API_KEY_ENV);
             return ExitCode::FAILURE;
         }
     };
+
+    let prompt = args.prompt();
 
     let mut options = HarnessOptions::new(workspace.clone());
     options.model = model;
@@ -213,7 +157,7 @@ pub async fn run(args: Args) -> ExitCode {
         }
     };
 
-    match args.prompt {
+    match prompt {
         // Headless has no terminal to prompt at, so the gate refuses rather
         // than silently allowing what `--confirm` was meant to stop.
         Some(prompt) => {
@@ -256,6 +200,22 @@ pub async fn run(args: Args) -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+    }
+}
+
+/// The key for this model, from the variable the model itself names.
+///
+/// Carried on the model rather than fixed at the provider, so adding an OpenAI
+/// or Zhipu model to `~/.aphid/models.json` reads that provider's variable
+/// instead of DeepSeek's.
+fn api_key(model: &aphid_core::Model) -> Result<String, String> {
+    let variable = model
+        .api_key_env
+        .as_deref()
+        .unwrap_or(deepseek::API_KEY_ENV);
+    match std::env::var(variable) {
+        Ok(key) if !key.is_empty() => Ok(key),
+        _ => Err(format!("{variable} is not set, and {} needs it", model.id)),
     }
 }
 

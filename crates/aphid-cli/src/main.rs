@@ -1,12 +1,19 @@
-//! Streams one DeepSeek completion and prints every protocol event as it fires.
+//! The `aphid` binary: four front ends over one harness.
 //!
-//! This is the smallest thing that exercises the whole path: encode a request
-//! out of a [`Transcript`] arena, stream the response, resolve each delta span,
-//! and commit the finished turn back into the transcript.
+//! `aphid` is the coding agent, and the default — everything else is a
+//! subcommand. `raw` streams one completion and prints every protocol event as
+//! it fires. `agent` runs the plain agent loop with a demo tool. `model`
+//! manages `~/.aphid/models.json`.
+//!
+//! The debugging front ends exist because the interesting failures are on the
+//! wire: `raw --events` shows each delta with its span, and `raw --request`
+//! prints the encoded body without sending it.
+
+mod code;
+mod model;
+mod render;
 
 mod agent;
-mod code;
-mod render;
 
 use std::pin::Pin;
 use std::process::ExitCode;
@@ -16,62 +23,122 @@ use std::time::Instant;
 use aphid_core::api::{self, CompletionStream};
 use aphid_core::providers::deepseek;
 use aphid_core::{AssistantStream, Event, SimpleStreamOptions, ThinkingLevel, Tool, Transcript};
+use clap::{Parser, Subcommand, ValueEnum};
 use futures_core::Stream;
 
 use render::{Style, banner, summary};
 
-const USAGE: &str = "\
-aphid raw / aphid agent — protocol-level tools for debugging the harness
+/// A fast and hackable agent harness.
+#[derive(Debug, Parser)]
+#[command(
+    name = "aphid",
+    version,
+    about = "A coding agent, and the protocol-level tools to debug it",
+    // The coding agent's own options are the top level, so `aphid <prompt>`
+    // needs no subcommand. They cannot be combined with one.
+    args_conflicts_with_subcommands = true,
+    subcommand_negates_reqs = true
+)]
+struct Cli {
+    #[command(flatten)]
+    code: code::Args,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
 
-USAGE:
-    aphid raw   [OPTIONS] <prompt>...    stream a single completion
-    aphid agent [OPTIONS] <prompt>...    run the agent loop with a demo tool
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Stream a single completion, printing protocol events
+    Raw(ProtocolArgs),
+    /// Run the plain agent loop with a demo tool
+    Agent(ProtocolArgs),
+    /// Manage the models in ~/.aphid/models.json
+    #[command(alias = "models", subcommand)]
+    Model(model::Command),
+}
 
-OPTIONS:
-    --pro                 use deepseek-v4-pro (default: deepseek-v4-flash)
-    --system <text>       prepend a system message
-    --think <level>       minimal | low | medium | high | xhigh | max
-    --max-tokens <n>      cap the response length
-    --temperature <f>     sampling temperature
-    --tool                offer a demo `get_weather` tool, to see tool-call deltas
-    --events              print every Delta event with its span, instead of the text
-    --request             print the encoded request body and exit (single-shot only)
-    -h, --help            show this help
+/// The options `raw` and `agent` share.
+#[derive(Debug, clap::Args)]
+pub struct ProtocolArgs {
+    /// The prompt
+    #[arg(value_name = "PROMPT", required = true)]
+    prompt: Vec<String>,
+    /// Use deepseek-v4-pro (default: deepseek-v4-flash)
+    #[arg(long)]
+    pro: bool,
+    /// Prepend a system message
+    #[arg(long, value_name = "TEXT")]
+    system: Option<String>,
+    /// How hard to think
+    #[arg(long, value_name = "LEVEL")]
+    think: Option<Think>,
+    /// Cap the response length
+    #[arg(long, value_name = "N")]
+    max_tokens: Option<u32>,
+    /// Sampling temperature
+    #[arg(long, value_name = "F")]
+    temperature: Option<f32>,
+    /// Offer a demo `get_weather` tool, to see tool-call deltas
+    #[arg(long)]
+    tool: bool,
+    /// Print every Delta event with its span, instead of the text
+    #[arg(long)]
+    events: bool,
+    /// Print the encoded request body and exit (single-shot only)
+    #[arg(long)]
+    request: bool,
+}
 
-ENVIRONMENT:
-    DEEPSEEK_API_KEY      required, unless --request is given
-";
+impl ProtocolArgs {
+    fn prompt(&self) -> String {
+        self.prompt.join(" ")
+    }
 
-/// Which of the three front ends was asked for.
-enum Mode {
-    /// The coding agent. The default, so `aphid` alone opens the UI.
-    Code,
-    /// One request, every protocol event printed.
-    Raw,
-    /// The plain agent loop with a demo tool.
-    Agent,
+    fn think(&self) -> Option<ThinkingLevel> {
+        self.think.and_then(Think::level)
+    }
+}
+
+/// How much reasoning to ask for, on the command line.
+///
+/// `off` is the absence of a level rather than a seventh one, which is why this
+/// maps to `Option<ThinkingLevel>` rather than to the enum directly.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Think {
+    Off,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl Think {
+    #[must_use]
+    pub fn level(self) -> Option<ThinkingLevel> {
+        Some(match self {
+            Think::Off => return None,
+            Think::Minimal => ThinkingLevel::Minimal,
+            Think::Low => ThinkingLevel::Low,
+            Think::Medium => ThinkingLevel::Medium,
+            Think::High => ThinkingLevel::High,
+            Think::Xhigh => ThinkingLevel::XHigh,
+            Think::Max => ThinkingLevel::Max,
+        })
+    }
 }
 
 fn main() -> ExitCode {
-    // `raw` and `agent` are subcommands, so they only count as one when they
-    // come first. Everything else is the coding agent.
-    let mut argv: Vec<String> = std::env::args().skip(1).collect();
-    let mode = match argv.first().map(String::as_str) {
-        Some("raw") => Mode::Raw,
-        Some("agent") => Mode::Agent,
-        _ => Mode::Code,
-    };
-    if !matches!(mode, Mode::Code) {
-        argv.remove(0);
-    }
+    let cli = Cli::parse();
 
     // The coding agent needs more than one worker: a permission prompt blocks
-    // the agent's task until the UI answers on another one.
-    let runtime = match mode {
-        Mode::Code => tokio::runtime::Builder::new_multi_thread()
+    // the agent's task until the UI answers on another one. Nothing else does.
+    let runtime = match cli.command {
+        None => tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build(),
-        _ => tokio::runtime::Builder::new_current_thread()
+        Some(_) => tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build(),
     };
@@ -83,39 +150,15 @@ fn main() -> ExitCode {
         }
     };
 
-    if let Mode::Code = mode {
-        return match code::Args::parse(argv.into_iter()) {
-            Ok(Some(args)) => runtime.block_on(code::run(args)),
-            Ok(None) => {
-                print!("{}", code::USAGE);
-                ExitCode::SUCCESS
-            }
-            Err(message) => {
-                eprintln!("aphid: {message}\n\n{}", code::USAGE);
-                ExitCode::from(2)
-            }
-        };
-    }
-
-    let args = match Args::parse(argv.into_iter()) {
-        Ok(Some(args)) => args,
-        Ok(None) => {
-            print!("{USAGE}");
-            return ExitCode::SUCCESS;
-        }
-        Err(message) => {
-            eprintln!("aphid: {message}\n\n{USAGE}");
-            return ExitCode::from(2);
-        }
-    };
-
-    match mode {
-        Mode::Agent => runtime.block_on(agent::run(args)),
-        _ => runtime.block_on(run(args)),
+    match cli.command {
+        None => runtime.block_on(code::run(cli.code)),
+        Some(Command::Raw(args)) => runtime.block_on(run(args)),
+        Some(Command::Agent(args)) => runtime.block_on(agent::run(args)),
+        Some(Command::Model(command)) => runtime.block_on(model::run(command)),
     }
 }
 
-async fn run(args: Args) -> ExitCode {
+async fn run(args: ProtocolArgs) -> ExitCode {
     let style = Style::detect();
     let model = if args.pro {
         deepseek::pro()
@@ -132,10 +175,10 @@ async fn run(args: Args) -> ExitCode {
     if let Some(system) = &args.system {
         transcript.push_system(system);
     }
-    transcript.push_user(&args.prompt);
+    transcript.push_user(&args.prompt());
 
     let mut options = SimpleStreamOptions {
-        reasoning: args.think,
+        reasoning: args.think(),
         ..Default::default()
     };
     options.stream.max_tokens = args.max_tokens;
@@ -162,7 +205,7 @@ async fn run(args: Args) -> ExitCode {
         }
     }
 
-    banner(&style, &model, args.think);
+    banner(&style, &model, args.think());
     let started = Instant::now();
     let mut stream = api::stream(&model, &transcript, &tools, &options).await;
     let mut printer = render::EventPrinter::new(style.clone(), args.events);
@@ -222,93 +265,85 @@ fn pretty_json(body: &str) -> String {
         .unwrap_or_else(|_| body.to_owned())
 }
 
-pub struct Args {
-    prompt: String,
-    system: Option<String>,
-    think: Option<ThinkingLevel>,
-    max_tokens: Option<u32>,
-    temperature: Option<f32>,
-    pro: bool,
-    tool: bool,
-    events: bool,
-    request: bool,
-}
-
-impl Args {
-    /// `Ok(None)` means help was requested.
-    fn parse(args: impl Iterator<Item = String>) -> Result<Option<Self>, String> {
-        let mut prompt: Vec<String> = Vec::new();
-        let mut parsed = Args {
-            prompt: String::new(),
-            system: None,
-            think: None,
-            max_tokens: None,
-            temperature: None,
-            pro: false,
-            tool: false,
-            events: false,
-            request: false,
-        };
-        let mut args = args.peekable();
-
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "-h" | "--help" => return Ok(None),
-                "--pro" => parsed.pro = true,
-                "--tool" => parsed.tool = true,
-                "--events" => parsed.events = true,
-                "--request" => parsed.request = true,
-                "--system" => parsed.system = Some(value(&mut args, "--system")?),
-                "--think" => parsed.think = Some(thinking_level(&value(&mut args, "--think")?)?),
-                "--max-tokens" => {
-                    let raw = value(&mut args, "--max-tokens")?;
-                    parsed.max_tokens = Some(
-                        raw.parse()
-                            .map_err(|_| format!("`{raw}` is not a token count"))?,
-                    );
-                }
-                "--temperature" => {
-                    let raw = value(&mut args, "--temperature")?;
-                    parsed.temperature = Some(
-                        raw.parse()
-                            .map_err(|_| format!("`{raw}` is not a number"))?,
-                    );
-                }
-                other if other.starts_with("--") => {
-                    return Err(format!("unknown option `{other}`"));
-                }
-                word => prompt.push(word.to_owned()),
-            }
-        }
-
-        if prompt.is_empty() {
-            return Err("a prompt is required".to_owned());
-        }
-        parsed.prompt = prompt.join(" ");
-        Ok(Some(parsed))
-    }
-}
-
-fn value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
-    args.next().ok_or_else(|| format!("`{flag}` needs a value"))
-}
-
-fn thinking_level(raw: &str) -> Result<ThinkingLevel, String> {
-    Ok(match raw {
-        "minimal" => ThinkingLevel::Minimal,
-        "low" => ThinkingLevel::Low,
-        "medium" => ThinkingLevel::Medium,
-        "high" => ThinkingLevel::High,
-        "xhigh" => ThinkingLevel::XHigh,
-        "max" => ThinkingLevel::Max,
-        other => return Err(format!("`{other}` is not a thinking level")),
-    })
-}
-
 /// Resolve the bytes an [`Event::Delta`] names; everything else carries no text.
 fn delta_text<'s>(event: &Event, stream: &'s impl AssistantStream) -> &'s str {
     match *event {
         Event::Delta { span, .. } => stream.text(span),
         _ => "",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn the_command_tree_is_well_formed() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn a_bare_word_is_a_prompt_for_the_coding_agent() {
+        let cli = Cli::parse_from(["aphid", "fix", "the", "test"]);
+        assert!(cli.command.is_none());
+        assert_eq!(cli.code.prompt().as_deref(), Some("fix the test"));
+    }
+
+    #[test]
+    fn no_arguments_opens_the_ui() {
+        let cli = Cli::parse_from(["aphid"]);
+        assert!(cli.command.is_none());
+        assert!(cli.code.prompt().is_none());
+    }
+
+    #[test]
+    fn a_leading_subcommand_wins_over_the_prompt() {
+        let cli = Cli::parse_from(["aphid", "raw", "--pro", "hi"]);
+        let Some(Command::Raw(args)) = cli.command else {
+            panic!("expected raw");
+        };
+        assert!(args.pro);
+        assert_eq!(args.prompt(), "hi");
+    }
+
+    #[test]
+    fn off_is_the_absence_of_a_thinking_level() {
+        let cli = Cli::parse_from(["aphid", "-p", "hi", "--think", "off"]);
+        assert_eq!(cli.code.think, Some(Think::Off));
+        assert_eq!(cli.code.think.and_then(Think::level), None);
+    }
+
+    #[test]
+    fn resume_takes_an_optional_id() {
+        let cli = Cli::parse_from(["aphid", "--resume"]);
+        assert_eq!(cli.code.resume, Some(None));
+
+        let cli = Cli::parse_from(["aphid", "--resume", "20260810T012035-0000"]);
+        assert_eq!(
+            cli.code.resume,
+            Some(Some("20260810T012035-0000".to_owned()))
+        );
+
+        let cli = Cli::parse_from(["aphid"]);
+        assert_eq!(cli.code.resume, None);
+    }
+
+    #[test]
+    fn models_is_an_alias_for_model() {
+        let cli = Cli::parse_from(["aphid", "models", "update"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Model(model::Command::Update { .. }))
+        ));
+    }
+
+    #[test]
+    fn a_qualified_name_reaches_model_add() {
+        let cli = Cli::parse_from(["aphid", "model", "add", "deepseek/deepseek-v4-pro"]);
+        let Some(Command::Model(model::Command::Add(args))) = cli.command else {
+            panic!("expected model add");
+        };
+        assert_eq!(args.name, "deepseek/deepseek-v4-pro");
     }
 }

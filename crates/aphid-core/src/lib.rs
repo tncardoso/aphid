@@ -67,6 +67,7 @@
 pub mod api;
 mod arena;
 mod buffer;
+pub mod catalog;
 mod compat;
 mod content;
 mod error;
@@ -75,6 +76,7 @@ mod id;
 pub mod json;
 mod message;
 mod model;
+pub mod models_dev;
 mod options;
 mod provider;
 pub mod providers;
@@ -86,6 +88,7 @@ mod view;
 
 pub use api::{CompletionStream, encode_request};
 pub use buffer::MessageBuffer;
+pub use catalog::{ModelEntry, ModelsConfig};
 pub use compat::{Compat, MaxTokensField, OpenAiCompletionsCompat, ThinkingFormat};
 pub use content::BlockKind;
 pub use error::{Diagnostic, DiagnosticError, Error, Result};

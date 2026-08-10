@@ -120,6 +120,11 @@ pub fn build(options: HarnessOptions) -> Harness {
         notes.push(note);
     }
 
+    // A catalog that could not be read is worth saying out loud, once, where the
+    // UI and the headless runner both already print notes.
+    let catalog = Catalog::new();
+    notes.extend(catalog.diagnostics().iter().cloned());
+
     let mut builder = Agent::builder()
         .model(model)
         .system(system_prompt)
@@ -142,7 +147,7 @@ pub fn build(options: HarnessOptions) -> Harness {
     Harness {
         agent: builder.build(),
         workspace,
-        catalog: Catalog::new(),
+        catalog,
         context_files,
         skills,
         diagnostics,

@@ -96,6 +96,7 @@ fn model(id: &str, name: &str, cost: ModelCost) -> Model {
         api: Api::OpenAiCompletions,
         provider: ProviderId::DEEPSEEK,
         base_url: BASE_URL.to_owned(),
+        api_key_env: Some(CompactString::const_new(API_KEY_ENV)),
         reasoning: true,
         thinking_levels: thinking_levels(),
         input: InputModalities::TEXT,

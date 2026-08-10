@@ -15,7 +15,7 @@ use aphid_agent::{
 use aphid_core::providers::deepseek;
 use aphid_core::{Event, SimpleStreamOptions};
 
-use crate::Args;
+use crate::ProtocolArgs;
 use crate::render::{EventPrinter, Style, banner};
 
 /// Prints the run as it happens: protocol events through the existing
@@ -137,7 +137,7 @@ fn weather_tool() -> impl aphid_agent::ToolHandler {
     )
 }
 
-pub async fn run(args: Args) -> ExitCode {
+pub async fn run(args: ProtocolArgs) -> ExitCode {
     let style = Style::detect();
     let model = if args.pro {
         deepseek::pro()
@@ -146,7 +146,7 @@ pub async fn run(args: Args) -> ExitCode {
     };
 
     let mut options = SimpleStreamOptions {
-        reasoning: args.think,
+        reasoning: args.think(),
         ..Default::default()
     };
     options.stream.max_tokens = args.max_tokens;
@@ -173,9 +173,9 @@ pub async fn run(args: Args) -> ExitCode {
     }
     let mut agent = builder.build();
 
-    banner(&style, &model, args.think);
+    banner(&style, &model, args.think());
     let started = Instant::now();
-    let outcome = agent.prompt(&args.prompt).await;
+    let outcome = agent.prompt(&args.prompt()).await;
     let elapsed = started.elapsed();
 
     println!(

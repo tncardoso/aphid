@@ -116,6 +116,15 @@ impl Agent {
         self.model = model;
     }
 
+    /// Swap the credential mid-session.
+    ///
+    /// Needed alongside [`set_model`](Self::set_model): a switch to a model from
+    /// another provider would otherwise keep sending the previous provider's
+    /// key. `None` clears it.
+    pub fn set_api_key(&mut self, key: Option<compact_str::CompactString>) {
+        self.options.stream.request.api_key = key;
+    }
+
     #[must_use]
     pub fn tools(&self) -> &Tools {
         &self.tools

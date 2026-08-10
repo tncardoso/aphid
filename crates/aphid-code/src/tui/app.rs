@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use aphid_agent::{Agent, AgentHandle, RunOutcome};
 use aphid_core::{Model, ThinkingLevel, Transcript};
+use compact_str::CompactString;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -234,6 +235,17 @@ impl App {
             .push_notice(format!("── switched to {} ──", model.id));
         if let Some(note) = note {
             self.view.push_notice(note);
+        }
+
+        // The key belongs to the provider, not to the session: switching to a
+        // model from somewhere else has to switch credentials with it, or the
+        // next request goes out signed by the wrong provider.
+        match api_key(&model) {
+            Ok(key) => agent.set_api_key(Some(key)),
+            Err(note) => {
+                agent.set_api_key(None);
+                self.view.push_notice(note);
+            }
         }
 
         agent.set_thinking(thinking);
@@ -637,6 +649,21 @@ fn restore(terminal: &mut Screen) -> std::io::Result<()> {
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
     terminal.backend_mut().execute(cursor::Show)?;
     Ok(())
+}
+
+/// The key for a model, from the variable the model itself names.
+///
+/// The error is a notice rather than a failure: the user may be about to export
+/// the variable, and a session that dies on a mistyped `/model` would be worse
+/// than one that says what is missing.
+fn api_key(model: &Model) -> Result<CompactString, String> {
+    let Some(variable) = &model.api_key_env else {
+        return Err(format!("{} names no API key variable", model.id));
+    };
+    match std::env::var(variable.as_str()) {
+        Ok(key) if !key.is_empty() => Ok(key.into()),
+        _ => Err(format!("{variable} is not set, and {} needs it", model.id)),
+    }
 }
 
 #[cfg(test)]

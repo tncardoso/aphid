@@ -107,13 +107,19 @@ impl ModelCost {
 }
 
 /// Everything aphid needs to know to talk to one model.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Model {
     pub id: CompactString,
     pub name: String,
     pub api: Api,
     pub provider: ProviderId,
     pub base_url: String,
+    /// Environment variable holding this model's API key.
+    ///
+    /// Carried on the model rather than looked up per provider so a catalog
+    /// assembled from user configuration can name its own variable, and so
+    /// switching models mid-session switches credentials with them.
+    pub api_key_env: Option<CompactString>,
     /// Whether the model reasons at all. When false, thinking options are
     /// ignored rather than rejected.
     pub reasoning: bool,

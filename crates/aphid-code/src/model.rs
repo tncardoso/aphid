@@ -1,14 +1,18 @@
 //! The models `/model` and `--model` can choose between.
 
+use aphid_core::catalog::{self, ModelEntry};
 use aphid_core::{Model, ModelThinkingLevel, ThinkingLevel, providers::deepseek};
 
 /// The models aphid knows about.
 ///
-/// Today that is whatever `aphid-core` ships providers for. Adding a provider
-/// there extends `/model` with no change here.
-#[derive(Clone, Debug)]
+/// Two sources, in order: the providers `aphid-core` ships, then the user's own
+/// `~/.aphid/models.json`. A configured model with the same id as a built-in
+/// replaces it, so the file is the last word without having to restate what is
+/// already right.
+#[derive(Clone, Debug, Default)]
 pub struct Catalog {
     models: Vec<Model>,
+    diagnostics: Vec<String>,
 }
 
 /// Why a name did not resolve to exactly one model.
@@ -36,16 +40,58 @@ impl std::fmt::Display for ResolveError {
 impl std::error::Error for ResolveError {}
 
 impl Catalog {
+    /// The built-in models, extended by `~/.aphid/models.json`.
+    ///
+    /// Never fails. A catalog file that cannot be read leaves a diagnostic and
+    /// the built-ins behind — a typo in a config file should not stop the agent
+    /// from starting.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            models: deepseek::models(),
+        let Some(path) = catalog::config_path() else {
+            return Self::from_parts(deepseek::models(), &[]);
+        };
+        match catalog::load(&path) {
+            Ok(config) => Self::from_parts(deepseek::models(), config.models()),
+            Err(error) => {
+                let mut catalog = Self::from_parts(deepseek::models(), &[]);
+                catalog.diagnostics.push(error.to_string());
+                catalog
+            }
         }
+    }
+
+    /// Build a catalog from an explicit pair of sources.
+    ///
+    /// The seam tests use, so none of them has to move `$HOME`. An entry that
+    /// cannot become a [`Model`] is reported and skipped, not fatal.
+    #[must_use]
+    pub fn from_parts(builtins: Vec<Model>, entries: &[ModelEntry]) -> Self {
+        let mut catalog = Self {
+            models: builtins,
+            diagnostics: Vec::new(),
+        };
+        for entry in entries {
+            match Model::try_from(entry) {
+                Ok(model) => match catalog.models.iter_mut().find(|held| held.id == model.id) {
+                    Some(held) => *held = model,
+                    None => catalog.models.push(model),
+                },
+                Err(error) => catalog.diagnostics.push(error.to_string()),
+            }
+        }
+        catalog
     }
 
     #[must_use]
     pub fn models(&self) -> &[Model] {
         &self.models
+    }
+
+    /// What went wrong loading the catalog, if anything. Worth surfacing: a
+    /// model that silently does not exist is worse than one that reports why.
+    #[must_use]
+    pub fn diagnostics(&self) -> &[String] {
+        &self.diagnostics
     }
 
     /// The model used when none was asked for.
@@ -123,12 +169,6 @@ impl Catalog {
             .iter()
             .map(|model| model.id.to_string())
             .collect()
-    }
-}
-
-impl Default for Catalog {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -214,9 +254,15 @@ pub fn clamp_thinking(
 mod tests {
     use super::*;
 
+    /// The built-ins alone. Tests must not read the real `~/.aphid/models.json`,
+    /// or they would pass or fail depending on whose machine they run on.
+    fn catalog() -> Catalog {
+        Catalog::from_parts(deepseek::models(), &[])
+    }
+
     #[test]
     fn an_exact_id_resolves() {
-        let catalog = Catalog::new();
+        let catalog = catalog();
         assert_eq!(
             catalog.resolve("deepseek-v4-pro").unwrap().id,
             "deepseek-v4-pro"
@@ -225,14 +271,14 @@ mod tests {
 
     #[test]
     fn a_trailing_segment_resolves() {
-        let catalog = Catalog::new();
+        let catalog = catalog();
         assert_eq!(catalog.resolve("pro").unwrap().id, "deepseek-v4-pro");
         assert_eq!(catalog.resolve("flash").unwrap().id, "deepseek-v4-flash");
     }
 
     #[test]
     fn an_unknown_name_lists_the_candidates() {
-        let catalog = Catalog::new();
+        let catalog = catalog();
         let error = catalog.resolve("gpt-9").unwrap_err();
         let ResolveError::Unknown { candidates } = error else {
             panic!("expected Unknown, got {error:?}");
@@ -242,7 +288,7 @@ mod tests {
 
     #[test]
     fn an_ambiguous_prefix_is_refused() {
-        let catalog = Catalog::new();
+        let catalog = catalog();
         // Every deepseek model shares this prefix.
         let error = catalog.resolve("deepseek").unwrap_err();
         let ResolveError::Ambiguous { matches } = error else {
@@ -253,7 +299,7 @@ mod tests {
 
     #[test]
     fn cycling_wraps_around_the_catalog() {
-        let catalog = Catalog::new();
+        let catalog = catalog();
         let first = catalog.default_model();
         let mut id = first.id.to_string();
         for _ in 0..catalog.models().len() {
@@ -266,9 +312,67 @@ mod tests {
         assert_eq!(id, first.id, "a full cycle returns to the start");
     }
 
+    /// A minimal hand-written entry, the shape a user would actually type.
+    fn entry(id: &str) -> ModelEntry {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "base_url": "http://localhost:8080/v1",
+            "context_window": 32768,
+            "max_tokens": 4096,
+        }))
+        .expect("a valid entry")
+    }
+
+    #[test]
+    fn a_configured_model_extends_the_built_ins() {
+        let catalog = Catalog::from_parts(deepseek::models(), &[entry("local-llama")]);
+        assert_eq!(catalog.models().len(), deepseek::models().len() + 1);
+        assert_eq!(catalog.resolve("local-llama").unwrap().id, "local-llama");
+        assert!(catalog.diagnostics().is_empty());
+
+        // The built-ins are still first, so the default model does not move.
+        assert_eq!(catalog.default_model().id, deepseek::flash().id);
+    }
+
+    #[test]
+    fn a_configured_model_replaces_a_built_in_with_the_same_id() {
+        let catalog = Catalog::from_parts(deepseek::models(), &[entry("deepseek-v4-flash")]);
+        assert_eq!(
+            catalog.models().len(),
+            deepseek::models().len(),
+            "it replaced rather than appended"
+        );
+
+        let replaced = catalog.resolve("deepseek-v4-flash").unwrap();
+        assert_eq!(replaced.base_url, "http://localhost:8080/v1");
+        assert_eq!(
+            catalog.position("deepseek-v4-flash"),
+            Some(0),
+            "and it kept its place, so the default model is unchanged"
+        );
+    }
+
+    #[test]
+    fn a_broken_entry_is_reported_and_skipped() {
+        // A missing `base_url` cannot be guessed, but it must not take the rest
+        // of the catalog down with it.
+        let mut broken = entry("no-endpoint");
+        broken.base_url = String::new();
+
+        let catalog = Catalog::from_parts(deepseek::models(), &[broken, entry("fine")]);
+        assert_eq!(catalog.diagnostics().len(), 1);
+        assert!(catalog.diagnostics()[0].contains("no-endpoint"));
+        assert!(catalog.resolve("no-endpoint").is_err());
+        assert!(
+            catalog.resolve("fine").is_ok(),
+            "the entries after a broken one still load"
+        );
+        assert!(catalog.resolve("flash").is_ok(), "and so do the built-ins");
+    }
+
     #[test]
     fn thinking_is_clamped_to_what_the_model_serves() {
-        let catalog = Catalog::new();
+        let catalog = catalog();
         let model = catalog.resolve("flash").unwrap();
 
         // DeepSeek maps the whole ladder, so nothing is clamped.

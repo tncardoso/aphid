@@ -1,0 +1,445 @@
+{
+ "anthropic": {
+  "doc": "https://docs.anthropic.com/en/docs/about-claude/models",
+  "env": [
+   "ANTHROPIC_API_KEY"
+  ],
+  "id": "anthropic",
+  "models": {
+   "claude-sonnet-4-6": {
+    "attachment": true,
+    "cost": {
+     "cache_read": 0.3,
+     "cache_write": 3.75,
+     "input": 3,
+     "output": 15
+    },
+    "description": "Claude workhorse for coding agents, careful analysis, and production cost control",
+    "family": "claude-sonnet",
+    "id": "claude-sonnet-4-6",
+    "knowledge": "2025-08-31",
+    "last_updated": "2026-03-13",
+    "limit": {
+     "context": 1000000,
+     "output": 128000
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ],
+     "output": [
+      "text"
+     ]
+    },
+    "name": "Claude Sonnet 4.6",
+    "open_weights": false,
+    "reasoning": true,
+    "reasoning_options": [
+     {
+      "type": "effort",
+      "values": [
+       "low",
+       "medium",
+       "high",
+       "max"
+      ]
+     },
+     {
+      "min": 1024,
+      "type": "budget_tokens"
+     }
+    ],
+    "release_date": "2026-02-17",
+    "structured_output": true,
+    "temperature": true,
+    "tool_call": true
+   }
+  },
+  "name": "Anthropic",
+  "npm": "@ai-sdk/anthropic"
+ },
+ "azure-cognitive-services": {
+  "doc": "https://learn.microsoft.com/en-us/azure/ai-services/openai/concepts/models",
+  "env": [
+   "AZURE_COGNITIVE_SERVICES_RESOURCE_NAME",
+   "AZURE_COGNITIVE_SERVICES_API_KEY"
+  ],
+  "id": "azure-cognitive-services",
+  "models": {
+   "gpt-chat-latest": {
+    "attachment": true,
+    "cost": {
+     "cache_read": 0.5,
+     "input": 5,
+     "output": 30
+    },
+    "description": "Compact GPT model for low-latency assistance and high-volume workloads",
+    "id": "gpt-chat-latest",
+    "knowledge": "2025-12-01",
+    "last_updated": "2026-05-28",
+    "limit": {
+     "context": 128000,
+     "input": 111616,
+     "output": 16384
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "pdf"
+     ],
+     "output": [
+      "text"
+     ]
+    },
+    "name": "GPT Chat Latest",
+    "open_weights": false,
+    "reasoning": true,
+    "reasoning_options": [
+     {
+      "type": "effort",
+      "values": [
+       "low",
+       "medium",
+       "high"
+      ]
+     }
+    ],
+    "release_date": "2026-05-05",
+    "status": "beta",
+    "structured_output": true,
+    "temperature": false,
+    "tool_call": true
+   }
+  },
+  "name": "Azure Cognitive Services",
+  "npm": "@ai-sdk/azure"
+ },
+ "deepseek": {
+  "api": "https://api.deepseek.com",
+  "doc": "https://api-docs.deepseek.com/quick_start/pricing",
+  "env": [
+   "DEEPSEEK_API_KEY"
+  ],
+  "id": "deepseek",
+  "models": {
+   "deepseek-v4-flash": {
+    "attachment": false,
+    "cost": {
+     "cache_read": 0.0028,
+     "input": 0.14,
+     "output": 0.28,
+     "reasoning": 0.28
+    },
+    "description": "Official DeepSeek V4 Flash release with enhanced agentic capabilities and integrated DSpark speculative decoding",
+    "family": "deepseek-flash",
+    "id": "deepseek-v4-flash",
+    "interleaved": {
+     "field": "reasoning_content"
+    },
+    "knowledge": "2025-05",
+    "last_updated": "2026-07-31",
+    "limit": {
+     "context": 1000000,
+     "output": 384000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ],
+     "output": [
+      "text"
+     ]
+    },
+    "name": "DeepSeek V4 Flash",
+    "open_weights": true,
+    "reasoning": true,
+    "reasoning_options": [
+     {
+      "type": "toggle"
+     },
+     {
+      "type": "effort",
+      "values": [
+       "low",
+       "high",
+       "max"
+      ]
+     }
+    ],
+    "release_date": "2026-07-31",
+    "structured_output": true,
+    "temperature": true,
+    "tool_call": true
+   },
+   "deepseek-v4-pro": {
+    "attachment": false,
+    "cost": {
+     "cache_read": 0.003625,
+     "input": 0.435,
+     "output": 0.87,
+     "reasoning": 0.87
+    },
+    "description": "Open MoE flagship with million-token context for coding and long agent runs",
+    "family": "deepseek-thinking",
+    "id": "deepseek-v4-pro",
+    "interleaved": {
+     "field": "reasoning_content"
+    },
+    "knowledge": "2025-05",
+    "last_updated": "2026-04-24",
+    "limit": {
+     "context": 1000000,
+     "output": 384000
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ],
+     "output": [
+      "text"
+     ]
+    },
+    "name": "DeepSeek V4 Pro",
+    "open_weights": true,
+    "reasoning": true,
+    "reasoning_options": [
+     {
+      "type": "toggle"
+     },
+     {
+      "type": "effort",
+      "values": [
+       "high",
+       "max"
+      ]
+     }
+    ],
+    "release_date": "2026-04-24",
+    "structured_output": true,
+    "temperature": true,
+    "tool_call": true
+   }
+  },
+  "name": "DeepSeek",
+  "npm": "@ai-sdk/openai-compatible"
+ },
+ "impossibl": {
+  "api": "https://api.impossibl.com/v1",
+  "doc": "https://impossibl.com/docs/models",
+  "env": [
+   "IMPOSSIBL_API_KEY"
+  ],
+  "id": "impossibl",
+  "models": {
+   "google/gemini-3.1-pro-preview": {
+    "attachment": true,
+    "cost": {
+     "cache_read": 0.2,
+     "context_over_200k": {
+      "cache_read": 0.4,
+      "input": 4,
+      "output": 18
+     },
+     "input": 2,
+     "output": 12,
+     "tiers": [
+      {
+       "cache_read": 0.4,
+       "input": 4,
+       "output": 18,
+       "tier": {
+        "size": 200000,
+        "type": "context"
+       }
+      }
+     ]
+    },
+    "description": "Reasoning-first Gemini preview for agentic coding and complex problem solving",
+    "family": "gemini-pro",
+    "id": "google/gemini-3.1-pro-preview",
+    "knowledge": "2025-01",
+    "last_updated": "2026-02-19",
+    "limit": {
+     "context": 1048576,
+     "output": 65536
+    },
+    "modalities": {
+     "input": [
+      "text",
+      "image",
+      "video",
+      "audio",
+      "pdf"
+     ],
+     "output": [
+      "text"
+     ]
+    },
+    "name": "Gemini 3.1 Pro Preview",
+    "open_weights": false,
+    "reasoning": true,
+    "reasoning_options": [
+     {
+      "type": "effort",
+      "values": [
+       "low",
+       "medium",
+       "high"
+      ]
+     }
+    ],
+    "release_date": "2026-02-19",
+    "structured_output": true,
+    "temperature": true,
+    "tool_call": true
+   }
+  },
+  "name": "Impossibl",
+  "npm": "@ai-sdk/openai-compatible"
+ },
+ "venice": {
+  "doc": "https://docs.venice.ai",
+  "env": [
+   "VENICE_API_KEY"
+  ],
+  "id": "venice",
+  "models": {
+   "deepseek-v4-pro": {
+    "attachment": false,
+    "cost": {
+     "cache_read": 0.33,
+     "input": 1.65,
+     "output": 3.301
+    },
+    "description": "Open MoE flagship with million-token context for coding and long agent runs",
+    "family": "deepseek",
+    "id": "deepseek-v4-pro",
+    "interleaved": {
+     "field": "reasoning_content"
+    },
+    "knowledge": "2025-05",
+    "last_updated": "2026-06-11",
+    "limit": {
+     "context": 1000000,
+     "output": 32768
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ],
+     "output": [
+      "text"
+     ]
+    },
+    "name": "DeepSeek V4 Pro",
+    "open_weights": true,
+    "reasoning": true,
+    "reasoning_options": [],
+    "release_date": "2026-04-24",
+    "structured_output": true,
+    "temperature": true,
+    "tool_call": true
+   }
+  },
+  "name": "Venice AI",
+  "npm": "venice-ai-sdk-provider"
+ },
+ "wandb": {
+  "api": "https://api.inference.wandb.ai/v1",
+  "doc": "https://docs.wandb.ai/guides/integrations/inference/",
+  "env": [
+   "WANDB_API_KEY"
+  ],
+  "id": "wandb",
+  "models": {
+   "openai/gpt-oss-120b": {
+    "attachment": false,
+    "cost": {
+     "cache_read": 0.03,
+     "input": 0.03,
+     "output": 0.17
+    },
+    "description": "Efficient Mixture-of-Experts model designed for high-reasoning, agentic and general-purpose use cases.",
+    "family": "gpt-oss",
+    "id": "openai/gpt-oss-120b",
+    "last_updated": "2025-08-05",
+    "limit": {
+     "context": 131072,
+     "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ],
+     "output": [
+      "text"
+     ]
+    },
+    "name": "gpt-oss-120b",
+    "open_weights": true,
+    "reasoning": true,
+    "reasoning_options": [],
+    "release_date": "2025-08-05",
+    "structured_output": true,
+    "temperature": true,
+    "tool_call": true
+   }
+  },
+  "name": "Weights & Biases",
+  "npm": "@ai-sdk/openai-compatible"
+ },
+ "zhipuai": {
+  "api": "https://open.bigmodel.cn/api/paas/v4",
+  "doc": "https://docs.z.ai/guides/overview/pricing",
+  "env": [
+   "ZHIPU_API_KEY"
+  ],
+  "id": "zhipuai",
+  "models": {
+   "glm-5": {
+    "attachment": false,
+    "cost": {
+     "cache_read": 0.2,
+     "cache_write": 0,
+     "input": 1,
+     "output": 3.2
+    },
+    "description": "General GLM flagship for coding, analysis, and tool-heavy engineering workflows",
+    "family": "glm",
+    "id": "glm-5",
+    "interleaved": {
+     "field": "reasoning_content"
+    },
+    "last_updated": "2026-02-11",
+    "limit": {
+     "context": 204800,
+     "output": 131072
+    },
+    "modalities": {
+     "input": [
+      "text"
+     ],
+     "output": [
+      "text"
+     ]
+    },
+    "name": "GLM-5",
+    "open_weights": true,
+    "reasoning": true,
+    "reasoning_options": [
+     {
+      "type": "toggle"
+     }
+    ],
+    "release_date": "2026-02-11",
+    "temperature": true,
+    "tool_call": true
+   }
+  },
+  "name": "Zhipu AI",
+  "npm": "@ai-sdk/openai-compatible"
+ }
+}

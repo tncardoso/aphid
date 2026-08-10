@@ -27,23 +27,27 @@ plugin hook you can observe, block, or rewrite.
 ## What it looks like
 
 ```
-$ aphid "what does this crate do?"
+$ aphid
 ```
 
-opens the terminal UI. A single prompt runs headless:
+opens the terminal UI. A prompt runs one time and prints the result:
 
 ```
 $ aphid -p "what does this crate do?"
+$ aphid "what does this crate do?"
 ```
 
-## The three front ends
+## The four front ends
 
 ```
 aphid [OPTIONS]                 open the terminal UI
 aphid [OPTIONS] -p <prompt>     run one prompt and print the result
 aphid raw   [OPTIONS] <prompt>  stream a single completion, printing protocol events
 aphid agent [OPTIONS] <prompt>  run the plain agent loop with a demo tool
+aphid model <command>           manage the models in ~/.aphid/models.json
 ```
+
+[docs/cli.md](docs/cli.md) gives each option and each file.
 
 ### Coding agent (`aphid`)
 
@@ -67,6 +71,42 @@ OPTIONS:
     -h, --help            show this help
 ```
 
+### Models (`aphid model`)
+
+The catalog is the models aphid supplies, and then your own
+`~/.aphid/models.json`. A model in the file with the same id as a built-in
+replaces it, so aphid works with no configuration at all.
+
+```
+aphid model add <provider/model>   add a model, described by models.dev
+aphid model remove <name>          remove one of your models
+aphid model list [--all]           list your models, or the whole catalog
+aphid model search <query>         find a model on models.dev
+aphid model update                 refresh the cached models.dev document
+```
+
+`add` reads [models.dev](https://models.dev) rather than making you write out a
+context window and a price by hand, and records which environment variable holds
+that provider's key — so a model you add authenticates against its own provider,
+not against DeepSeek. The document is cached at `~/.aphid/models.dev.json` and
+reused for a day, so only the first command in a while pays for the download.
+
+```
+$ aphid model add zhipuai/glm-5
+added glm-5 in /home/you/.aphid/models.json
+  provider  zhipuai
+  endpoint  https://open.bigmodel.cn/api/paas/v4
+  limits    204800 context · 131072 output
+  price     $1.00 in · $3.20 out per M tokens
+  key       $ZHIPU_API_KEY
+
+$ aphid --model glm-5 -p "what does this crate do?"
+```
+
+The file is meant to be edited. Everything models.dev cannot know — which
+request fields an endpoint actually rejects — is a named compatibility profile
+plus the flags that differ from it, so a correction is usually one line.
+
 ### Protocol debugging (`aphid raw` and `aphid agent`)
 
 Tiny tools that exercise the whole path — encode a request, stream it, resolve
@@ -87,8 +127,11 @@ OPTIONS:
 
 ## Environment
 
-- `DEEPSEEK_API_KEY` — required for any mode that talks to the provider. The
-  `--request` flag can inspect an encoded request without one.
+- `DEEPSEEK_API_KEY` — required by the models aphid ships, and by `raw` and
+  `agent`. The `--request` flag can inspect an encoded request without one.
+- Models added from models.dev name their own key variable, and the coding agent
+  reads the one belonging to the model you selected.
+- `APHID_HOME` — replaces `~/.aphid`, for a sandboxed configuration.
 
 ## Design
 
@@ -103,7 +146,7 @@ The workspace splits into four crates, a narrow step at each one:
 - **[`aphid-code`]** — the specialization. The tools a coding agent needs,
   system-prompt assembly from the project's conventions, skill discovery,
   on-disk sessions, permission plugins, and the TUI.
-- **[`aphid-cli`]** — the thin `aphid` binary, wiring the three front ends
+- **[`aphid-cli`]** — the thin `aphid` binary, wiring the four front ends
   together.
 
 ### The memory model
