@@ -10,11 +10,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use aphid_agent::Interest;
-use rhai::{AST, Dynamic, Engine, FuncArgs, Scope};
+use rhai::{AST, Dynamic, Engine, FnPtr, FuncArgs, Scope};
 
 use crate::caps::{Capabilities, Sink};
 use crate::discover::PluginFile;
 use crate::store::Store;
+use crate::tool::{Registry, ScriptTool, ToolSpec};
 use crate::worker::Worker;
 
 /// Every hook name the host knows, and the interest it implies.
@@ -59,6 +60,7 @@ pub struct ScriptPlugin {
     hooks: Vec<String>,
     sink: Arc<dyn Sink>,
     store: Arc<Store>,
+    tools: Vec<ToolSpec>,
 }
 
 impl ScriptPlugin {
@@ -86,6 +88,11 @@ impl ScriptPlugin {
         let mut engine = Engine::new();
         crate::caps::register(&mut engine, &file.name, caps, sink, worker, &store);
 
+        // Filled while the body runs below, which is the only time
+        // `register_tool` may be called.
+        let registry: Registry = Arc::new(std::sync::Mutex::new(Vec::new()));
+        crate::caps::register_tools(&mut engine, &registry);
+
         let ast = engine
             .compile(&text)
             .map_err(|error| format!("does not compile: {error}"))?;
@@ -96,6 +103,10 @@ impl ScriptPlugin {
             .map_err(|error| format!("failed while loading: {error}"))?;
 
         let (interests, hooks) = declared(&ast);
+        let tools = registry
+            .lock()
+            .map(|specs| specs.clone())
+            .unwrap_or_default();
 
         Ok(Self {
             name: file.name.clone(),
@@ -109,6 +120,7 @@ impl ScriptPlugin {
             hooks,
             sink: Arc::clone(sink),
             store,
+            tools,
         })
     }
 
@@ -149,6 +161,34 @@ impl ScriptPlugin {
     #[must_use]
     pub fn defines(&self, hook: &str) -> bool {
         self.hooks.iter().any(|name| name == hook)
+    }
+
+    /// The tools this plugin registered, ready for the agent.
+    ///
+    /// `self` is an `Arc` because each handler holds the plugin it came from:
+    /// the engine, the AST and the scope all live there.
+    #[must_use]
+    pub fn tools(self: &Arc<Self>) -> Vec<Arc<dyn aphid_agent::ToolHandler>> {
+        self.tools
+            .iter()
+            .map(|spec| {
+                Arc::new(ScriptTool::new(Arc::clone(self), spec.clone()))
+                    as Arc<dyn aphid_agent::ToolHandler>
+            })
+            .collect()
+    }
+
+    /// Call a function this plugin handed out, such as a tool body.
+    ///
+    /// Unlike [`ScriptPlugin::call`] the error is returned rather than reported:
+    /// a tool's failure belongs in its result, where the model will read it.
+    ///
+    /// # Errors
+    ///
+    /// Propagates whatever the script raised.
+    pub fn call_fn(&self, body: &FnPtr, args: impl FuncArgs) -> Result<Dynamic, String> {
+        body.call::<Dynamic>(&self.engine, &self.ast, args)
+            .map_err(|error| error.to_string())
     }
 
     /// Write this plugin's state back, if it changed.

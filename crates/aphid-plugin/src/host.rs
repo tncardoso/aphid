@@ -178,6 +178,10 @@ impl Plugin for PluginHost {
         self.interests
     }
 
+    fn tools(&self) -> Vec<Arc<dyn aphid_agent::ToolHandler>> {
+        self.plugins.iter().flat_map(ScriptPlugin::tools).collect()
+    }
+
     fn on_prompt(&self, draft: &mut PromptDraft<'_>) {
         for plugin in self.defining("on_prompt") {
             if draft.is_rejected() {

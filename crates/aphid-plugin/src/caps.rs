@@ -361,6 +361,26 @@ fn register_http(engine: &mut Engine, caps: &Capabilities, worker: &Arc<Worker>)
     });
 }
 
+/// Let a script declare tools while its body runs.
+///
+/// Separate from [`register`] because the registry it fills is per-load, not
+/// per-capability: a tool is something the plugin *is*, not something it is
+/// allowed to do.
+pub(crate) fn register_tools(engine: &mut Engine, registry: &crate::tool::Registry) {
+    let target = Arc::clone(registry);
+    engine.register_fn("register_tool", move |declaration: Map| {
+        let spec = crate::tool::spec(&declaration).map_err(fail)?;
+        match target.lock() {
+            Ok(mut specs) => {
+                specs.retain(|existing| existing.declaration.name != spec.declaration.name);
+                specs.push(spec);
+                Ok::<_, Box<EvalAltResult>>(())
+            }
+            Err(_) => Err(fail("the tool registry is poisoned".to_owned())),
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

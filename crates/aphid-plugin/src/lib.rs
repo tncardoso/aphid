@@ -53,6 +53,7 @@ mod discover;
 mod host;
 mod script;
 mod store;
+mod tool;
 pub mod trust;
 mod worker;
 
@@ -65,4 +66,5 @@ pub use discover::{DIR_NAME, Diagnostic, ENTRY_FILE, EXTENSION, PluginFile, disc
 pub use host::{PluginHost, silent_sink};
 pub use script::ScriptPlugin;
 pub use store::Store;
+pub use tool::{ScriptTool, ToolSpec};
 pub use worker::Worker;
