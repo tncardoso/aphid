@@ -183,4 +183,4 @@ entire encode→stream→commit path against a mock provider with no network.
 
 ## License
 
-MIT OR Apache-2.0.
+Licensed under the MIT License — see [`LICENSE`](LICENSE) for the full text.

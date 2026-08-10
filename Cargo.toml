@@ -5,8 +5,8 @@ members = ["crates/aphid-agent", "crates/aphid-cli", "crates/aphid-code", "crate
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/thiagoncc/aphid"
+license = "MIT"
+repository = "https://github.com/tncardoso/aphid"
 
 [workspace.dependencies]
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
