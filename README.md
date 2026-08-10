@@ -135,7 +135,7 @@ OPTIONS:
 
 ## Design
 
-The workspace splits into four crates, a narrow step at each one:
+The workspace splits into five crates, a narrow step at each one:
 
 - **[`aphid-core`]** — message, model and streaming types. The `Transcript`
   arena layout, spans, thinking levels, the OpenAI-completions encoder, and the
@@ -143,6 +143,9 @@ The workspace splits into four crates, a narrow step at each one:
 - **[`aphid-agent`]** — the agent loop. `Agent::prompt` runs *request → stream →
   commit → execute tools* until the model stops asking for tools, plus the tool
   registry and the plugin API. Deliberately unopinionated.
+- **[`aphid-plugin`]** — the Rhai host. Plugin discovery, the script engine and
+  its capabilities, and the trust gate. Keeps the scripting runtime out of the
+  loop crate entirely.
 - **[`aphid-code`]** — the specialization. The tools a coding agent needs,
   system-prompt assembly from the project's conventions, skill discovery,
   on-disk sessions, permission plugins, and the TUI.
