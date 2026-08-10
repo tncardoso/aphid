@@ -232,7 +232,8 @@ fn a_script_command_reports_and_steers() {
             description: "Ask for a review.",
             run: |args| {
                 if args == "" { return notice("give me something to review"); }
-                [notice("reviewing " + args), prompt("Review " + args + " please.")]
+                prompt("Review " + args + " please.");
+                notice("reviewing " + args)
             }
         });
         "#,
@@ -250,12 +251,11 @@ fn a_script_command_reports_and_steers() {
             "give me something to review".to_owned()
         )])
     );
+    // The prompt went to the sink as it was called; what comes back is only
+    // what the user should read.
     assert_eq!(
         host.run_command("review", "src/lib.rs"),
-        Some(vec![
-            Action::Notice("reviewing src/lib.rs".to_owned()),
-            Action::Prompt("Review src/lib.rs please.".to_owned()),
-        ])
+        Some(vec![Action::Notice("reviewing src/lib.rs".to_owned())])
     );
     assert_eq!(host.run_command("nothing", ""), None, "no plugin owns it");
 }

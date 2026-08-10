@@ -88,6 +88,22 @@ impl PluginHost {
         }
     }
 
+    /// Time passed.
+    ///
+    /// The only hook the agent does not cause, so it is what a plugin watching
+    /// something outside the session — a file, a queue, a clock — is woken by.
+    /// A tick that is still running is not started again: a slow hook then
+    /// costs its own time and not a growing queue of ticks behind it.
+    pub fn tick(&self) {
+        if self.enter_tick() {
+            return;
+        }
+        for plugin in self.defining("on_tick") {
+            plugin.call("on_tick", ());
+        }
+        self.leave_tick();
+    }
+
     /// A session opened.
     pub fn session_start(&self, info: &SessionInfo<'_>) {
         self.session("on_session_start", info);

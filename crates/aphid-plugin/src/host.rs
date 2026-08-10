@@ -45,6 +45,9 @@ pub struct PluginHost {
     /// Set while a notice is being dispatched, so a hook that notifies cannot
     /// call itself back.
     in_notice: std::sync::atomic::AtomicBool,
+    /// Set while a tick is being dispatched, so a slow one is skipped rather
+    /// than queued behind itself.
+    in_tick: std::sync::atomic::AtomicBool,
 }
 
 impl PluginHost {
@@ -82,6 +85,7 @@ impl PluginHost {
             diagnostics: diagnostics.clone(),
             interests,
             in_notice: std::sync::atomic::AtomicBool::new(false),
+            in_tick: std::sync::atomic::AtomicBool::new(false),
         };
         (host, diagnostics)
     }
@@ -94,6 +98,7 @@ impl PluginHost {
             diagnostics: Vec::new(),
             interests: Interest::empty(),
             in_notice: std::sync::atomic::AtomicBool::new(false),
+            in_tick: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -138,6 +143,17 @@ impl PluginHost {
 
     pub(crate) fn leave_notice(&self) {
         self.in_notice
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Claim the tick path. `true` means the last tick has not finished.
+    pub(crate) fn enter_tick(&self) -> bool {
+        self.in_tick
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn leave_tick(&self) {
+        self.in_tick
             .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -403,7 +419,6 @@ fn verdict(value: &Dynamic) -> Option<(&'static str, String)> {
         "stop",
         "allow",
         "notice",
-        "prompt",
     ]
     .into_iter()
     .find(|name| *name == kind)?;

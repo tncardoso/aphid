@@ -28,8 +28,15 @@ pub const DEFAULT_MAX_OPERATIONS: u64 = 5_000_000;
 /// anything outside itself.
 #[derive(Clone, Debug)]
 pub struct Capabilities {
-    /// The directory `fs::*` is confined to. `None` disables the filesystem.
+    /// Where a relative path starts. `None` disables the filesystem.
     pub root: Option<PathBuf>,
+    /// Whether `fs::*` may leave `root`.
+    ///
+    /// A host that grants `exec` has already granted this in all but name: `sh`
+    /// reads and writes anywhere. Confining the file functions then buys no
+    /// safety and only makes them weaker than the shell the same plugin holds,
+    /// so a coding session grants both together.
+    pub unconfined: bool,
     /// Whether `fs::write` is allowed. Reading is granted by `root` alone.
     pub write: bool,
     /// Whether `exec` is allowed.
@@ -48,6 +55,7 @@ impl Default for Capabilities {
     fn default() -> Self {
         Self {
             root: None,
+            unconfined: false,
             write: false,
             exec: false,
             http: false,
@@ -60,15 +68,16 @@ impl Default for Capabilities {
 }
 
 impl Capabilities {
-    /// Everything, confined to one directory. What the coding harness grants:
-    /// the agent can already run a shell, so withholding one from a plugin the
-    /// user installed on purpose buys nothing.
+    /// Everything, with `root` as where a relative path starts. What the coding
+    /// harness grants: the agent can already run a shell, so withholding one
+    /// from a plugin the user installed on purpose buys nothing.
     #[must_use]
     pub fn full(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
         let plugins = root.join(".aphid").join("plugins");
         Self {
             root: Some(root),
+            unconfined: true,
             write: true,
             exec: true,
             http: true,
@@ -86,7 +95,7 @@ impl Capabilities {
     }
 }
 
-/// Where a script's `log` and `notify` output goes.
+/// Where a script's `log`, `notify` and `prompt` output goes.
 pub trait Sink: Send + Sync + 'static {
     /// Something the user should see. The terminal UI renders these as notices.
     fn notify(&self, plugin: &str, text: &str);
@@ -95,6 +104,15 @@ pub trait Sink: Send + Sync + 'static {
     /// where the terminal UI is not drawing.
     fn log(&self, plugin: &str, text: &str) {
         eprintln!("[{plugin}] {text}");
+    }
+
+    /// Text for the model, as if the user had typed it.
+    ///
+    /// Defaults to doing nothing, because a front end with no prompt queue —
+    /// headless, or a caller embedding the agent — has nowhere to put it. The
+    /// terminal UI puts it in the same queue a typed line goes to.
+    fn prompt(&self, plugin: &str, text: &str) {
+        let _ = (plugin, text);
     }
 }
 
@@ -107,17 +125,20 @@ impl Sink for Silent {
     fn log(&self, _plugin: &str, _text: &str) {}
 }
 
-/// Resolve a script-supplied path against a root it may not escape.
+/// Resolve a script-supplied path against the root a relative path starts from.
 ///
-/// Lexical, like the workspace guard the file tools use: `..` is rejected
-/// outright rather than normalised, so no amount of cleverness with symlinks
-/// turns a relative path into an escape.
+/// A relative path always lands under `root`, so `fs_read("src/lib.rs")` means
+/// the workspace whatever else is granted. `unconfined` decides what happens
+/// with the rest: with it, a path may go anywhere; without it, the guard is
+/// lexical like the one the file tools use — `..` is rejected outright rather
+/// than normalised, so no amount of cleverness with symlinks turns a relative
+/// path into an escape.
 ///
 /// # Errors
 ///
-/// Fails when the filesystem is not granted, the path is absolute and outside
-/// the root, or any component is `..`.
-pub fn resolve(root: Option<&Path>, path: &str) -> Result<PathBuf, String> {
+/// Fails when the filesystem is not granted, or, when confined, the path is
+/// outside the root or any component is `..`.
+pub fn resolve(root: Option<&Path>, unconfined: bool, path: &str) -> Result<PathBuf, String> {
     let Some(root) = root else {
         return Err("the filesystem is not available to this plugin".to_owned());
     };
@@ -128,6 +149,10 @@ pub fn resolve(root: Option<&Path>, path: &str) -> Result<PathBuf, String> {
     } else {
         root.join(candidate)
     };
+
+    if unconfined {
+        return Ok(joined);
+    }
 
     if joined
         .components()
@@ -215,7 +240,6 @@ fn register_verdicts(engine: &mut Engine) {
     engine.register_fn("stop", || verdict("stop", ""));
     engine.register_fn("allow", || verdict("allow", ""));
     engine.register_fn("notice", |text: &str| verdict("notice", text));
-    engine.register_fn("prompt", |text: &str| verdict("prompt", text));
 }
 
 fn register_output(engine: &mut Engine, plugin: &str, sink: &Arc<dyn Sink>) {
@@ -226,24 +250,32 @@ fn register_output(engine: &mut Engine, plugin: &str, sink: &Arc<dyn Sink>) {
     let name = plugin.to_owned();
     let target = Arc::clone(sink);
     engine.register_fn("log", move |text: &str| target.log(&name, text));
+
+    // A call rather than something a command returns, so a hook, a tool and a
+    // command all send text to the model the same way.
+    let name = plugin.to_owned();
+    let target = Arc::clone(sink);
+    engine.register_fn("prompt", move |text: &str| target.prompt(&name, text));
 }
 
 fn register_fs(engine: &mut Engine, caps: &Capabilities) {
+    let free = caps.unconfined;
+
     let root = caps.root.clone();
     engine.register_fn("fs_read", move |path: &str| {
-        let path = resolve(root.as_deref(), path).map_err(fail)?;
+        let path = resolve(root.as_deref(), free, path).map_err(fail)?;
         std::fs::read_to_string(&path)
             .map_err(|error| fail(format!("could not read {}: {error}", path.display())))
     });
 
     let root = caps.root.clone();
     engine.register_fn("fs_exists", move |path: &str| {
-        resolve(root.as_deref(), path).is_ok_and(|path| path.exists())
+        resolve(root.as_deref(), free, path).is_ok_and(|path| path.exists())
     });
 
     let root = caps.root.clone();
     engine.register_fn("fs_list", move |path: &str| {
-        let path = resolve(root.as_deref(), path).map_err(fail)?;
+        let path = resolve(root.as_deref(), free, path).map_err(fail)?;
         let entries = std::fs::read_dir(&path)
             .map_err(|error| fail(format!("could not list {}: {error}", path.display())))?;
         let mut names: Vec<rhai::Dynamic> = entries
@@ -262,7 +294,7 @@ fn register_fs(engine: &mut Engine, caps: &Capabilities) {
                 "writing files is not available to this plugin".to_owned(),
             ));
         }
-        let path = resolve(root.as_deref(), path).map_err(fail)?;
+        let path = resolve(root.as_deref(), free, path).map_err(fail)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|error| fail(format!("could not create {}: {error}", parent.display())))?;
@@ -405,30 +437,45 @@ mod tests {
     fn a_relative_path_lands_under_the_root() {
         let root = Path::new("/work");
         assert_eq!(
-            resolve(Some(root), "src/lib.rs").expect("resolved"),
+            resolve(Some(root), false, "src/lib.rs").expect("resolved"),
+            Path::new("/work/src/lib.rs")
+        );
+        assert_eq!(
+            resolve(Some(root), true, "src/lib.rs").expect("resolved"),
             Path::new("/work/src/lib.rs")
         );
     }
 
     #[test]
-    fn climbing_out_is_refused() {
+    fn climbing_out_is_refused_when_confined() {
         let root = Path::new("/work");
-        assert!(resolve(Some(root), "../etc/passwd").is_err());
-        assert!(resolve(Some(root), "src/../../etc/passwd").is_err());
-        assert!(resolve(Some(root), "/etc/passwd").is_err());
+        assert!(resolve(Some(root), false, "../etc/passwd").is_err());
+        assert!(resolve(Some(root), false, "src/../../etc/passwd").is_err());
+        assert!(resolve(Some(root), false, "/etc/passwd").is_err());
     }
 
     #[test]
     fn an_absolute_path_inside_the_root_is_allowed() {
         let root = Path::new("/work");
         assert_eq!(
-            resolve(Some(root), "/work/src/lib.rs").expect("resolved"),
+            resolve(Some(root), false, "/work/src/lib.rs").expect("resolved"),
             Path::new("/work/src/lib.rs")
         );
     }
 
     #[test]
+    fn an_unconfined_plugin_reaches_outside_the_root() {
+        let root = Path::new("/work");
+        assert_eq!(
+            resolve(Some(root), true, "/tmp/aphid-webchat/inbox").expect("resolved"),
+            Path::new("/tmp/aphid-webchat/inbox")
+        );
+        assert!(resolve(Some(root), true, "../sibling/notes.md").is_ok());
+    }
+
+    #[test]
     fn no_root_means_no_filesystem() {
-        assert!(resolve(None, "anything").is_err());
+        assert!(resolve(None, false, "anything").is_err());
+        assert!(resolve(None, true, "anything").is_err());
     }
 }

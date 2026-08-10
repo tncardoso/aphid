@@ -1,5 +1,6 @@
 //! The app: state, the command set, and the loop that drives both.
 
+use std::collections::VecDeque;
 use std::io::Stdout;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -40,6 +41,13 @@ use crate::tui::view::View;
 /// How often the screen is repainted while something is happening.
 const FRAME: Duration = Duration::from_millis(33);
 
+/// How often a plugin's `on_tick` runs.
+///
+/// Fast enough that a plugin watching something outside the session feels
+/// immediate, slow enough that a hook doing real work has finished before the
+/// next one is due.
+const TICK: Duration = Duration::from_millis(250);
+
 type Screen = Terminal<CrosstermBackend<Stdout>>;
 
 /// A run in flight, plus the agent it borrowed.
@@ -56,8 +64,9 @@ pub struct App {
     catalog: Catalog,
     thinking: Option<ThinkingLevel>,
     session: Option<Arc<SessionPlugin>>,
-    /// Typed while the agent was busy, sent when the run settles.
-    queued: Option<String>,
+    /// Waiting for the agent, in the order it arrived. A queue and not one slot
+    /// because a plugin can send while the user types, and neither should lose.
+    queued: VecDeque<String>,
     handle: AgentHandle,
     quit: bool,
 }
@@ -76,7 +85,7 @@ impl App {
             catalog: Catalog::new(),
             thinking,
             session: None,
-            queued: None,
+            queued: VecDeque::new(),
             handle: harness.agent.handle(),
             host: None,
             quit: false,
@@ -93,7 +102,7 @@ impl App {
             catalog: Catalog::new(),
             thinking: None,
             session: None,
-            queued: None,
+            queued: VecDeque::new(),
             handle: agent.handle(),
             host: None,
             quit: false,
@@ -188,6 +197,13 @@ impl App {
                 }
             }
             UiEvent::Notice(text) => self.view.push_notice(text),
+            // A plugin's prompt takes the path a typed line takes, minus the
+            // command set: the agent is not in hand here, and a plugin has no
+            // business running `/quit`.
+            UiEvent::Prompt(text) => {
+                self.view.push_user(text.clone());
+                self.enqueue(text);
+            }
             UiEvent::RunEnded(_) => self.status.running = false,
             UiEvent::Confirm {
                 tool,
@@ -207,10 +223,16 @@ impl App {
         true
     }
 
-    /// The prompt waiting to be sent, if any.
+    /// The next prompt waiting to be sent, if any.
     #[must_use]
     pub fn queued(&self) -> Option<&str> {
-        self.queued.as_deref()
+        self.queued.front().map(String::as_str)
+    }
+
+    /// Put a prompt at the back of the queue.
+    fn enqueue(&mut self, prompt: String) {
+        self.queued.push_back(prompt);
+        self.status.queued = self.status.running;
     }
 
     /// Handle a keypress that a modal is claiming.
@@ -353,7 +375,7 @@ impl App {
             "help" => self.view.push_notice(HELP),
             "plugins" => self.view.push_notice(self.plugin_summary()),
             // Built-ins win, so a plugin can never take `/quit` away.
-            other => return self.plugin_command(other, rest),
+            other => self.plugin_command(other, rest),
         }
 
         None
@@ -361,28 +383,25 @@ impl App {
 
     /// Run a plugin's command, or report that nothing owns the name.
     ///
-    /// Returns a prompt when the command asked for one, which the caller feeds
-    /// through exactly the path a typed prompt takes.
-    fn plugin_command(&mut self, name: &str, args: &str) -> Option<String> {
-        let host = self.host.clone()?;
+    /// A command reports by returning notices and steers by calling `prompt`,
+    /// which arrives as its own event, so there is nothing to hand back here.
+    fn plugin_command(&mut self, name: &str, args: &str) {
+        let Some(host) = self.host.clone() else {
+            self.view
+                .push_notice(format!("unknown command `/{name}` — try /help"));
+            return;
+        };
         let Some(actions) = host.run_command(name, args) else {
             self.view
                 .push_notice(format!("unknown command `/{name}` — try /help"));
-            return None;
+            return;
         };
 
-        let mut prompt = None;
         for action in actions {
             match action {
                 PluginAction::Notice(text) => self.view.push_notice(text),
-                // Only the first prompt runs: a command that returned two has
-                // asked for something the agent cannot do at once.
-                PluginAction::Prompt(text) => {
-                    prompt.get_or_insert(text);
-                }
             }
         }
-        prompt
     }
 
     /// What `/plugins` prints.
@@ -600,6 +619,14 @@ async fn drive(
     let mut running: Option<Running> = None;
     let mut dirty = true;
 
+    // Armed only for a session that has a plugin waiting on it, so nothing else
+    // pays for a timer it does not use. An `interval` and not a fresh `sleep`
+    // per pass: a sleep built inside `select!` restarts whenever any other
+    // branch wins, which a busy loop would starve for ever.
+    let ticked = app.host.clone().filter(|host| host.any_defines("on_tick"));
+    let mut ticker = tokio::time::interval(TICK);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     while !app.quit {
         if std::mem::take(&mut dirty) {
             terminal.draw(|frame| render(frame, app))?;
@@ -634,6 +661,13 @@ async fn drive(
             // A repaint tick, so a streaming reply animates rather than
             // redrawing once per token.
             () = tokio::time::sleep(FRAME), if app.status.running => dirty = true,
+            // The plugins' tick. Dispatched off the loop, because a hook that
+            // reaches for `exec` or `http` blocks on the plugin worker and the
+            // loop that draws the screen must never wait on that.
+            _ = ticker.tick(), if ticked.is_some() => {
+                let host = ticked.clone().expect("only polled while some");
+                tokio::task::spawn_blocking(move || host.tick());
+            }
         }
 
         // Anything typed while the agent was busy goes now that it is free.
@@ -657,13 +691,13 @@ async fn drive(
 /// `(idle.take(), app.queued.take())` moves both out *before* the match, so a
 /// failed pattern drops the agent instead of putting it back.
 fn take_pending(idle: &mut Option<Agent>, app: &mut App) -> Option<Running> {
-    if idle.is_none() || app.queued.is_none() {
+    if idle.is_none() || app.queued.is_empty() {
         return None;
     }
     let agent = idle.take().expect("just checked");
-    let prompt = app.queued.take().expect("just checked");
+    let prompt = app.queued.pop_front().expect("just checked");
 
-    app.status.queued = false;
+    app.status.queued = !app.queued.is_empty();
     app.status.running = true;
     Some(start(agent, prompt))
 }
@@ -719,8 +753,7 @@ fn handle_key(app: &mut App, key: KeyEvent, agent: Option<&mut Agent>) {
             };
 
             app.view.push_user(prompt.clone());
-            app.queued = Some(prompt);
-            app.status.queued = app.status.running;
+            app.enqueue(prompt);
         }
     }
 }
@@ -944,6 +977,43 @@ mod tests {
         assert_eq!(agent.transcript().len(), 5);
     }
 
+    #[tokio::test]
+    async fn prompts_from_a_plugin_queue_in_order_behind_a_typed_line() {
+        let agent = agent_with(vec![
+            Turn::text("first"),
+            Turn::text("second"),
+            Turn::text("third"),
+        ]);
+        let mut app = app_for(&agent);
+        let mut idle = Some(agent);
+
+        type_line(&mut app, &mut idle, "typed");
+        app.status.running = true;
+        app.apply(UiEvent::Prompt("from a plugin".to_owned()));
+        app.apply(UiEvent::Prompt("and another".to_owned()));
+
+        // Both are in the pane already, as a typed line would be.
+        let users: Vec<String> = app
+            .view
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                crate::tui::view::Entry::User(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(users, vec!["typed", "from a plugin", "and another"]);
+
+        app.status.running = false;
+        for expected in ["typed", "from a plugin", "and another"] {
+            assert_eq!(app.queued(), Some(expected));
+            let running = take_pending(&mut idle, &mut app).expect("a run should start");
+            let (agent, _) = running.await.expect("no panic");
+            idle = Some(agent);
+        }
+        assert_eq!(app.queued(), None, "the queue is drained in order");
+    }
+
     /// The whole streaming path, from protocol events to the transcript: a
     /// tool-call block must produce a card while it streams, and the announced
     /// call must land in that same card rather than a second one.
@@ -1031,8 +1101,10 @@ mod plugin_tests {
     use aphid_agent::Agent;
     use aphid_core::providers::deepseek;
     use aphid_plugin::{Capabilities, PluginHost, Silent, explicit};
+    use tokio::sync::mpsc::unbounded_channel;
 
     use super::{App, Status};
+    use crate::tui::event::{UiEvent, UiSink};
     use crate::tui::view::Entry;
 
     /// A workspace with one plugin, removed on drop.
@@ -1055,10 +1127,13 @@ mod plugin_tests {
         }
 
         fn host(&self) -> Arc<PluginHost> {
+            self.host_with(Arc::new(Silent))
+        }
+
+        fn host_with(&self, sink: Arc<dyn aphid_plugin::Sink>) -> Arc<PluginHost> {
             let file = explicit(&self.0.join(".aphid").join("plugins").join("kit.rhai"))
                 .expect("readable");
-            let (host, problems) =
-                PluginHost::load(&[file], &Capabilities::full(&self.0), Arc::new(Silent));
+            let (host, problems) = PluginHost::load(&[file], &Capabilities::full(&self.0), sink);
             assert!(problems.is_empty(), "{problems:?}");
             Arc::new(host)
         }
@@ -1094,22 +1169,32 @@ mod plugin_tests {
     }
 
     #[test]
-    fn a_plugin_command_can_print_and_return_a_prompt() {
+    fn a_plugin_command_prints_and_prompts() {
         let fixture = Fixture::new(
             r#"
             register_command(#{
                 name: "greet",
                 description: "Say hello.",
-                run: |args| { [notice("greeting " + args), prompt("Say hello to " + args)] }
+                run: |args| {
+                    prompt("Say hello to " + args);
+                    notice("greeting " + args)
+                }
             });
             "#,
         );
-        let (mut app, mut agent) = app_with(fixture.host());
+        let (events, mut receiver) = unbounded_channel::<UiEvent>();
+        let host = fixture.host_with(Arc::new(UiSink::new(events)));
+        let (mut app, mut agent) = app_with(host);
 
-        let prompt = app.command(&mut agent, "/greet Ana");
+        let typed = app.command(&mut agent, "/greet Ana");
 
-        assert_eq!(prompt.as_deref(), Some("Say hello to Ana"));
+        assert_eq!(typed, None, "a command is not itself a prompt");
         assert_eq!(notices(&app), vec!["greeting Ana"]);
+
+        // The prompt took the long way round, as an event the loop applies.
+        let event = receiver.try_recv().expect("the prompt was sent");
+        app.apply(event);
+        assert_eq!(app.queued(), Some("Say hello to Ana"));
     }
 
     #[test]

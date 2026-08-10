@@ -67,11 +67,13 @@ pub enum UiEvent {
     },
     /// Something a plugin wants the user to see.
     Notice(String),
+    /// Text a plugin sent to the model, which is queued as a typed line is.
+    Prompt(String),
     Key(KeyEvent),
     Resize,
 }
 
-/// Sends a plugin's `notify` output to the app loop.
+/// Sends a plugin's `notify` and `prompt` output to the app loop.
 ///
 /// The terminal UI owns the screen, so a plugin cannot simply print: its output
 /// has to arrive as an event like everything else. `log` still goes to standard
@@ -92,6 +94,10 @@ impl aphid_plugin::Sink for UiSink {
         let _ = self
             .events
             .send(UiEvent::Notice(format!("{plugin}: {text}")));
+    }
+
+    fn prompt(&self, _plugin: &str, text: &str) {
+        let _ = self.events.send(UiEvent::Prompt(text.to_owned()));
     }
 }
 

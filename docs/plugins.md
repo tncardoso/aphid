@@ -98,6 +98,13 @@ These hooks come from the coding agent:
 | `on_permission(request)` | A tool needs permission |
 | `on_file_change(change)` | `write` or `edit` changed a file |
 | `on_notify(text)` | Aphid showed a message to the user |
+| `on_tick()` | Every 250 milliseconds, in the terminal UI |
+
+`on_tick` is the only hook that the agent does not cause. Use it to look at
+something outside the session: a file, a queue, a clock. Keep it short. It runs
+while the user is at the prompt, and `exec` and the http functions stop it until
+they are complete. Aphid does not start a tick while the last one runs. There
+are no ticks in headless mode.
 
 Each hook gets a map. These are the fields:
 
@@ -165,6 +172,7 @@ A Rhai script can only calculate. Aphid gives it these functions:
 | Function | Result |
 | --- | --- |
 | `notify(text)` | Shows text to the user |
+| `prompt(text)` | Sends text to the model, as if the user typed it |
 | `log(text)` | Writes text to standard error |
 | `fs_read(path)` | Reads a file, and returns the text |
 | `fs_write(path, text)` | Writes a file |
@@ -174,8 +182,15 @@ A Rhai script can only calculate. Aphid gives it these functions:
 | `http_get(url)` | Makes a GET request |
 | `http_post(url, body, headers)` | Makes a POST request |
 
-`fs_read` and the other file functions cannot go out of the workspace. A path
-with `..` in it, or a path outside the workspace, gives an error.
+`prompt` is a call, not a value that a hook returns. A hook, a tool and a
+command all use it the same way. The text goes in the queue that a typed line
+goes in, and the terminal UI shows it as a message from the user. Only the
+terminal UI has this queue: in headless mode, `prompt` does nothing.
+
+A relative path in `fs_read` and the other file functions starts at the
+workspace. In a coding session the path can go out of the workspace, because the
+same plugin has `exec`, and a shell reads and writes anywhere. An embedder that
+makes its own capabilities keeps the file functions in the workspace.
 
 `exec` returns `#{ status, stdout, stderr }`. The http functions return
 `#{ status, body, headers }`.
@@ -249,17 +264,18 @@ register_command(#{
     description: "Ask for a review of the changes.",
     run: |args| {
         let diff = exec("git diff").stdout;
-        if diff.trim() == "" { return notice("nothing to review"); }
-        [notice("reviewing…"), prompt("Review this diff:\n" + diff)]
+        if diff == "" { return notice("nothing to review"); }
+        prompt("Review this diff:\n" + diff);
+        notice("reviewing…")
     }
 });
 ```
 
 `args` is the text after the name of the command.
 
-Return `notice(text)` to show text, `prompt(text)` to send text to the model, or
-an array of both. A returned prompt goes to the model in the same way as a
-prompt that you type.
+Return `notice(text)`, a text, or an array of them to show text to the user. To
+send text to the model, call `prompt(text)`. Aphid shows the notices first, and
+then the prompt, whatever the order in the command.
 
 A standard command always wins. If two plugins use one name, aphid keeps both:
 the second becomes `/review:2`.
@@ -311,3 +327,35 @@ The `crates/aphid-plugin/examples/plugins` directory holds plugins that work:
 | `budget.rhai` | Stops a run that asks for too many tools |
 | `wordcount.rhai` | Adds a `wordcount` tool |
 | `review.rhai` | Adds a `/review` command |
+
+## The web chat
+
+This repository has one plugin of its own, in `.aphid/plugins/webchat.rhai`. It
+puts a chat page on port 8000, and you talk to the session from a browser.
+
+| Command | Result |
+| --- | --- |
+| `/server start` | Opens the chat, and shows the address to use |
+| `/server stop` | Closes the chat |
+| `/server` | Says if the chat is open, and on what address |
+
+The address holds a token, and the page does not open without it. Keep the
+address private: a person who has it can tell the agent what to do.
+
+What you write in the browser shows in the terminal like a line that you type,
+and the answer of the model goes to the browser while it writes it. What you
+type in the terminal also shows in the browser.
+
+The plugin writes a small Python server to `/tmp/aphid-webchat/<project>`, and
+starts it with `exec`. Python 3 must be on the machine. `on_tick` reads what the
+browser sends, and each hook sends the answer of the model back. The workspace
+stays clean, because the plugin writes nothing in it.
+
+Settings go in `.aphid/plugins/webchat.json`:
+
+```json
+{ "host": "0.0.0.0", "port": 8000 }
+```
+
+`host` is `0.0.0.0`, and thus another machine on the same network can open the
+chat. Use `127.0.0.1` to keep the chat on this machine only.

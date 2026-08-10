@@ -7,14 +7,16 @@
 //!     run: |args| {
 //!         let diff = exec("git diff").stdout;
 //!         if diff == "" { return notice("nothing to review"); }
-//!         [notice("reviewing…"), prompt("Review this diff:\n" + diff)]
+//!         prompt("Review this diff:\n" + diff);
+//!         notice("reviewing…")
 //!     }
 //! });
 //! ```
 //!
-//! A handler returns what should happen: a `notice` the user reads, a `prompt`
-//! that goes to the model, or an array of both. That is the whole vocabulary,
-//! and it is enough to both report and steer.
+//! A handler returns what the user should read: a `notice`, a bare string, or an
+//! array of them. To steer the model it calls `prompt`, which is the one way to
+//! send text to it from anywhere — a hook and a tool reach for the same
+//! function.
 
 use std::sync::{Arc, Mutex};
 
@@ -36,8 +38,6 @@ pub type Registry = Arc<Mutex<Vec<CommandSpec>>>;
 pub enum Action {
     /// Show this to the user.
     Notice(String),
-    /// Send this to the model, as if the user had typed it.
-    Prompt(String),
 }
 
 /// Read a `register_command` argument.
@@ -103,7 +103,6 @@ pub fn actions(value: &Dynamic) -> Vec<Action> {
             .unwrap_or_default();
 
         return match kind.as_deref() {
-            Some("prompt") => vec![Action::Prompt(text)],
             Some("notice") => vec![Action::Notice(text)],
             _ => Vec::new(),
         };

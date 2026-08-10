@@ -65,6 +65,13 @@ impl Sink for Recorder {
     fn log(&self, plugin: &str, text: &str) {
         self.notify(plugin, text);
     }
+
+    fn prompt(&self, plugin: &str, text: &str) {
+        self.lines
+            .lock()
+            .expect("lock")
+            .push(format!("{plugin} prompts: {text}"));
+    }
 }
 
 /// Load one plugin out of a fixture, with the filesystem confined to it.
@@ -389,20 +396,24 @@ async fn a_failing_guard_blocks_but_a_failing_observer_does_not() {
 }
 
 #[tokio::test]
-async fn a_script_can_read_a_file_but_not_climb_out() {
+async fn a_script_reads_relative_to_the_workspace_and_beyond_it() {
+    // A coding session grants `exec`, and `sh` reads anywhere, so the file
+    // functions are unconfined too. What stays true is where a *relative* path
+    // starts. `caps::resolve`'s own tests cover a confined host.
+    let outside = std::env::temp_dir().join(format!("aphid-outside-{}.txt", unique()));
+    std::fs::write(&outside, "beyond").expect("write the outside file");
+
     let fixture = Fixture::new(
         "reader",
-        r#"
-        fn on_run_start(cx) {
+        &format!(
+            r#"
+        fn on_run_start(cx) {{
             notify(fs_read("note.txt"));
-            try {
-                fs_read("../escape.txt");
-                notify("escaped");
-            } catch (error) {
-                notify("refused");
-            }
-        }
+            notify(fs_read({:?}));
+        }}
         "#,
+            outside.display().to_string()
+        ),
     );
     std::fs::write(fixture.root().join("note.txt"), "inside").expect("write the file");
     let sink = Recorder::default();
@@ -416,6 +427,74 @@ async fn a_script_can_read_a_file_but_not_climb_out() {
         .build();
 
     agent.prompt("go").await;
+    let _ = std::fs::remove_file(&outside);
 
-    assert_eq!(sink.lines(), vec!["reader: inside", "reader: refused"]);
+    assert_eq!(sink.lines(), vec!["reader: inside", "reader: beyond"]);
+}
+
+#[tokio::test]
+async fn a_script_prompts_the_model_from_a_hook() {
+    let fixture = Fixture::new(
+        "nudge",
+        r#"
+        fn on_run_end(cx, outcome) {
+            prompt("and now the other thing");
+        }
+        "#,
+    );
+    let sink = Recorder::default();
+
+    let (backend, _script) = scripted([Turn::text("done")]);
+
+    let mut agent = Agent::builder()
+        .model(deepseek::flash())
+        .plugin_arc(host(&fixture, &sink))
+        .stream_fn(backend)
+        .build();
+
+    agent.prompt("go").await;
+
+    assert_eq!(
+        sink.lines(),
+        vec!["nudge prompts: and now the other thing"],
+        "a hook sends text to the model through the sink"
+    );
+}
+
+#[test]
+fn a_tick_reaches_the_plugins_that_want_one() {
+    let fixture = Fixture::new(
+        "clock",
+        r#"
+        fn on_tick() {
+            let memory = state();
+            memory.ticks = if memory.ticks == () { 1 } else { memory.ticks + 1 };
+            save_state(memory);
+            notify("tick " + memory.ticks);
+        }
+        "#,
+    );
+    let sink = Recorder::default();
+    let host = host(&fixture, &sink);
+
+    assert!(host.any_defines("on_tick"));
+
+    // Twice, because the guard that stops a slow tick from queueing behind
+    // itself has to be cleared again when the tick finishes.
+    host.tick();
+    host.tick();
+
+    assert_eq!(sink.lines(), vec!["clock: tick 1", "clock: tick 2"]);
+}
+
+#[test]
+fn a_plugin_without_a_tick_is_never_asked_for_one() {
+    let fixture = Fixture::new("quiet", r#"fn on_run_start(cx) { notify("hello"); }"#);
+    let sink = Recorder::default();
+    let host = host(&fixture, &sink);
+
+    assert!(!host.any_defines("on_tick"));
+    host.tick();
+
+    assert!(sink.lines().is_empty(), "{:?}", sink.lines());
 }

@@ -11,9 +11,7 @@ register_command(#{
             return notice("nothing to review");
         }
 
-        [
-            notice("reviewing " + diff.split('\n').len() + " lines of diff"),
-            prompt("Review this diff. Report only real problems.\n\n```diff\n" + diff + "\n```")
-        ]
+        prompt("Review this diff. Report only real problems.\n\n```diff\n" + diff + "\n```");
+        notice("reviewing " + diff.split('\n').len() + " lines of diff")
     }
 });

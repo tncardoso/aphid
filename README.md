@@ -227,6 +227,10 @@ A plugin in your home directory is yours and always loads. A plugin that comes
 with a checkout is different: aphid asks you the first time, and keeps the answer
 in `~/.aphid/trust.json`.
 
+This repository has one such plugin: `.aphid/plugins/webchat.rhai`. Type
+`/server start` and it puts a chat page on port 8000, so you can talk to the
+running session from a browser, on this machine or on your phone.
+
 Read [docs/plugins.md](docs/plugins.md) for the hooks, the return values, the
 capabilities and the limits. WebAssembly plugins are still to come.
 

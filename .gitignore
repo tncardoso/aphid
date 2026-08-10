@@ -1,2 +1,4 @@
 /target
-/.aphid
+/.aphid/*
+!/.aphid/plugins/
+.aphid/plugins/state

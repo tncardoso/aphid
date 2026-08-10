@@ -35,6 +35,7 @@ const HOOKS: &[(&str, Option<Interest>)] = &[
     ("on_tool_result", Some(Interest::TOOL_RESULT)),
     ("on_turn_end", Some(Interest::TURN_END)),
     ("on_run_end", Some(Interest::RUN_END)),
+    ("on_tick", None),
     ("on_system_prompt", None),
     ("on_session_start", None),
     ("on_session_end", None),
