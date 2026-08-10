@@ -9,16 +9,20 @@ use aphid_agent::{Agent, AgentHandle, RunOutcome};
 use aphid_core::{Model, ThinkingLevel, Transcript};
 use aphid_plugin::{Action as PluginAction, ScriptBackend, SessionInfo};
 use compact_str::CompactString;
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    supports_keyboard_enhancement,
 };
 use ratatui::crossterm::{ExecutableCommand, cursor};
-use ratatui::layout::{Constraint, Layout, Position};
+use ratatui::layout::{Constraint, Layout, Margin};
 use ratatui::prelude::CrosstermBackend;
 use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::text::Line;
+use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
@@ -551,10 +555,10 @@ pub async fn run(
         workspace.root().display()
     ));
 
-    let mut terminal = setup()?;
+    let (mut terminal, kitty) = setup()?;
     spawn_input_thread(events.clone());
     let result = drive(&mut terminal, &mut app, harness.agent, receiver).await;
-    restore(&mut terminal)?;
+    restore(&mut terminal, kitty)?;
 
     // After the terminal is back: a session hook that writes to standard error
     // then lands on a screen that is its own again. `session_end` also flushes
@@ -704,10 +708,17 @@ fn handle_key(app: &mut App, key: KeyEvent, agent: Option<&mut Agent>) {
     }
 }
 
-fn render(frame: &mut Frame<'_>, app: &App) {
-    let [transcript, input, status] = Layout::vertical([
+/// The input box grows with content up to this many rows, then scrolls.
+const MAX_INPUT_ROWS: u16 = 4;
+
+fn render(frame: &mut Frame<'_>, app: &mut App) {
+    let content_height = (app.input.line_count() as u16).clamp(1, MAX_INPUT_ROWS);
+    // +2 for the border's top and bottom rows.
+    let input_height = content_height + 2;
+
+    let [transcript, input_row, status] = Layout::vertical([
         Constraint::Min(1),
-        Constraint::Length(1),
+        Constraint::Length(input_height),
         Constraint::Length(1),
     ])
     .areas(frame.area());
@@ -723,28 +734,44 @@ fn render(frame: &mut Frame<'_>, app: &App) {
     let visible: Vec<Line<'_>> = lines.into_iter().skip(top).take(height).collect();
     frame.render_widget(Paragraph::new(visible), transcript);
 
-    let prompt = if app.status.running { "…" } else { ">" };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(format!("{prompt} "), Style::default().fg(Color::Cyan)),
-            Span::raw(app.input.text().to_owned()),
-        ])),
-        input,
-    );
+    app.input.set_prompt(app.status.running);
+    frame.render_widget(app.input.textarea(), input_row);
+    app.input.sync_scroll(content_height as usize);
+
+    if app.input.line_count() > content_height as usize {
+        let mut state =
+            ScrollbarState::new(app.input.line_count()).position(app.input.scroll_top());
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(None)
+                .thumb_style(Style::default().fg(Color::DarkGray)),
+            // Trim the border's top/bottom rows so the thumb only ever
+            // covers the content rows it actually represents.
+            input_row.inner(Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
+            &mut state,
+        );
+    }
+
     frame.render_widget(Paragraph::new(app.status.line()), status);
 
-    if app.modal.is_none() {
-        frame.set_cursor_position(Position::new(
-            input.x + 2 + app.input.cursor_column() as u16,
-            input.y,
-        ));
-    }
+    // The textarea draws its own cursor cell during render; there is no
+    // manual `set_cursor_position` to do here.
     if let Some(modal) = &app.modal {
         modal.render(frame, frame.area());
     }
 }
 
-fn setup() -> std::io::Result<Screen> {
+/// Sets up the terminal, and reports whether the keyboard-enhancement
+/// protocol was enabled — needed so `restore` knows whether to pop it, and
+/// so Shift+Enter can be told apart from plain Enter in the input box. On
+/// terminals that don't support it, Shift+Enter is indistinguishable from
+/// plain Enter, so it just submits — a graceful degradation, not a bug.
+fn setup() -> std::io::Result<(Screen, bool)> {
     // Restore the terminal even when something panics, so a crash does not
     // leave the shell in raw mode.
     let previous = std::panic::take_hook();
@@ -757,10 +784,24 @@ fn setup() -> std::io::Result<Screen> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     stdout.execute(EnterAlternateScreen)?;
-    Terminal::new(CrosstermBackend::new(stdout))
+
+    let kitty = supports_keyboard_enhancement().unwrap_or(false);
+    if kitty {
+        stdout.execute(PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+        ))?;
+    }
+
+    let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
+    Ok((terminal, kitty))
 }
 
-fn restore(terminal: &mut Screen) -> std::io::Result<()> {
+fn restore(terminal: &mut Screen, kitty: bool) -> std::io::Result<()> {
+    if kitty {
+        terminal
+            .backend_mut()
+            .execute(PopKeyboardEnhancementFlags)?;
+    }
     disable_raw_mode()?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
     terminal.backend_mut().execute(cursor::Show)?;
