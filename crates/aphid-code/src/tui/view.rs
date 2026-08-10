@@ -199,8 +199,10 @@ impl View {
                     lines.push(Line::default());
                 }
                 Entry::Notice(text) => {
-                    for part in wrap(text, width) {
-                        lines.push(Line::styled(part, Style::default().fg(Color::DarkGray)));
+                    for raw in text.lines() {
+                        for part in wrap(raw, width) {
+                            lines.push(Line::styled(part, Style::default().fg(Color::DarkGray)));
+                        }
                     }
                     lines.push(Line::default());
                 }

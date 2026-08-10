@@ -325,14 +325,21 @@ impl App {
 }
 
 const HELP: &str = "\
-/model [name]   switch model, or open the picker
-/think <level>  off | minimal | low | medium | high | xhigh | max
-/clear, /new    start a fresh conversation
-/tools          list the registered tools
-/session        where this session is being written
-/help, /quit
-Esc cancels a run · Ctrl-C quits · Ctrl-P cycles model · Ctrl-T shows reasoning
-PageUp/PageDown scroll";
+── commands ──────────────────────────────────────
+  /model  [name]  switch model, or open the picker
+  /think  <level>  off | minimal | low | medium | high | xhigh | max
+  /clear  /new     start a fresh conversation
+  /tools           list the registered tools
+  /session         where this session is being written
+  /help            this list
+  /quit            exit
+
+── keys ──────────────────────────────────────────
+  Esc         cancels a run
+  Ctrl-C      quits
+  Ctrl-P      cycles model
+  Ctrl-T      shows reasoning
+  PageUp/Dn   scroll";
 
 fn parse_thinking(raw: &str) -> Result<Option<ThinkingLevel>, String> {
     Ok(match raw {
