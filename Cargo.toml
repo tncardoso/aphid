@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/aphid-agent", "crates/aphid-cli", "crates/aphid-code", "crates/aphid-core"]
+members = [
+    "crates/aphid-agent",
+    "crates/aphid-cli",
+    "crates/aphid-code",
+    "crates/aphid-core",
+    "crates/aphid-plugin",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,7 +21,9 @@ compact_str = { version = "0.9", features = ["serde"] }
 bytes = "1"
 futures-core = "0.3"
 ratatui = "0.30"
+ratatui-textarea = "0.9"
 serde = { version = "1", features = ["derive"] }
+rhai = { version = "1.25", features = ["sync"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2", "charset"] }
 serde_json = "1"
 tokio = { version = "1", default-features = false, features = ["io-util", "macros", "net", "rt", "time"] }

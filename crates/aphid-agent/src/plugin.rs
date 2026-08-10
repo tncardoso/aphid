@@ -32,13 +32,15 @@ impl Interest {
     pub const TURN_END: Interest = Interest(1 << 5);
     pub const RUN_END: Interest = Interest(1 << 6);
     pub const TOOL_PROGRESS: Interest = Interest(1 << 7);
+    pub const PROMPT: Interest = Interest(1 << 8);
+    pub const MESSAGE: Interest = Interest(1 << 9);
 
     /// Every hook. The default, so a plugin that only overrides the methods it
     /// cares about still works.
-    pub const ALL: Interest = Interest(0b1111_1111);
+    pub const ALL: Interest = Interest(0b11_1111_1111);
 
     /// How many hooks there are, and so how many index lists the registry keeps.
-    pub(crate) const COUNT: usize = 8;
+    pub(crate) const COUNT: usize = 10;
 
     #[must_use]
     pub const fn empty() -> Self {
@@ -71,7 +73,7 @@ impl std::ops::BitOrAssign for Interest {
 
 impl fmt::Debug for Interest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Interest({:#09b})", self.0)
+        write!(f, "Interest({:#012b})", self.0)
     }
 }
 
@@ -112,6 +114,46 @@ impl Guard {
             reason: reason.into(),
             terminate: true,
         }
+    }
+}
+
+/// A prompt on its way into the transcript.
+///
+/// The one hook that fires *before* anything is appended, so unlike [`Cx`] this
+/// can rewrite rather than only add. `text` borrows the caller's string until a
+/// hook replaces it.
+pub struct PromptDraft<'a> {
+    pub(crate) text: Cow<'a, str>,
+    pub(crate) rejected: Option<String>,
+}
+
+impl PromptDraft<'_> {
+    /// The prompt as it stands, including any edit made by an earlier hook.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Replace the prompt before it is appended.
+    pub fn set_text(&mut self, text: impl Into<String>) {
+        self.text = Cow::Owned(text.into());
+    }
+
+    /// Drop the prompt and end the run before a request is sent. The reason is
+    /// reported on [`RunOutcome::error`](crate::RunOutcome::error).
+    ///
+    /// Nothing is appended to the transcript, so a rejected prompt leaves the
+    /// conversation exactly as it was.
+    pub fn reject(&mut self, reason: impl Into<String>) {
+        if self.rejected.is_none() {
+            self.rejected = Some(reason.into());
+        }
+    }
+
+    /// Whether an earlier hook already rejected this prompt.
+    #[must_use]
+    pub fn is_rejected(&self) -> bool {
+        self.rejected.is_some()
     }
 }
 
@@ -321,6 +363,15 @@ pub trait Plugin: Send + Sync + 'static {
         Vec::new()
     }
 
+    /// A prompt is about to be appended. The only hook that can rewrite rather
+    /// than add, because nothing has been committed yet.
+    ///
+    /// Fires for [`Agent::prompt`](crate::Agent::prompt) and
+    /// [`Agent::prompt_parts`](crate::Agent::prompt_parts) but not for
+    /// [`Agent::resume`](crate::Agent::resume), which appends nothing. For mixed
+    /// content only the text parts are shown, and a rewrite replaces them all.
+    fn on_prompt(&self, _draft: &mut PromptDraft<'_>) {}
+
     /// A run is about to start, after the prompt has been appended.
     fn on_run_start(&self, _cx: &mut RunCx<'_>) {}
 
@@ -329,6 +380,12 @@ pub trait Plugin: Send + Sync + 'static {
 
     /// One protocol event. The hot path — keep it cheap.
     fn on_event(&self, _event: &Event, _cx: &StreamCx<'_>) {}
+
+    /// An assistant message has been committed, before its tool calls are read.
+    ///
+    /// The whole response as one unit, for a plugin that would otherwise have to
+    /// reassemble it from [`Plugin::on_event`] deltas.
+    fn on_message(&self, _cx: &mut TurnCx<'_>, _message: MessageId) {}
 
     /// A tool call has been requested. Return [`Guard::Block`] to stop it, or
     /// mutate the call to patch its arguments.

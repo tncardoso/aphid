@@ -29,6 +29,7 @@ pub mod skills;
 pub mod tools;
 pub mod tui;
 
+pub use context::home_dir;
 pub use harness::{Harness, HarnessOptions};
 pub use model::Catalog;
 pub use skills::Skill;

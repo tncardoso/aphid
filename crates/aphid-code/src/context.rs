@@ -72,7 +72,13 @@ fn push_if_readable(files: &mut Vec<ContextFile>, path: &Path) {
     });
 }
 
-pub(crate) fn home_dir() -> Option<PathBuf> {
+/// The user's home directory.
+///
+/// Note this is `$HOME`, not `$APHID_HOME`: the model catalog honours the
+/// latter, but the files discovered here — `AGENTS.md`, skills, plugins — have
+/// always been read from the real home directory, and moving them now would
+/// silently orphan an existing setup.
+pub fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)

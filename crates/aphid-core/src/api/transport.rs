@@ -59,13 +59,32 @@ pub async fn stream(
     tools: &[Tool],
     options: &SimpleStreamOptions,
 ) -> CompletionStream {
-    let meta = AssistantMeta::new(model.api.clone(), model.provider.clone(), model.id.clone());
-    let buffer = MessageBuffer::new(meta);
-
     let body = match encode_request(model, transcript, tools, options) {
         Ok(body) => body,
-        Err(error) => return CompletionStream::failed(model, buffer, format!("{error}")),
+        Err(error) => {
+            let meta =
+                AssistantMeta::new(model.api.clone(), model.provider.clone(), model.id.clone());
+            return CompletionStream::failed(model, MessageBuffer::new(meta), format!("{error}"));
+        }
     };
+
+    stream_body(model, body, options).await
+}
+
+/// Send a request body that is already encoded, and return its event stream.
+///
+/// The half of [`stream`] after encoding, so a caller that wants to inspect or
+/// edit the body — a proxy, a scripted plugin — can do so without reimplementing
+/// the transport. Pair it with [`encode_request`].
+///
+/// Never fails, on the same terms as [`stream`].
+pub async fn stream_body(
+    model: &Model,
+    body: String,
+    options: &SimpleStreamOptions,
+) -> CompletionStream {
+    let meta = AssistantMeta::new(model.api.clone(), model.provider.clone(), model.id.clone());
+    let buffer = MessageBuffer::new(meta);
 
     let url = format!(
         "{}{CHAT_COMPLETIONS_PATH}",

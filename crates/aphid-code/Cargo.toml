@@ -9,9 +9,11 @@ repository.workspace = true
 [dependencies]
 aphid-agent = { path = "../aphid-agent" }
 aphid-core = { path = "../aphid-core" }
+aphid-plugin = { path = "../aphid-plugin" }
 chrono.workspace = true
 compact_str.workspace = true
 ratatui.workspace = true
+ratatui-textarea.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["fs", "process", "sync"] }

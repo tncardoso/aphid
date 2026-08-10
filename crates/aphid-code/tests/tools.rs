@@ -253,7 +253,7 @@ async fn read_refuses_to_leave_the_workspace() {
 #[tokio::test]
 async fn write_creates_parents_and_reports_what_it_did() {
     let temp = Temp::new();
-    let tool = write::tool(&temp.workspace());
+    let tool = write::tool(&temp.workspace(), None);
 
     let created = call(&tool, r#"{"path":"a/b/c.txt","content":"hello\n"}"#).await;
     assert!(!created.is_error, "{}", created.text_content());
@@ -276,7 +276,7 @@ async fn write_creates_parents_and_reports_what_it_did() {
 async fn edit_applies_a_unique_replacement() {
     let temp = Temp::new();
     temp.write("src/main.rs", "fn main() {\n    let n = 0;\n}\n");
-    let tool = edit::tool(&temp.workspace());
+    let tool = edit::tool(&temp.workspace(), None);
 
     let outcome = call(
         &tool,
@@ -302,7 +302,7 @@ async fn edit_applies_a_unique_replacement() {
 async fn edit_applies_several_in_order() {
     let temp = Temp::new();
     temp.write("f.txt", "one\ntwo\nthree\n");
-    let tool = edit::tool(&temp.workspace());
+    let tool = edit::tool(&temp.workspace(), None);
 
     let outcome = call(
         &tool,
@@ -322,7 +322,7 @@ async fn edit_applies_several_in_order() {
 async fn edit_refuses_an_ambiguous_match_and_changes_nothing() {
     let temp = Temp::new();
     temp.write("f.txt", "x = 1\ny = 2\nx = 1\n");
-    let tool = edit::tool(&temp.workspace());
+    let tool = edit::tool(&temp.workspace(), None);
 
     let outcome = call(
         &tool,
@@ -343,7 +343,7 @@ async fn edit_refuses_an_ambiguous_match_and_changes_nothing() {
 async fn edit_refuses_a_snippet_that_is_not_there() {
     let temp = Temp::new();
     temp.write("f.txt", "hello\n");
-    let tool = edit::tool(&temp.workspace());
+    let tool = edit::tool(&temp.workspace(), None);
 
     let outcome = call(
         &tool,
@@ -360,7 +360,7 @@ async fn edit_refuses_a_snippet_that_is_not_there() {
 async fn a_later_failing_edit_leaves_the_file_alone() {
     let temp = Temp::new();
     temp.write("f.txt", "one\ntwo\n");
-    let tool = edit::tool(&temp.workspace());
+    let tool = edit::tool(&temp.workspace(), None);
 
     let outcome = call(
         &tool,
@@ -380,7 +380,7 @@ async fn a_later_failing_edit_leaves_the_file_alone() {
 async fn edit_rejects_degenerate_replacements() {
     let temp = Temp::new();
     temp.write("f.txt", "hello\n");
-    let tool = edit::tool(&temp.workspace());
+    let tool = edit::tool(&temp.workspace(), None);
 
     let identical = call(
         &tool,
@@ -408,7 +408,7 @@ async fn edit_rejects_degenerate_replacements() {
 #[test]
 fn every_tool_is_registered_once_with_a_schema() {
     let temp = Temp::new();
-    let tools = aphid_code::tools::all(&temp.workspace());
+    let tools = aphid_code::tools::all(&temp.workspace(), None);
 
     let names: Vec<&str> = tools
         .iter()

@@ -25,22 +25,68 @@ use futures_core::Stream;
 use tokio::task::JoinSet;
 
 use crate::agent::{Agent, RunOutcome};
-use crate::plugin::{Cx, Flow, Guard, PendingCall, ResultCx, StreamCx, TurnSummary};
+use crate::plugin::{Cx, Flow, Guard, PendingCall, PromptDraft, ResultCx, StreamCx, TurnSummary};
 use crate::registry::Plugins;
 use crate::tool::{Execution, ToolCall, ToolContent, ToolCx, ToolOutcome};
 
 impl Agent {
     /// Append a user message and run to completion.
     pub async fn prompt(&mut self, text: &str) -> RunOutcome {
-        self.transcript.push_user(text);
+        let text = match self.draft(text) {
+            Ok(text) => text,
+            Err(reason) => return RunOutcome::rejected(reason),
+        };
+        self.transcript.push_user(&text);
         self.run().await
     }
 
     /// Append a user message built from mixed content — text and images — and
     /// run to completion.
     pub async fn prompt_parts(&mut self, parts: &[ContentInput<'_>]) -> RunOutcome {
+        // Plugins are shown the text, not the attachments. A rewrite therefore
+        // replaces every text part with one, and the images ride along in order.
+        if self.plugins.observes_prompts() {
+            let joined = join_text(parts);
+            let edited = match self.draft(&joined) {
+                Ok(text) => text,
+                Err(reason) => return RunOutcome::rejected(reason),
+            };
+            if edited != joined {
+                let mut replaced: Vec<ContentInput<'_>> = vec![ContentInput::Text(&edited)];
+                replaced.extend(
+                    parts
+                        .iter()
+                        .filter(|part| !matches!(part, ContentInput::Text(_)))
+                        .copied(),
+                );
+                self.transcript.push_user_parts(&replaced);
+                return self.run().await;
+            }
+        }
+
         self.transcript.push_user_parts(parts);
         self.run().await
+    }
+
+    /// Show a prompt to the plugins before anything is appended.
+    ///
+    /// `Err` is the reason a hook turned it away. A rejected prompt leaves the
+    /// transcript untouched, so the conversation is exactly as it was.
+    fn draft<'a>(&self, text: &'a str) -> Result<Cow<'a, str>, String> {
+        if !self.plugins.observes_prompts() {
+            return Ok(Cow::Borrowed(text));
+        }
+
+        let mut draft = PromptDraft {
+            text: Cow::Borrowed(text),
+            rejected: None,
+        };
+        self.plugins.prompt(&mut draft);
+
+        match draft.rejected {
+            Some(reason) => Err(reason),
+            None => Ok(draft.text),
+        }
     }
 
     /// Run from the transcript as it stands, without appending anything.
@@ -130,6 +176,17 @@ impl Agent {
             turn += 1;
             outcome.turns = turn;
             outcome.last = Some(message);
+
+            {
+                let mut cx = cx(
+                    &mut self.transcript,
+                    &self.model,
+                    turn - 1,
+                    outcome.usage,
+                    &self.cancel,
+                );
+                self.plugins.message(&mut cx, message);
+            }
 
             // Read the requested calls out of the arena. `calls` borrows the
             // transcript, so every result is produced before anything is
@@ -242,6 +299,20 @@ async fn next<S: Stream<Item = Event> + Unpin + ?Sized>(stream: &mut S) -> Optio
 /// The second half of the return value is the batch's early-termination
 /// verdict: true only when *every* result asked to stop, which is what keeps one
 /// opinionated tool from ending a run on its own.
+/// The text parts of a mixed-content prompt, as one string.
+fn join_text(parts: &[ContentInput<'_>]) -> String {
+    let mut joined = String::new();
+    for part in parts {
+        if let ContentInput::Text(text) = part {
+            if !joined.is_empty() {
+                joined.push('\n');
+            }
+            joined.push_str(text);
+        }
+    }
+    joined
+}
+
 async fn execute(
     plugins: &Plugins,
     calls: &[PendingCall<'_>],

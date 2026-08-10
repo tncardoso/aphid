@@ -135,7 +135,7 @@ OPTIONS:
 
 ## Design
 
-The workspace splits into four crates, a narrow step at each one:
+The workspace splits into five crates, a narrow step at each one:
 
 - **[`aphid-core`]** — message, model and streaming types. The `Transcript`
   arena layout, spans, thinking levels, the OpenAI-completions encoder, and the
@@ -143,6 +143,9 @@ The workspace splits into four crates, a narrow step at each one:
 - **[`aphid-agent`]** — the agent loop. `Agent::prompt` runs *request → stream →
   commit → execute tools* until the model stops asking for tools, plus the tool
   registry and the plugin API. Deliberately unopinionated.
+- **[`aphid-plugin`]** — the Rhai host. Plugin discovery, the script engine and
+  its capabilities, and the trust gate. Keeps the scripting runtime out of the
+  loop crate entirely.
 - **[`aphid-code`]** — the specialization. The tools a coding agent needs,
   system-prompt assembly from the project's conventions, skill discovery,
   on-disk sessions, permission plugins, and the TUI.
@@ -188,9 +191,44 @@ impl Plugin for NoCityName {
 }
 ```
 
-The plan is for plugins to also be writable in **Rhai** or **WebAssembly** (see
-[`aphid-code`] docs) — the synchronous, zero-copy hook surface is built so a
-runtime-embedding can implement each hook without allocating.
+### Rhai plugins
+
+You can also write a plugin as one file of [Rhai](https://rhai.rs), with no need
+to compile aphid again. Put the file in the workspace or in your home directory:
+
+```text
+.aphid/plugins/<name>.rhai
+.aphid/plugins/<name>/main.rhai
+```
+
+A plugin declares a hook when it declares a function with the correct name.
+Aphid reads the names from the compiled script, and subscribes to only those
+hooks.
+
+```rhai
+//! Keeps the model away from the changelog.
+
+fn on_tool_call(tool) {
+    if tool.name == "write" && tool.arguments.contains("CHANGELOG") {
+        return block("the changelog is written by hand");
+    }
+}
+
+fn on_turn_end(cx, turn) {
+    if turn.stop_reason == "length" { cx.note("the last answer was cut short"); }
+}
+```
+
+A plugin can also add a tool with `register_tool` and a command with
+`register_command`, keep settings in `<name>.json`, and remember things with
+`save_state`.
+
+A plugin in your home directory is yours and always loads. A plugin that comes
+with a checkout is different: aphid asks you the first time, and keeps the answer
+in `~/.aphid/trust.json`.
+
+Read [docs/plugins.md](docs/plugins.md) for the hooks, the return values, the
+capabilities and the limits. WebAssembly plugins are still to come.
 
 ## Skills
 

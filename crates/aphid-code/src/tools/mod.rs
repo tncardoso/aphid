@@ -18,17 +18,24 @@ pub mod write;
 use std::sync::Arc;
 
 use aphid_agent::ToolHandler;
+use aphid_plugin::PluginHost;
 
 pub use paths::Workspace;
 
 /// Every tool, ready to register.
+///
+/// `host` is told about files the tools change; pass `None` when nothing is
+/// listening, which is the case for tests and for a session with no plugins.
 #[must_use]
-pub fn all(workspace: &Workspace) -> Vec<Arc<dyn ToolHandler>> {
+pub fn all(workspace: &Workspace, host: Option<Arc<PluginHost>>) -> Vec<Arc<dyn ToolHandler>> {
+    // Only worth carrying when somebody actually asked for it: the handle is
+    // cloned into every call otherwise.
+    let watcher = host.filter(|host| host.any_defines("on_file_change"));
     vec![
         Arc::new(bash::tool(workspace)),
         Arc::new(read::tool(workspace)),
-        Arc::new(write::tool(workspace)),
-        Arc::new(edit::tool(workspace)),
+        Arc::new(write::tool(workspace, watcher.clone())),
+        Arc::new(edit::tool(workspace, watcher)),
     ]
 }
 

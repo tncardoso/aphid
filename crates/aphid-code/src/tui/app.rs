@@ -7,25 +7,31 @@ use std::time::Duration;
 
 use aphid_agent::{Agent, AgentHandle, RunOutcome};
 use aphid_core::{Model, ThinkingLevel, Transcript};
+use aphid_plugin::{Action as PluginAction, ScriptBackend, SessionInfo};
 use compact_str::CompactString;
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    supports_keyboard_enhancement,
 };
 use ratatui::crossterm::{ExecutableCommand, cursor};
-use ratatui::layout::{Constraint, Layout, Position};
+use ratatui::layout::{Constraint, Layout, Margin};
 use ratatui::prelude::CrosstermBackend;
 use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::text::Line;
+use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use crate::harness::{self, Harness, HarnessOptions};
 use crate::model::{Catalog, ResolveError, clamp_thinking};
 use crate::plugins::permissions::{Decision, Permissions};
+use crate::plugins::scripts;
 use crate::session::{self, SessionPlugin, sessions_dir};
-use crate::tui::event::{UiConfirmer, UiEvent, UiPlugin, spawn_input_thread};
+use crate::tui::event::{UiConfirmer, UiEvent, UiPlugin, UiSink, spawn_input_thread};
 use crate::tui::input::{Action, Input};
 use crate::tui::modal::{Confirm, Modal};
 use crate::tui::status::Status;
@@ -45,6 +51,8 @@ pub struct App {
     pub input: Input,
     pub status: Status,
     pub modal: Option<Modal>,
+    /// The loaded plugins, for the commands they registered and `/plugins`.
+    host: Option<Arc<aphid_plugin::PluginHost>>,
     catalog: Catalog,
     thinking: Option<ThinkingLevel>,
     session: Option<Arc<SessionPlugin>>,
@@ -70,6 +78,7 @@ impl App {
             session: None,
             queued: None,
             handle: harness.agent.handle(),
+            host: None,
             quit: false,
         }
     }
@@ -86,6 +95,7 @@ impl App {
             session: None,
             queued: None,
             handle: agent.handle(),
+            host: None,
             quit: false,
         }
     }
@@ -164,6 +174,7 @@ impl App {
                     self.view.push_notice(format!("error: {error}"));
                 }
             }
+            UiEvent::Notice(text) => self.view.push_notice(text),
             UiEvent::RunEnded(_) => self.status.running = false,
             UiEvent::Confirm {
                 tool,
@@ -327,12 +338,78 @@ impl App {
                 self.view.push_notice(format!("session: {described}"));
             }
             "help" => self.view.push_notice(HELP),
-            other => self
-                .view
-                .push_notice(format!("unknown command `/{other}` — try /help")),
+            "plugins" => self.view.push_notice(self.plugin_summary()),
+            // Built-ins win, so a plugin can never take `/quit` away.
+            other => return self.plugin_command(other, rest),
         }
 
         None
+    }
+
+    /// Run a plugin's command, or report that nothing owns the name.
+    ///
+    /// Returns a prompt when the command asked for one, which the caller feeds
+    /// through exactly the path a typed prompt takes.
+    fn plugin_command(&mut self, name: &str, args: &str) -> Option<String> {
+        let host = self.host.clone()?;
+        let Some(actions) = host.run_command(name, args) else {
+            self.view
+                .push_notice(format!("unknown command `/{name}` — try /help"));
+            return None;
+        };
+
+        let mut prompt = None;
+        for action in actions {
+            match action {
+                PluginAction::Notice(text) => self.view.push_notice(text),
+                // Only the first prompt runs: a command that returned two has
+                // asked for something the agent cannot do at once.
+                PluginAction::Prompt(text) => {
+                    prompt.get_or_insert(text);
+                }
+            }
+        }
+        prompt
+    }
+
+    /// What `/plugins` prints.
+    fn plugin_summary(&self) -> String {
+        let Some(host) = &self.host else {
+            return "no plugins are loaded".to_owned();
+        };
+        if host.is_empty() && host.diagnostics().is_empty() {
+            return "no plugins are loaded".to_owned();
+        }
+
+        let mut lines = Vec::new();
+        for plugin in host.plugins() {
+            let mut parts = Vec::new();
+            if !plugin.hooks().is_empty() {
+                parts.push(plugin.hooks().join(", "));
+            }
+            let tools = plugin.tools().len();
+            if tools > 0 {
+                parts.push(format!("{tools} tool(s)"));
+            }
+            let commands = plugin.commands().len();
+            if commands > 0 {
+                parts.push(format!("{commands} command(s)"));
+            }
+            lines.push(format!("  {:<16} {}", plugin.name(), parts.join(" · ")));
+        }
+
+        for command in host.commands() {
+            lines.push(format!(
+                "  /{:<15} {} [{}]",
+                command.invocation, command.description, command.plugin
+            ));
+        }
+
+        for problem in host.diagnostics() {
+            lines.push(format!("  ! {problem}"));
+        }
+
+        format!("── plugins ──\n{}", lines.join("\n"))
     }
 }
 
@@ -343,6 +420,7 @@ const HELP: &str = "\
   /clear  /new     start a fresh conversation
   /tools           list the registered tools
   /session         where this session is being written
+  /plugins         list the loaded plugins and their commands
   /help            this list
   /quit            exit
 
@@ -403,14 +481,42 @@ pub async fn run(
     let thinking = options.thinking;
     let model_id = options.model.id.to_string();
 
+    // Scripts print through the app loop, because the UI owns the screen.
+    let plugin_files = std::mem::take(&mut options.plugin_files);
+    let (host, plugin_problems) = scripts::load(
+        &workspace,
+        &plugin_files,
+        Arc::new(UiSink::new(events.clone())),
+    );
+    if let Some(backend) = ScriptBackend::install(&host)
+        && options.stream_fn.is_none()
+    {
+        options.stream_fn = Some(backend);
+    }
+    if !host.is_empty() {
+        options.plugins.push(host.clone());
+        options.host = Some(host.clone());
+    }
+
     // The session plugin has to be registered before the agent is built.
     let directory = sessions_dir(&workspace);
     let (session, resumed) = session::attach(&directory, &cwd, Some(&model_id), resume.as_deref())?;
     options.plugins.push(session.clone());
 
+    let session_id = session.id();
+    let session_path = session.path();
+    host.session_start(&SessionInfo {
+        id: session_id.as_deref(),
+        path: session_path.as_deref(),
+        reason: if resumed.is_some() { "resume" } else { "new" },
+        restored: 0,
+    });
+
     let mut harness = harness::build(options);
     let mut app = App::new(&harness, thinking);
     app.session = Some(session);
+    app.view.watch(host.clone());
+    app.host = Some(host.clone());
 
     for note in &harness.notes {
         app.view.push_notice(note.clone());
@@ -421,6 +527,9 @@ pub async fn run(
             diagnostic.path.display(),
             diagnostic.message
         ));
+    }
+    for problem in &plugin_problems {
+        app.view.push_notice(problem.to_string());
     }
     if let Some(transcript) = resumed {
         app.replay(&transcript);
@@ -446,10 +555,21 @@ pub async fn run(
         workspace.root().display()
     ));
 
-    let mut terminal = setup()?;
+    let (mut terminal, kitty) = setup()?;
     spawn_input_thread(events.clone());
     let result = drive(&mut terminal, &mut app, harness.agent, receiver).await;
-    restore(&mut terminal)?;
+    restore(&mut terminal, kitty)?;
+
+    // After the terminal is back: a session hook that writes to standard error
+    // then lands on a screen that is its own again. `session_end` also flushes
+    // every plugin's state, so this is the last thing to run.
+    host.session_end(&SessionInfo {
+        id: session_id.as_deref(),
+        path: session_path.as_deref(),
+        reason: "end",
+        restored: 0,
+    });
+
     result
 }
 
@@ -588,10 +708,17 @@ fn handle_key(app: &mut App, key: KeyEvent, agent: Option<&mut Agent>) {
     }
 }
 
-fn render(frame: &mut Frame<'_>, app: &App) {
-    let [transcript, input, status] = Layout::vertical([
+/// The input box grows with content up to this many rows, then scrolls.
+const MAX_INPUT_ROWS: u16 = 4;
+
+fn render(frame: &mut Frame<'_>, app: &mut App) {
+    let content_height = (app.input.line_count() as u16).clamp(1, MAX_INPUT_ROWS);
+    // +2 for the border's top and bottom rows.
+    let input_height = content_height + 2;
+
+    let [transcript, input_row, status] = Layout::vertical([
         Constraint::Min(1),
-        Constraint::Length(1),
+        Constraint::Length(input_height),
         Constraint::Length(1),
     ])
     .areas(frame.area());
@@ -607,28 +734,44 @@ fn render(frame: &mut Frame<'_>, app: &App) {
     let visible: Vec<Line<'_>> = lines.into_iter().skip(top).take(height).collect();
     frame.render_widget(Paragraph::new(visible), transcript);
 
-    let prompt = if app.status.running { "…" } else { ">" };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(format!("{prompt} "), Style::default().fg(Color::Cyan)),
-            Span::raw(app.input.text().to_owned()),
-        ])),
-        input,
-    );
+    app.input.set_prompt(app.status.running);
+    frame.render_widget(app.input.textarea(), input_row);
+    app.input.sync_scroll(content_height as usize);
+
+    if app.input.line_count() > content_height as usize {
+        let mut state =
+            ScrollbarState::new(app.input.line_count()).position(app.input.scroll_top());
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(None)
+                .thumb_style(Style::default().fg(Color::DarkGray)),
+            // Trim the border's top/bottom rows so the thumb only ever
+            // covers the content rows it actually represents.
+            input_row.inner(Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
+            &mut state,
+        );
+    }
+
     frame.render_widget(Paragraph::new(app.status.line()), status);
 
-    if app.modal.is_none() {
-        frame.set_cursor_position(Position::new(
-            input.x + 2 + app.input.cursor_column() as u16,
-            input.y,
-        ));
-    }
+    // The textarea draws its own cursor cell during render; there is no
+    // manual `set_cursor_position` to do here.
     if let Some(modal) = &app.modal {
         modal.render(frame, frame.area());
     }
 }
 
-fn setup() -> std::io::Result<Screen> {
+/// Sets up the terminal, and reports whether the keyboard-enhancement
+/// protocol was enabled — needed so `restore` knows whether to pop it, and
+/// so Shift+Enter can be told apart from plain Enter in the input box. On
+/// terminals that don't support it, Shift+Enter is indistinguishable from
+/// plain Enter, so it just submits — a graceful degradation, not a bug.
+fn setup() -> std::io::Result<(Screen, bool)> {
     // Restore the terminal even when something panics, so a crash does not
     // leave the shell in raw mode.
     let previous = std::panic::take_hook();
@@ -641,10 +784,24 @@ fn setup() -> std::io::Result<Screen> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     stdout.execute(EnterAlternateScreen)?;
-    Terminal::new(CrosstermBackend::new(stdout))
+
+    let kitty = supports_keyboard_enhancement().unwrap_or(false);
+    if kitty {
+        stdout.execute(PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+        ))?;
+    }
+
+    let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
+    Ok((terminal, kitty))
 }
 
-fn restore(terminal: &mut Screen) -> std::io::Result<()> {
+fn restore(terminal: &mut Screen, kitty: bool) -> std::io::Result<()> {
+    if kitty {
+        terminal
+            .backend_mut()
+            .execute(PopKeyboardEnhancementFlags)?;
+    }
     disable_raw_mode()?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
     terminal.backend_mut().execute(cursor::Show)?;
@@ -781,5 +938,145 @@ mod tests {
         assert!(app.queued().is_none(), "a command is not a prompt");
         assert!(take_pending(&mut idle, &mut app).is_none());
         assert!(idle.is_some());
+    }
+}
+
+#[cfg(test)]
+mod plugin_tests {
+    use std::sync::Arc;
+
+    use aphid_agent::Agent;
+    use aphid_core::providers::deepseek;
+    use aphid_plugin::{Capabilities, PluginHost, Silent, explicit};
+
+    use super::{App, Status};
+    use crate::tui::view::Entry;
+
+    /// A workspace with one plugin, removed on drop.
+    struct Fixture(std::path::PathBuf);
+
+    impl Fixture {
+        fn new(source: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+
+            let root = std::env::temp_dir().join(format!(
+                "aphid-app-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let dir = root.join(".aphid").join("plugins");
+            std::fs::create_dir_all(&dir).expect("create");
+            std::fs::write(dir.join("kit.rhai"), source).expect("write");
+            Self(root)
+        }
+
+        fn host(&self) -> Arc<PluginHost> {
+            let file = explicit(&self.0.join(".aphid").join("plugins").join("kit.rhai"))
+                .expect("readable");
+            let (host, problems) =
+                PluginHost::load(&[file], &Capabilities::full(&self.0), Arc::new(Silent));
+            assert!(problems.is_empty(), "{problems:?}");
+            Arc::new(host)
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn app_with(host: Arc<PluginHost>) -> (App, Agent) {
+        let (backend, _script) = aphid_agent::testing::scripted([]);
+        let agent = Agent::builder()
+            .model(deepseek::flash())
+            .stream_fn(backend)
+            .build();
+        let mut app = App::new_for_test(&agent);
+        app.status = Status::from_model(agent.model());
+        app.host = Some(host);
+        (app, agent)
+    }
+
+    fn notices(app: &App) -> Vec<String> {
+        app.view
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Notice(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_plugin_command_can_print_and_return_a_prompt() {
+        let fixture = Fixture::new(
+            r#"
+            register_command(#{
+                name: "greet",
+                description: "Say hello.",
+                run: |args| { [notice("greeting " + args), prompt("Say hello to " + args)] }
+            });
+            "#,
+        );
+        let (mut app, mut agent) = app_with(fixture.host());
+
+        let prompt = app.command(&mut agent, "/greet Ana");
+
+        assert_eq!(prompt.as_deref(), Some("Say hello to Ana"));
+        assert_eq!(notices(&app), vec!["greeting Ana"]);
+    }
+
+    #[test]
+    fn a_built_in_command_wins_over_a_plugin_of_the_same_name() {
+        let fixture = Fixture::new(
+            r#"register_command(#{ name: "help", run: |args| { prompt("hijacked") } });"#,
+        );
+        let (mut app, mut agent) = app_with(fixture.host());
+
+        let prompt = app.command(&mut agent, "/help");
+
+        assert_eq!(prompt, None, "the built-in ran, not the plugin");
+        assert!(
+            notices(&app)
+                .first()
+                .is_some_and(|text| text.contains("commands")),
+            "{:?}",
+            notices(&app)
+        );
+    }
+
+    #[test]
+    fn an_unknown_command_is_still_reported() {
+        let fixture = Fixture::new(r#"fn on_run_start(cx) {}"#);
+        let (mut app, mut agent) = app_with(fixture.host());
+
+        assert_eq!(app.command(&mut agent, "/nope"), None);
+        assert!(
+            notices(&app)[0].contains("unknown command `/nope`"),
+            "{:?}",
+            notices(&app)
+        );
+    }
+
+    #[test]
+    fn plugins_lists_what_loaded() {
+        let fixture = Fixture::new(
+            r#"
+            fn on_run_start(cx) {}
+            register_command(#{ name: "greet", description: "Say hello.", run: |a| { "hi" } });
+            "#,
+        );
+        let (mut app, mut agent) = app_with(fixture.host());
+
+        app.command(&mut agent, "/plugins");
+
+        let summary = notices(&app).remove(0);
+        assert!(summary.contains("kit"), "{summary}");
+        assert!(summary.contains("on_run_start"), "{summary}");
+        assert!(summary.contains("/greet"), "{summary}");
+        assert!(summary.contains("Say hello."), "{summary}");
     }
 }

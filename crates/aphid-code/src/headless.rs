@@ -17,6 +17,7 @@ use aphid_core::{BlockKind, Event};
 use aphid_core::Transcript;
 
 use crate::harness::{self, Harness, HarnessOptions};
+use crate::plugins::scripts;
 use crate::session;
 
 /// Prints a run to stdout as it happens.
@@ -62,6 +63,14 @@ impl Printer {
 
     fn line(&self, text: &str) {
         self.write(&format!("{text}\n"), false);
+    }
+}
+
+/// A plugin's `notify` output goes to the same stream as everything else, so it
+/// interleaves correctly with the run rather than racing it.
+impl aphid_plugin::Sink for Printer {
+    fn notify(&self, plugin: &str, text: &str) {
+        self.line(&format!("[{plugin}] {text}"));
     }
 }
 
@@ -148,9 +157,30 @@ pub async fn run(
     quiet: bool,
     resumed: Option<Transcript>,
 ) -> (Harness, RunOutcome) {
-    options
-        .plugins
-        .push(std::sync::Arc::new(Printer::new(quiet)));
+    let printer = std::sync::Arc::new(Printer::new(quiet));
+    options.plugins.push(printer.clone());
+
+    // Scripts print through the same printer, so their output interleaves with
+    // the run instead of racing it.
+    let plugin_files = std::mem::take(&mut options.plugin_files);
+    let workspace = options.workspace.clone();
+    let (host, plugin_problems) = scripts::load(&workspace, &plugin_files, printer);
+    if let Some(backend) = aphid_plugin::ScriptBackend::install(&host)
+        && options.stream_fn.is_none()
+    {
+        options.stream_fn = Some(backend);
+    }
+    if !host.is_empty() {
+        options.plugins.push(host.clone());
+        options.host = Some(host.clone());
+    }
+
+    host.session_start(&aphid_plugin::SessionInfo {
+        id: None,
+        path: None,
+        reason: if resumed.is_some() { "resume" } else { "new" },
+        restored: 0,
+    });
 
     let mut harness = harness::build(options);
     if let Some(transcript) = resumed {
@@ -159,6 +189,7 @@ pub async fn run(
     }
     for note in &harness.notes {
         eprintln!("aphid: {note}");
+        host.notice(note);
     }
     for diagnostic in &harness.diagnostics {
         eprintln!(
@@ -167,7 +198,20 @@ pub async fn run(
             diagnostic.message
         );
     }
+    for problem in &plugin_problems {
+        eprintln!("aphid: {problem}");
+    }
 
     let outcome = harness.agent.prompt(prompt).await;
+
+    // One prompt is the whole session here, so it ends as soon as the run does.
+    // This flushes plugin state too.
+    host.session_end(&aphid_plugin::SessionInfo {
+        id: None,
+        path: None,
+        reason: "end",
+        restored: 0,
+    });
+
     (harness, outcome)
 }

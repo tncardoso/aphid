@@ -51,6 +51,10 @@ terminal user interface.
 | `--sessions` | Print the saved sessions for this workspace, and exit. |
 | `--confirm` | Ask before each command that changes the workspace. |
 | `--no-context` | Do not read `AGENTS.md` files or skills. |
+| `--list-plugins` | Print the plugins that would load, and exit. |
+| `--no-plugins` | Do not load any plugin from `.aphid/plugins`. |
+| `--plugin <PATH>` | Load one plugin from a path. |
+| `--trust-plugins` | Agree to the plugins of this workspace. |
 | `--max-turns <N>` | Stop the run after this quantity of requests. |
 | `--quiet` | Do not print the output of each tool. |
 
@@ -100,6 +104,14 @@ workspace. A headless run has no terminal for a question. Thus `--confirm` and
 `-p` together refuse each such command.
 
 `--no-context` prevents aphid from reading the `AGENTS.md` files and the skills.
+
+The plugin options control the Rhai plugins in `.aphid/plugins`. A plugin in your
+home directory always loads. A plugin that comes with a workspace needs your
+agreement the first time; aphid asks before the terminal user interface starts,
+and keeps the answer in `~/.aphid/trust.json`. A headless run has no terminal for
+a question, and thus does not load the plugins of the workspace unless you give
+`--trust-plugins`. `--plugin` names a file directly and does not ask.
+Read [plugins.md](plugins.md) to write one.
 Use it to make the start of a run fully predictable.
 
 ## `raw` and `agent`
@@ -336,6 +348,9 @@ models that it supplies. A mistake in this file cannot prevent a start.
 | `~/.aphid/AGENTS.md` | Instructions for each workspace. |
 | `<workspace>/AGENTS.md` | Instructions for one workspace. |
 | `<workspace>/.aphid/sessions/` | The saved sessions. |
+| `<workspace>/.aphid/plugins/` | The plugins of this workspace. |
+| `~/.aphid/plugins/` | Your plugins, for each workspace. |
+| `~/.aphid/trust.json` | The workspaces whose plugins you agreed to. |
 
 aphid reads each `AGENTS.md` file from the workspace root down to the current
 directory. The most specific file is last, and it has the final word.

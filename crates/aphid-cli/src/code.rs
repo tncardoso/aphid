@@ -1,10 +1,12 @@
 //! `aphid` — the coding agent, interactive or headless.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use aphid_code::harness::HarnessOptions;
 use aphid_code::model::Catalog;
+use aphid_code::plugins::scripts;
+use aphid_code::plugins::scripts::Gate;
 use aphid_code::plugins::{DenyAll, Permissions};
 use aphid_code::session::{self, sessions_dir};
 use aphid_code::{Workspace, headless, tui};
@@ -52,6 +54,18 @@ pub struct Args {
     /// Skip AGENTS.md and skills
     #[arg(long)]
     pub no_context: bool,
+    /// Skip every .aphid/plugins file
+    #[arg(long)]
+    pub no_plugins: bool,
+    /// Load one plugin from a path, on top of whatever was discovered
+    #[arg(long = "plugin", value_name = "PATH")]
+    pub plugins: Vec<PathBuf>,
+    /// List the plugins that would load and exit
+    #[arg(long = "list-plugins")]
+    pub list_plugins: bool,
+    /// Trust this workspace's own plugins without asking
+    #[arg(long)]
+    pub trust_plugins: bool,
     /// Stop a run after this many provider requests
     #[arg(long, value_name = "N")]
     pub max_turns: Option<u32>,
@@ -126,6 +140,40 @@ pub async fn run(args: Args) -> ExitCode {
         None => catalog.default_model(),
     };
 
+    let found = collect_plugins(&workspace, args.no_plugins, &args.plugins);
+
+    // Listing is a question, not a run: it never asks about trust, and instead
+    // says which plugins the answer is still missing for.
+    if args.list_plugins {
+        if found.is_empty() {
+            println!("no plugins");
+        }
+        let gate = scripts::gate(&workspace, &found, aphid_code::home_dir().as_deref());
+        for file in &found {
+            let scope = match (file.project, gate) {
+                (false, _) => "global",
+                (true, Gate::Open) => "project",
+                (true, Gate::Ask) => "project (not yet trusted)",
+                (true, Gate::Refused) => "project (refused)",
+            };
+            println!(
+                "{:<20} {:<26} {}",
+                file.name,
+                scope,
+                file.description.as_deref().unwrap_or("")
+            );
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    let plugin_files = gate(
+        &workspace,
+        found,
+        aphid_code::home_dir().as_deref(),
+        args.trust_plugins,
+        args.prompt().is_none(),
+    );
+
     let thinking = args.thinking();
 
     let api_key = match api_key(&model) {
@@ -144,6 +192,7 @@ pub async fn run(args: Args) -> ExitCode {
     options.system = args.system;
     options.append_system = args.append_system;
     options.load_context = !args.no_context;
+    options.plugin_files = plugin_files;
     options.api_key = Some(api_key.into());
     if let Some(max_turns) = args.max_turns {
         options.max_turns = max_turns;
@@ -201,6 +250,126 @@ pub async fn run(args: Args) -> ExitCode {
             }
         },
     }
+}
+
+/// The plugins to load: whatever was discovered, plus anything named on the
+/// command line.
+///
+/// An explicit `--plugin` is honoured even under `--no-plugins`, because the two
+/// say different things: one turns off discovery, the other names a file.
+fn collect_plugins(
+    workspace: &Workspace,
+    no_plugins: bool,
+    explicit: &[PathBuf],
+) -> Vec<aphid_plugin::PluginFile> {
+    let mut files = Vec::new();
+
+    if !no_plugins {
+        let (discovered, problems) =
+            scripts::discover(workspace, aphid_code::home_dir().as_deref());
+        for problem in problems {
+            eprintln!("aphid: {problem}");
+        }
+        files = discovered;
+    }
+
+    for path in explicit {
+        match aphid_plugin::explicit(path) {
+            Ok(file) => {
+                files.retain(|existing| existing.name != file.name);
+                files.push(file);
+            }
+            Err(problem) => eprintln!("aphid: {problem}"),
+        }
+    }
+
+    files
+}
+
+/// Decide whether this workspace's own plugins may load.
+///
+/// Asked once per workspace, before the terminal UI starts, so the question
+/// arrives on an ordinary terminal and the answer is not competing with a
+/// redraw. Headless never asks: there is nobody there, and a prompt that cannot
+/// be answered would either hang or silently allow.
+fn gate(
+    workspace: &Workspace,
+    files: Vec<aphid_plugin::PluginFile>,
+    home: Option<&Path>,
+    trusted: bool,
+    interactive: bool,
+) -> Vec<aphid_plugin::PluginFile> {
+    if trusted {
+        if let Some(home) = home
+            && let Err(error) = scripts::remember(workspace, home, true)
+        {
+            eprintln!("aphid: could not record the trust decision: {error}");
+        }
+        return files;
+    }
+
+    match scripts::gate(workspace, &files, home) {
+        Gate::Open => files,
+        Gate::Refused => scripts::without_project(files),
+        Gate::Ask if !interactive => {
+            eprintln!(
+                "aphid: this workspace has plugins of its own, and they were not loaded. \
+                 Run aphid without a prompt to decide, or pass --trust-plugins."
+            );
+            scripts::without_project(files)
+        }
+        Gate::Ask => {
+            let project: Vec<&str> = files
+                .iter()
+                .filter(|file| file.project)
+                .map(|file| file.name.as_str())
+                .collect();
+            let answer = ask(workspace, &project);
+
+            if let Some(home) = home
+                && let Err(error) = scripts::remember(workspace, home, answer)
+            {
+                eprintln!("aphid: could not record the trust decision: {error}");
+            }
+
+            if answer {
+                files
+            } else {
+                scripts::without_project(files)
+            }
+        }
+    }
+}
+
+/// Put the question to the user. Anything but yes is a no.
+fn ask(workspace: &Workspace, plugins: &[&str]) -> bool {
+    use std::io::{IsTerminal, Write};
+
+    // A piped stdin would read end-of-file straight away, and a silent no is
+    // worse than saying why nothing loaded.
+    if !std::io::stdin().is_terminal() {
+        eprintln!(
+            "aphid: {} has plugins of its own, and they were not loaded. \
+             Run aphid from a terminal to decide, or pass --trust-plugins.",
+            workspace.root().display()
+        );
+        return false;
+    }
+
+    eprintln!(
+        "\naphid: {} has plugins of its own: {}",
+        workspace.root().display(),
+        plugins.join(", ")
+    );
+    eprintln!("They are scripts, and they run with your permissions.");
+    eprint!("Trust this workspace and load them? [y/N] ");
+    let _ = std::io::stderr().flush();
+
+    let mut answer = String::new();
+    if std::io::stdin().read_line(&mut answer).is_err() {
+        return false;
+    }
+    matches!(answer.trim(), "y" | "Y" | "yes")
 }
 
 /// The key for this model, from the variable the model itself names.

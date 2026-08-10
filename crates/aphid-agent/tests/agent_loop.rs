@@ -7,10 +7,13 @@ use std::time::Duration;
 
 use aphid_agent::testing::{Turn, scripted};
 use aphid_agent::{
-    Agent, Cx, Flow, Guard, Interest, PendingCall, Plugin, ResultCx, StreamCx, ToolCx, ToolHandler,
-    ToolOutcome, TurnSummary, tool_fn,
+    Agent, Cx, Flow, Guard, Interest, PendingCall, Plugin, PromptDraft, ResultCx, StreamCx, ToolCx,
+    ToolHandler, ToolOutcome, TurnSummary, tool_fn,
 };
-use aphid_core::{Event, Model, Role, StopReason, providers::deepseek};
+use aphid_core::{
+    ContentInput, ContentRef, Event, MessageId, MessageRef, Model, Role, StopReason,
+    providers::deepseek,
+};
 use serde::Deserialize;
 
 fn model() -> Model {
@@ -796,4 +799,151 @@ async fn a_tool_can_tell_when_nobody_is_watching_progress() {
     agent.prompt("go").await;
 
     assert_eq!(observed.lock().expect("lock").clone(), vec![false]);
+}
+
+/// The concatenated text of a message.
+fn text_of(message: MessageRef<'_>) -> String {
+    message
+        .content()
+        .filter_map(|part| match part {
+            ContentRef::Text(text) => Some(text.text()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Rewrites every prompt, and turns away one of them.
+struct Gatekeeper;
+
+impl Plugin for Gatekeeper {
+    fn name(&self) -> &str {
+        "gatekeeper"
+    }
+
+    fn interests(&self) -> Interest {
+        Interest::PROMPT
+    }
+
+    fn on_prompt(&self, draft: &mut PromptDraft<'_>) {
+        if draft.text().contains("secret") {
+            draft.reject("that one is off limits");
+            return;
+        }
+        draft.set_text(format!("{} (reviewed)", draft.text()));
+    }
+}
+
+#[tokio::test]
+async fn a_prompt_hook_rewrites_before_the_transcript_sees_it() {
+    let (backend, script) = scripted([Turn::text("done")]);
+
+    let mut agent = Agent::builder()
+        .model(model())
+        .plugin(Gatekeeper)
+        .stream_fn(backend)
+        .build();
+
+    agent.prompt("go").await;
+
+    let user = agent.transcript().get(0).expect("a user message");
+    assert_eq!(user.role(), Role::User);
+    assert_eq!(text_of(user), "go (reviewed)");
+    assert_eq!(script.request_count(), 1);
+}
+
+#[tokio::test]
+async fn a_rejected_prompt_appends_nothing_and_sends_nothing() {
+    let (backend, script) = scripted([Turn::text("never reached")]);
+
+    let mut agent = Agent::builder()
+        .model(model())
+        .plugin(Gatekeeper)
+        .stream_fn(backend)
+        .build();
+
+    let outcome = agent.prompt("tell me the secret").await;
+
+    assert_eq!(outcome.stop, StopReason::Aborted);
+    assert_eq!(outcome.turns, 0);
+    assert_eq!(outcome.error.as_deref(), Some("that one is off limits"));
+    assert_eq!(agent.transcript().len(), 0, "the transcript is untouched");
+    assert_eq!(script.request_count(), 0, "no request was sent");
+}
+
+#[tokio::test]
+async fn rewriting_mixed_content_keeps_the_attachments() {
+    let (backend, _script) = scripted([Turn::text("done")]);
+
+    let mut agent = Agent::builder()
+        .model(model())
+        .plugin(Gatekeeper)
+        .stream_fn(backend)
+        .build();
+
+    agent
+        .prompt_parts(&[
+            ContentInput::Text("look"),
+            ContentInput::Image {
+                data: &[1, 2, 3],
+                mime: "image/png",
+            },
+        ])
+        .await;
+
+    let user = agent.transcript().get(0).expect("a user message");
+    assert_eq!(text_of(user), "look (reviewed)");
+    let images = user
+        .content()
+        .filter(|part| matches!(part, ContentRef::Image(_)))
+        .count();
+    assert_eq!(images, 1, "the image survived the rewrite");
+}
+
+/// Records the assistant message of every turn.
+struct Recorder {
+    seen: Arc<Mutex<Vec<MessageId>>>,
+}
+
+impl Plugin for Recorder {
+    fn name(&self) -> &str {
+        "recorder"
+    }
+
+    fn interests(&self) -> Interest {
+        Interest::MESSAGE
+    }
+
+    fn on_message(&self, cx: &mut Cx<'_>, message: MessageId) {
+        // The message is committed by the time this fires, so it is readable.
+        assert_eq!(cx.transcript().message(message).role(), Role::Assistant);
+        self.seen.lock().expect("lock").push(message);
+    }
+}
+
+#[tokio::test]
+async fn a_message_hook_sees_every_committed_response() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+
+    let (backend, _script) = scripted([
+        Turn::call("call_1", "echo", r#"{"value":"x"}"#),
+        Turn::text("done"),
+    ]);
+
+    let mut agent = Agent::builder()
+        .model(model())
+        .tool(tool_fn(
+            "echo",
+            "Echo a value.",
+            schema(),
+            |args: Echo, _cx: ToolCx| async move { ToolOutcome::text(args.value) },
+        ))
+        .plugin(Recorder {
+            seen: Arc::clone(&seen),
+        })
+        .stream_fn(backend)
+        .build();
+
+    agent.prompt("go").await;
+
+    assert_eq!(seen.lock().expect("lock").len(), 2, "one per turn");
 }
