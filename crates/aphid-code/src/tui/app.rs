@@ -151,9 +151,19 @@ impl App {
     /// Apply one event. Returns true when the screen needs repainting.
     fn apply(&mut self, event: UiEvent) -> bool {
         match event {
-            UiEvent::TurnStarted => self.status.running = true,
+            UiEvent::TurnStarted => {
+                self.status.running = true;
+                // Block indices restart with each turn's message buffer.
+                self.view.clear_tool_streams();
+            }
             UiEvent::Text(text) => self.view.push_text(&text),
             UiEvent::Thinking(text) => self.view.push_thinking(&text),
+            UiEvent::ToolStreamStart { block, name } => {
+                self.view.begin_tool_stream(block, &name);
+            }
+            UiEvent::ToolStreamDelta { block, bytes } => {
+                self.view.push_tool_stream(block, bytes);
+            }
             UiEvent::ToolCall {
                 id,
                 name,
@@ -168,6 +178,9 @@ impl App {
                 ..
             } => self.view.finish_tool(&id, &text, is_error, details),
             UiEvent::TurnEnded { usage, error, .. } => {
+                // Runs after every call and result for the turn, so anything
+                // still streaming is a call that never arrived.
+                self.view.settle_tool_streams();
                 self.status.last = Some(usage);
                 self.status.total += usage;
                 if let Some(error) = error {
@@ -929,6 +942,72 @@ mod tests {
 
         // system, user, assistant, user, assistant
         assert_eq!(agent.transcript().len(), 5);
+    }
+
+    /// The whole streaming path, from protocol events to the transcript: a
+    /// tool-call block must produce a card while it streams, and the announced
+    /// call must land in that same card rather than a second one.
+    #[tokio::test]
+    async fn a_streamed_tool_call_shows_up_before_it_is_announced() {
+        use crate::tui::view::{Entry, ToolState};
+
+        let (backend, _script) = scripted(vec![
+            Turn::call("c1", "bash", r#"{"command":"cargo test"}"#),
+            Turn::text("all green"),
+        ]);
+        let (events, mut receiver) = unbounded_channel();
+        let mut agent = Agent::builder()
+            .model(deepseek::flash())
+            .stream_fn(backend)
+            .plugin(UiPlugin::new(events))
+            .tool(aphid_agent::tool_fn(
+                "bash",
+                "Run a command.",
+                serde_json::json!({ "type": "object" }),
+                |_args: serde_json::Value, _cx: aphid_agent::ToolCx| async move {
+                    aphid_agent::ToolOutcome::text("ok")
+                },
+            ))
+            .build();
+        agent.prompt("run the tests").await;
+
+        let mut app = app_for(&agent);
+        let mut streaming_seen = false;
+        while let Ok(event) = receiver.try_recv() {
+            app.apply(event);
+            // Between the block opening and the call being announced, the card
+            // is on screen with a byte count.
+            if let Some(Entry::Tool {
+                state: ToolState::Streaming,
+                name,
+                streamed,
+                ..
+            }) = app.view.entries().last()
+            {
+                assert_eq!(name, "bash");
+                streaming_seen |= *streamed > 0;
+            }
+        }
+
+        assert!(streaming_seen, "the card should have counted bytes");
+        let tools: Vec<&Entry> = app
+            .view
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry, Entry::Tool { .. }))
+            .collect();
+        assert_eq!(tools.len(), 1, "the placeholder became the call");
+        assert!(
+            matches!(
+                tools[0],
+                Entry::Tool {
+                    state: ToolState::Done,
+                    ..
+                }
+            ),
+            "{:?}",
+            tools[0]
+        );
     }
 
     #[tokio::test]

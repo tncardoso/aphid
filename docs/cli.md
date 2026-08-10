@@ -261,7 +261,7 @@ zhipuai/glm-5      204800 ctx  $  1.00/$3.20    GLM-5
 
 | Option | Effect |
 | --- | --- |
-| `--limit <N>` | Print this quantity of results. The default is 30. |
+| `--limit <N>` | Print at most this many results. The default is to print them all. |
 | `--refresh` | Get the models.dev document again. |
 | `--offline` | Use the local copy only. |
 

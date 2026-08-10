@@ -98,6 +98,31 @@ fn a_tool_call_renders_as_a_header_and_collapsed_output() {
 }
 
 #[test]
+fn a_streaming_call_counts_up_then_becomes_the_call() {
+    let mut view = View::default();
+    view.begin_tool_stream(0, "bash");
+    view.push_tool_stream(0, 412);
+
+    let rendered = draw(50, 4, |frame| {
+        frame.render_widget(Paragraph::new(view.lines(50)), frame.area());
+    });
+    assert!(rendered[0].starts_with("◌ bash"), "{}", rendered[0]);
+    assert!(
+        rendered[0].contains("receiving arguments… 412 B"),
+        "{}",
+        rendered[0]
+    );
+
+    view.push_tool_call("c1", "bash", r#"{"command":"cargo test --all"}"#);
+
+    let rendered = draw(50, 4, |frame| {
+        frame.render_widget(Paragraph::new(view.lines(50)), frame.area());
+    });
+    assert!(rendered[0].starts_with("⋯ bash"), "{}", rendered[0]);
+    assert!(rendered[0].contains("cargo test --all"), "{}", rendered[0]);
+}
+
+#[test]
 fn an_edit_renders_as_a_diff() {
     let mut view = View::default();
     view.push_tool_call("c1", "edit", r#"{"path":"src/buffer.rs"}"#);

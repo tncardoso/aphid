@@ -15,6 +15,8 @@ pub const COLLAPSE_AFTER: usize = 15;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum ToolState {
+    /// The arguments are still arriving; the call has not been announced yet.
+    Streaming,
     Running,
     Done,
     Failed,
@@ -33,6 +35,9 @@ pub enum Entry {
         state: ToolState,
         /// The `edit` tool's payload, which becomes a diff.
         details: Option<Json>,
+        /// Argument bytes seen so far, which is all there is to show while the
+        /// call streams.
+        streamed: usize,
     },
     /// A divider or a message from the harness itself.
     Notice(String),
@@ -49,6 +54,9 @@ pub struct View {
     host: Option<std::sync::Arc<aphid_plugin::PluginHost>>,
     /// Call id to entry index, so progress and results find their call.
     by_call: HashMap<String, usize>,
+    /// Streaming block index to entry index, so a delta finds its placeholder.
+    /// Block indices restart with each turn, so this is cleared at every one.
+    streams: HashMap<u32, usize>,
     /// Lines scrolled up from the bottom. Zero means pinned to the newest.
     pub scroll: usize,
     pub show_thinking: bool,
@@ -70,6 +78,7 @@ impl View {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.by_call.clear();
+        self.streams.clear();
         self.scroll = 0;
     }
 
@@ -109,7 +118,81 @@ impl View {
         self.pin();
     }
 
+    /// Open a placeholder for a tool call whose arguments are still streaming.
+    ///
+    /// The placeholder is the card the call will end up in, not a separate
+    /// entry to be deleted later: removing an entry would shift every index in
+    /// `by_call`.
+    pub fn begin_tool_stream(&mut self, block: u32, name: &str) {
+        if self.streams.contains_key(&block) {
+            return;
+        }
+        self.streams.insert(block, self.entries.len());
+        self.entries.push(Entry::Tool {
+            name: name.to_owned(),
+            arguments: String::new(),
+            output: String::new(),
+            state: ToolState::Streaming,
+            details: None,
+            streamed: 0,
+        });
+        self.pin();
+    }
+
+    /// Count argument bytes into the placeholder for `block`.
+    pub fn push_tool_stream(&mut self, block: u32, bytes: usize) {
+        let Some(&index) = self.streams.get(&block) else {
+            return;
+        };
+        if let Some(Entry::Tool { streamed, .. }) = self.entries.get_mut(index) {
+            *streamed += bytes;
+        }
+        self.pin();
+    }
+
+    /// Forget which blocks were streaming, without touching their entries.
+    pub fn clear_tool_streams(&mut self) {
+        self.streams.clear();
+    }
+
+    /// Resolve placeholders whose call never arrived.
+    ///
+    /// A turn that failed or was cancelled mid-stream never announces its
+    /// calls, and a card left at `Streaming` would count up forever.
+    pub fn settle_tool_streams(&mut self) {
+        for index in self.streams.values() {
+            if let Some(Entry::Tool { output, state, .. }) = self.entries.get_mut(*index)
+                && *state == ToolState::Streaming
+            {
+                *state = ToolState::Failed;
+                *output = "the turn ended before the call was complete".to_owned();
+            }
+        }
+        self.streams.clear();
+    }
+
     pub fn push_tool_call(&mut self, id: &str, name: &str, arguments: &str) {
+        // Calls are announced in assistant source order, which is the order
+        // their blocks streamed in, so the first unclaimed placeholder is this
+        // call's own.
+        if let Some(index) = self.first_streaming()
+            && let Some(Entry::Tool {
+                name: slot,
+                arguments: raw,
+                state,
+                ..
+            }) = self.entries.get_mut(index)
+        {
+            slot.clear();
+            slot.push_str(name);
+            raw.clear();
+            raw.push_str(arguments);
+            *state = ToolState::Running;
+            self.by_call.insert(id.to_owned(), index);
+            self.pin();
+            return;
+        }
+
         self.by_call.insert(id.to_owned(), self.entries.len());
         self.entries.push(Entry::Tool {
             name: name.to_owned(),
@@ -117,8 +200,15 @@ impl View {
             output: String::new(),
             state: ToolState::Running,
             details: None,
+            streamed: 0,
         });
         self.pin();
+    }
+
+    fn first_streaming(&self) -> Option<usize> {
+        self.entries.iter().position(
+            |entry| matches!(entry, Entry::Tool { state, .. } if *state == ToolState::Streaming),
+        )
     }
 
     pub fn push_tool_progress(&mut self, id: &str, chunk: &str) {
@@ -210,8 +300,9 @@ impl View {
                     output,
                     state,
                     details,
+                    streamed,
                 } => {
-                    lines.push(tool_header(name, arguments, *state, width));
+                    lines.push(tool_header(name, arguments, *state, *streamed, width));
                     if let Some(diff) = diff_lines(details) {
                         lines.extend(diff);
                     } else {
@@ -243,8 +334,15 @@ impl View {
     }
 }
 
-fn tool_header(name: &str, arguments: &str, state: ToolState, width: usize) -> Line<'static> {
+fn tool_header(
+    name: &str,
+    arguments: &str,
+    state: ToolState,
+    streamed: usize,
+    width: usize,
+) -> Line<'static> {
     let (marker, colour) = match state {
+        ToolState::Streaming => ("◌", Color::Yellow),
         ToolState::Running => ("⋯", Color::Yellow),
         ToolState::Done => ("→", Color::Green),
         ToolState::Failed => ("✗", Color::Red),
@@ -252,7 +350,13 @@ fn tool_header(name: &str, arguments: &str, state: ToolState, width: usize) -> L
     // One line, however long the arguments are: the point is to see at a glance
     // what the agent is doing.
     let budget = width.saturating_sub(name.len() + 4);
-    let summary = one_line(arguments, budget);
+    // A half-written call has no arguments worth reading yet, so the count is
+    // the thing to show: it proves the stream is moving.
+    let summary = if state == ToolState::Streaming {
+        one_line(&format!("receiving arguments… {}", bytes(streamed)), budget)
+    } else {
+        one_line(arguments, budget)
+    };
     Line::from(vec![
         Span::styled(format!("{marker} "), Style::default().fg(colour)),
         Span::styled(
@@ -376,6 +480,22 @@ fn markdown(text: &str, width: usize) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+/// Compact byte counts: `412 B`, `1.2 kB`, `48 kB`.
+fn bytes(count: usize) -> String {
+    match count {
+        0..=999 => format!("{count} B"),
+        1_000..=999_999 => {
+            let thousands = count as f64 / 1000.0;
+            if thousands < 10.0 {
+                format!("{thousands:.1} kB")
+            } else {
+                format!("{thousands:.0} kB")
+            }
+        }
+        _ => format!("{:.1} MB", count as f64 / 1_000_000.0),
+    }
 }
 
 /// Collapse to one line, ellipsised to fit.
@@ -569,6 +689,93 @@ mod tests {
 
         let rendered: Vec<String> = view.lines(40).iter().map(ToString::to_string).collect();
         assert!(rendered.iter().any(|line| line.contains("Hello, world")));
+    }
+
+    #[test]
+    fn byte_counts_are_compact() {
+        assert_eq!(bytes(0), "0 B");
+        assert_eq!(bytes(412), "412 B");
+        assert_eq!(bytes(1_200), "1.2 kB");
+        assert_eq!(bytes(48_000), "48 kB");
+        assert_eq!(bytes(2_500_000), "2.5 MB");
+    }
+
+    #[test]
+    fn a_streaming_call_shows_its_name_and_a_growing_count() {
+        let mut view = View::default();
+        view.begin_tool_stream(0, "bash");
+        view.push_tool_stream(0, 300);
+
+        let rendered: Vec<String> = view.lines(60).iter().map(ToString::to_string).collect();
+        assert!(rendered[0].starts_with("◌ bash"), "{}", rendered[0]);
+        assert!(rendered[0].contains("receiving arguments… 300 B"));
+
+        view.push_tool_stream(0, 112);
+        let rendered: Vec<String> = view.lines(60).iter().map(ToString::to_string).collect();
+        assert!(rendered[0].contains("412 B"), "{}", rendered[0]);
+    }
+
+    #[test]
+    fn an_announced_call_claims_its_placeholder() {
+        let mut view = View::default();
+        view.begin_tool_stream(0, "bash");
+        view.push_tool_stream(0, 24);
+        view.push_tool_call("c1", "bash", r#"{"command":"cargo test"}"#);
+
+        assert_eq!(view.entries().len(), 1, "the placeholder became the card");
+
+        let rendered: Vec<String> = view.lines(60).iter().map(ToString::to_string).collect();
+        assert!(rendered[0].starts_with("⋯ bash"), "{}", rendered[0]);
+        assert!(rendered[0].contains("cargo test"));
+        assert!(!rendered[0].contains("receiving"));
+
+        // The claim registered the id, so results still find their card.
+        view.finish_tool("c1", "ok", false, None);
+        let rendered: Vec<String> = view.lines(60).iter().map(ToString::to_string).collect();
+        assert!(rendered[0].starts_with("→ bash"), "{}", rendered[0]);
+    }
+
+    #[test]
+    fn two_streamed_calls_are_claimed_in_source_order() {
+        let mut view = View::default();
+        view.begin_tool_stream(0, "read");
+        view.begin_tool_stream(1, "bash");
+        view.push_tool_call("c1", "read", r#"{"path":"a.rs"}"#);
+        view.push_tool_call("c2", "bash", r#"{"command":"ls"}"#);
+
+        assert_eq!(view.entries().len(), 2);
+        view.finish_tool("c2", "a.rs b.rs", false, None);
+
+        let rendered: Vec<String> = view.lines(60).iter().map(ToString::to_string).collect();
+        assert!(rendered[0].starts_with("⋯ read"), "{}", rendered[0]);
+        // The second card is the one that finished, not the first.
+        assert!(
+            rendered.iter().any(|line| line.starts_with("→ bash")),
+            "{rendered:#?}"
+        );
+    }
+
+    #[test]
+    fn a_placeholder_whose_call_never_arrives_is_settled() {
+        let mut view = View::default();
+        view.begin_tool_stream(0, "edit");
+        view.push_tool_stream(0, 90);
+        view.settle_tool_streams();
+
+        let rendered: Vec<String> = view.lines(60).iter().map(ToString::to_string).collect();
+        assert!(rendered[0].starts_with("✗ edit"), "{}", rendered[0]);
+        assert!(rendered[1].contains("before the call was complete"));
+    }
+
+    #[test]
+    fn settling_leaves_a_call_that_did_arrive_alone() {
+        let mut view = View::default();
+        view.begin_tool_stream(0, "bash");
+        view.push_tool_call("c1", "bash", r#"{"command":"ls"}"#);
+        view.settle_tool_streams();
+
+        let rendered: Vec<String> = view.lines(60).iter().map(ToString::to_string).collect();
+        assert!(rendered[0].starts_with("⋯ bash"), "{}", rendered[0]);
     }
 
     #[test]

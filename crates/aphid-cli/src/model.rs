@@ -77,9 +77,9 @@ pub struct SearchArgs {
     /// Matched against provider id, model id and model name
     #[arg(value_name = "QUERY")]
     pub query: String,
-    /// Stop after this many results
-    #[arg(long, default_value_t = 30, value_name = "N")]
-    pub limit: usize,
+    /// Stop after this many results (default: show them all)
+    #[arg(long, value_name = "N")]
+    pub limit: Option<usize>,
     #[command(flatten)]
     pub cache: CacheArgs,
 }
@@ -366,11 +366,12 @@ async fn search(args: SearchArgs) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    for entry in found.iter().take(args.limit) {
+    let shown = args.limit.unwrap_or(found.len());
+    for entry in found.iter().take(shown) {
         result_row(entry);
     }
-    if found.len() > args.limit {
-        println!("... and {} more", found.len() - args.limit);
+    if found.len() > shown {
+        println!("... and {} more", found.len() - shown);
     }
     println!("{}", provenance(source));
     ExitCode::SUCCESS

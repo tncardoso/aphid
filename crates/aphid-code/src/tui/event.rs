@@ -11,7 +11,7 @@ use aphid_agent::{
     Cx, Flow, Guard, Interest, PendingCall, Plugin, ResultCx, RunOutcome, StreamCx, ToolOutcome,
     TurnSummary,
 };
-use aphid_core::{BlockKind, Event, Json, StopReason, Usage};
+use aphid_core::{BlockKind, ContentRef, Event, Json, StopReason, Usage};
 use ratatui::crossterm::event::{self, KeyEvent};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -24,6 +24,17 @@ pub enum UiEvent {
     Text(String),
     /// A chunk of reasoning.
     Thinking(String),
+    /// A tool-call block opened. Its arguments are still arriving, and the call
+    /// itself is not announced until the whole turn has been committed.
+    ToolStreamStart {
+        block: u32,
+        name: String,
+    },
+    /// More argument bytes landed in the block at `block`.
+    ToolStreamDelta {
+        block: u32,
+        bytes: usize,
+    },
     ToolCall {
         id: String,
         name: String,
@@ -122,15 +133,37 @@ impl Plugin for UiPlugin {
     }
 
     fn on_event(&self, event: &Event, cx: &StreamCx<'_>) {
-        // Tool-call arguments stream as deltas too. They are shown in full when
-        // the call is announced, so streaming raw JSON here would only be noise.
-        let Event::Delta { kind, span, .. } = *event else {
-            return;
-        };
-        match kind {
-            BlockKind::Text => self.send(UiEvent::Text(cx.text(span).to_owned())),
-            BlockKind::Thinking => self.send(UiEvent::Thinking(cx.text(span).to_owned())),
-            BlockKind::ToolCall | BlockKind::Image => {}
+        match *event {
+            // Tool-call arguments stream as deltas too. They are shown in full
+            // when the call is announced, so raw JSON would only be noise here
+            // — the bytes are counted instead, which is what proves to the user
+            // that a slow call is moving rather than stuck.
+            Event::BlockStart {
+                index,
+                kind: BlockKind::ToolCall,
+            } => {
+                let name = tool_name(cx, index);
+                self.send(UiEvent::ToolStreamStart { block: index, name });
+            }
+            Event::Delta {
+                index,
+                kind: BlockKind::ToolCall,
+                span,
+            } => self.send(UiEvent::ToolStreamDelta {
+                block: index,
+                bytes: span.len() as usize,
+            }),
+            Event::Delta {
+                kind: BlockKind::Text,
+                span,
+                ..
+            } => self.send(UiEvent::Text(cx.text(span).to_owned())),
+            Event::Delta {
+                kind: BlockKind::Thinking,
+                span,
+                ..
+            } => self.send(UiEvent::Thinking(cx.text(span).to_owned())),
+            _ => {}
         }
     }
 
@@ -171,6 +204,23 @@ impl Plugin for UiPlugin {
 
     fn on_run_end(&self, _cx: &mut Cx<'_>, outcome: &RunOutcome) {
         self.send(UiEvent::RunEnded(Box::new(outcome.clone())));
+    }
+}
+
+/// The name of the tool call in the block at `index`.
+///
+/// The name is already staged when the block opens — a provider identifies a
+/// call on its first delta — so this reads it back out of the partial message
+/// rather than waiting for the call to be announced.
+fn tool_name(cx: &StreamCx<'_>, index: u32) -> String {
+    let named = match cx.partial().content().nth(index as usize) {
+        Some(ContentRef::ToolCall(call)) => call.name(),
+        _ => "",
+    };
+    if named.is_empty() {
+        "tool".to_owned()
+    } else {
+        named.to_owned()
     }
 }
 
