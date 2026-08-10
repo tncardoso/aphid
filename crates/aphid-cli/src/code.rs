@@ -140,22 +140,24 @@ pub async fn run(args: Args) -> ExitCode {
         None => catalog.default_model(),
     };
 
-    let plugin_files = collect_plugins(
-        &workspace,
-        args.no_plugins,
-        &args.plugins,
-        args.trust_plugins,
-        args.prompt().is_none(),
-    );
+    let found = collect_plugins(&workspace, args.no_plugins, &args.plugins);
 
+    // Listing is a question, not a run: it never asks about trust, and instead
+    // says which plugins the answer is still missing for.
     if args.list_plugins {
-        if plugin_files.is_empty() {
+        if found.is_empty() {
             println!("no plugins");
         }
-        for file in &plugin_files {
-            let scope = if file.project { "project" } else { "global" };
+        let gate = scripts::gate(&workspace, &found, aphid_code::home_dir().as_deref());
+        for file in &found {
+            let scope = match (file.project, gate) {
+                (false, _) => "global",
+                (true, Gate::Open) => "project",
+                (true, Gate::Ask) => "project (not yet trusted)",
+                (true, Gate::Refused) => "project (refused)",
+            };
             println!(
-                "{:<20} {:<8} {}",
+                "{:<20} {:<26} {}",
                 file.name,
                 scope,
                 file.description.as_deref().unwrap_or("")
@@ -163,6 +165,14 @@ pub async fn run(args: Args) -> ExitCode {
         }
         return ExitCode::SUCCESS;
     }
+
+    let plugin_files = gate(
+        &workspace,
+        found,
+        aphid_code::home_dir().as_deref(),
+        args.trust_plugins,
+        args.prompt().is_none(),
+    );
 
     let thinking = args.thinking();
 
@@ -251,18 +261,16 @@ fn collect_plugins(
     workspace: &Workspace,
     no_plugins: bool,
     explicit: &[PathBuf],
-    trusted: bool,
-    interactive: bool,
 ) -> Vec<aphid_plugin::PluginFile> {
     let mut files = Vec::new();
-    let home = aphid_code::home_dir();
 
     if !no_plugins {
-        let (discovered, problems) = scripts::discover(workspace, home.as_deref());
+        let (discovered, problems) =
+            scripts::discover(workspace, aphid_code::home_dir().as_deref());
         for problem in problems {
             eprintln!("aphid: {problem}");
         }
-        files = gate(workspace, discovered, home.as_deref(), trusted, interactive);
+        files = discovered;
     }
 
     for path in explicit {
@@ -335,7 +343,18 @@ fn gate(
 
 /// Put the question to the user. Anything but yes is a no.
 fn ask(workspace: &Workspace, plugins: &[&str]) -> bool {
-    use std::io::Write;
+    use std::io::{IsTerminal, Write};
+
+    // A piped stdin would read end-of-file straight away, and a silent no is
+    // worse than saying why nothing loaded.
+    if !std::io::stdin().is_terminal() {
+        eprintln!(
+            "aphid: {} has plugins of its own, and they were not loaded. \
+             Run aphid from a terminal to decide, or pass --trust-plugins.",
+            workspace.root().display()
+        );
+        return false;
+    }
 
     eprintln!(
         "\naphid: {} has plugins of its own: {}",

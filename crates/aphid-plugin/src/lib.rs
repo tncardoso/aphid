@@ -47,6 +47,7 @@
 mod backend;
 mod caps;
 mod code;
+mod command;
 mod convert;
 mod cx;
 mod discover;
@@ -60,8 +61,9 @@ mod worker;
 pub use backend::ScriptBackend;
 pub use caps::{Capabilities, DEFAULT_MAX_OPERATIONS, DEFAULT_TIMEOUT, Silent, Sink, resolve};
 pub use code::{Change, Permission, SessionInfo};
+pub use command::{Action, CommandSpec};
 pub use convert::{object_to_map, to_dynamic, to_json};
-pub use cx::{Action, ScriptCx};
+pub use cx::ScriptCx;
 pub use discover::{DIR_NAME, Diagnostic, ENTRY_FILE, EXTENSION, PluginFile, discover, explicit};
 pub use host::{PluginHost, silent_sink};
 pub use script::ScriptPlugin;

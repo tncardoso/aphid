@@ -138,7 +138,7 @@ fn the_shipped_examples_all_load() {
         let path = entry.expect("an entry").path();
         files.push(aphid_plugin::explicit(&path).expect("readable"));
     }
-    assert!(files.len() >= 6, "found {} examples", files.len());
+    assert!(files.len() >= 7, "found {} examples", files.len());
 
     let caps = Capabilities::full(&examples);
     let (host, diagnostics) = PluginHost::load(&files, &caps, Arc::new(aphid_plugin::Silent));
@@ -151,9 +151,11 @@ fn the_shipped_examples_all_load() {
     // An example earns its place by doing something: defining a hook, or
     // registering a tool.
     assert!(
-        host.plugins()
-            .iter()
-            .all(|plugin| !plugin.hooks().is_empty() || !plugin.tools().is_empty()),
+        host.plugins().iter().all(|plugin| {
+            !plugin.hooks().is_empty()
+                || !plugin.tools().is_empty()
+                || !plugin.commands().is_empty()
+        }),
         "an example neither hooks nor registers anything"
     );
 }

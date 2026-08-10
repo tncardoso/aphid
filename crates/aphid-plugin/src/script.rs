@@ -13,6 +13,7 @@ use aphid_agent::Interest;
 use rhai::{AST, Dynamic, Engine, FnPtr, FuncArgs, Scope};
 
 use crate::caps::{Capabilities, Sink};
+use crate::command::{Action, CommandSpec, Registry as Commands};
 use crate::discover::PluginFile;
 use crate::store::Store;
 use crate::tool::{Registry, ScriptTool, ToolSpec};
@@ -61,6 +62,7 @@ pub struct ScriptPlugin {
     sink: Arc<dyn Sink>,
     store: Arc<Store>,
     tools: Vec<ToolSpec>,
+    commands: Vec<CommandSpec>,
 }
 
 impl ScriptPlugin {
@@ -92,6 +94,8 @@ impl ScriptPlugin {
         // `register_tool` may be called.
         let registry: Registry = Arc::new(std::sync::Mutex::new(Vec::new()));
         crate::caps::register_tools(&mut engine, &registry);
+        let commands: Commands = Arc::new(std::sync::Mutex::new(Vec::new()));
+        crate::caps::register_commands(&mut engine, &commands);
 
         let ast = engine
             .compile(&text)
@@ -104,6 +108,10 @@ impl ScriptPlugin {
 
         let (interests, hooks) = declared(&ast);
         let tools = registry
+            .lock()
+            .map(|specs| specs.clone())
+            .unwrap_or_default();
+        let commands = commands
             .lock()
             .map(|specs| specs.clone())
             .unwrap_or_default();
@@ -121,6 +129,7 @@ impl ScriptPlugin {
             sink: Arc::clone(sink),
             store,
             tools,
+            commands,
         })
     }
 
@@ -176,6 +185,32 @@ impl ScriptPlugin {
                     as Arc<dyn aphid_agent::ToolHandler>
             })
             .collect()
+    }
+
+    /// The slash commands this plugin registered.
+    #[must_use]
+    pub fn commands(&self) -> &[CommandSpec] {
+        &self.commands
+    }
+
+    /// Run one of this plugin's commands.
+    ///
+    /// A failure is reported and yields nothing to do, because a command the
+    /// user typed is not worth ending a session over.
+    #[must_use]
+    pub fn run_command(&self, name: &str, args: &str) -> Vec<Action> {
+        let Some(spec) = self.commands.iter().find(|spec| spec.name == name) else {
+            return Vec::new();
+        };
+
+        match self.call_fn(&spec.body, (args.to_owned(),)) {
+            Ok(value) => crate::command::actions(&value),
+            Err(error) => {
+                self.sink
+                    .notify(&self.name, &format!("/{name} failed: {error}"));
+                Vec::new()
+            }
+        }
     }
 
     /// Call a function this plugin handed out, such as a tool body.

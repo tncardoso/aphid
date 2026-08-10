@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use aphid_agent::{Agent, AgentHandle, RunOutcome};
 use aphid_core::{Model, ThinkingLevel, Transcript};
-use aphid_plugin::{ScriptBackend, SessionInfo};
+use aphid_plugin::{Action as PluginAction, ScriptBackend, SessionInfo};
 use compact_str::CompactString;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::crossterm::terminal::{
@@ -47,6 +47,8 @@ pub struct App {
     pub input: Input,
     pub status: Status,
     pub modal: Option<Modal>,
+    /// The loaded plugins, for the commands they registered and `/plugins`.
+    host: Option<Arc<aphid_plugin::PluginHost>>,
     catalog: Catalog,
     thinking: Option<ThinkingLevel>,
     session: Option<Arc<SessionPlugin>>,
@@ -72,6 +74,7 @@ impl App {
             session: None,
             queued: None,
             handle: harness.agent.handle(),
+            host: None,
             quit: false,
         }
     }
@@ -88,6 +91,7 @@ impl App {
             session: None,
             queued: None,
             handle: agent.handle(),
+            host: None,
             quit: false,
         }
     }
@@ -330,12 +334,78 @@ impl App {
                 self.view.push_notice(format!("session: {described}"));
             }
             "help" => self.view.push_notice(HELP),
-            other => self
-                .view
-                .push_notice(format!("unknown command `/{other}` — try /help")),
+            "plugins" => self.view.push_notice(self.plugin_summary()),
+            // Built-ins win, so a plugin can never take `/quit` away.
+            other => return self.plugin_command(other, rest),
         }
 
         None
+    }
+
+    /// Run a plugin's command, or report that nothing owns the name.
+    ///
+    /// Returns a prompt when the command asked for one, which the caller feeds
+    /// through exactly the path a typed prompt takes.
+    fn plugin_command(&mut self, name: &str, args: &str) -> Option<String> {
+        let host = self.host.clone()?;
+        let Some(actions) = host.run_command(name, args) else {
+            self.view
+                .push_notice(format!("unknown command `/{name}` — try /help"));
+            return None;
+        };
+
+        let mut prompt = None;
+        for action in actions {
+            match action {
+                PluginAction::Notice(text) => self.view.push_notice(text),
+                // Only the first prompt runs: a command that returned two has
+                // asked for something the agent cannot do at once.
+                PluginAction::Prompt(text) => {
+                    prompt.get_or_insert(text);
+                }
+            }
+        }
+        prompt
+    }
+
+    /// What `/plugins` prints.
+    fn plugin_summary(&self) -> String {
+        let Some(host) = &self.host else {
+            return "no plugins are loaded".to_owned();
+        };
+        if host.is_empty() && host.diagnostics().is_empty() {
+            return "no plugins are loaded".to_owned();
+        }
+
+        let mut lines = Vec::new();
+        for plugin in host.plugins() {
+            let mut parts = Vec::new();
+            if !plugin.hooks().is_empty() {
+                parts.push(plugin.hooks().join(", "));
+            }
+            let tools = plugin.tools().len();
+            if tools > 0 {
+                parts.push(format!("{tools} tool(s)"));
+            }
+            let commands = plugin.commands().len();
+            if commands > 0 {
+                parts.push(format!("{commands} command(s)"));
+            }
+            lines.push(format!("  {:<16} {}", plugin.name(), parts.join(" · ")));
+        }
+
+        for command in host.commands() {
+            lines.push(format!(
+                "  /{:<15} {} [{}]",
+                command.invocation, command.description, command.plugin
+            ));
+        }
+
+        for problem in host.diagnostics() {
+            lines.push(format!("  ! {problem}"));
+        }
+
+        format!("── plugins ──\n{}", lines.join("\n"))
     }
 }
 
@@ -346,6 +416,7 @@ const HELP: &str = "\
   /clear  /new     start a fresh conversation
   /tools           list the registered tools
   /session         where this session is being written
+  /plugins         list the loaded plugins and their commands
   /help            this list
   /quit            exit
 
@@ -441,6 +512,7 @@ pub async fn run(
     let mut app = App::new(&harness, thinking);
     app.session = Some(session);
     app.view.watch(host.clone());
+    app.host = Some(host.clone());
 
     for note in &harness.notes {
         app.view.push_notice(note.clone());
@@ -825,5 +897,145 @@ mod tests {
         assert!(app.queued().is_none(), "a command is not a prompt");
         assert!(take_pending(&mut idle, &mut app).is_none());
         assert!(idle.is_some());
+    }
+}
+
+#[cfg(test)]
+mod plugin_tests {
+    use std::sync::Arc;
+
+    use aphid_agent::Agent;
+    use aphid_core::providers::deepseek;
+    use aphid_plugin::{Capabilities, PluginHost, Silent, explicit};
+
+    use super::{App, Status};
+    use crate::tui::view::Entry;
+
+    /// A workspace with one plugin, removed on drop.
+    struct Fixture(std::path::PathBuf);
+
+    impl Fixture {
+        fn new(source: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+
+            let root = std::env::temp_dir().join(format!(
+                "aphid-app-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let dir = root.join(".aphid").join("plugins");
+            std::fs::create_dir_all(&dir).expect("create");
+            std::fs::write(dir.join("kit.rhai"), source).expect("write");
+            Self(root)
+        }
+
+        fn host(&self) -> Arc<PluginHost> {
+            let file = explicit(&self.0.join(".aphid").join("plugins").join("kit.rhai"))
+                .expect("readable");
+            let (host, problems) =
+                PluginHost::load(&[file], &Capabilities::full(&self.0), Arc::new(Silent));
+            assert!(problems.is_empty(), "{problems:?}");
+            Arc::new(host)
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn app_with(host: Arc<PluginHost>) -> (App, Agent) {
+        let (backend, _script) = aphid_agent::testing::scripted([]);
+        let agent = Agent::builder()
+            .model(deepseek::flash())
+            .stream_fn(backend)
+            .build();
+        let mut app = App::new_for_test(&agent);
+        app.status = Status::from_model(agent.model());
+        app.host = Some(host);
+        (app, agent)
+    }
+
+    fn notices(app: &App) -> Vec<String> {
+        app.view
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Notice(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_plugin_command_can_print_and_return_a_prompt() {
+        let fixture = Fixture::new(
+            r#"
+            register_command(#{
+                name: "greet",
+                description: "Say hello.",
+                run: |args| { [notice("greeting " + args), prompt("Say hello to " + args)] }
+            });
+            "#,
+        );
+        let (mut app, mut agent) = app_with(fixture.host());
+
+        let prompt = app.command(&mut agent, "/greet Ana");
+
+        assert_eq!(prompt.as_deref(), Some("Say hello to Ana"));
+        assert_eq!(notices(&app), vec!["greeting Ana"]);
+    }
+
+    #[test]
+    fn a_built_in_command_wins_over_a_plugin_of_the_same_name() {
+        let fixture = Fixture::new(
+            r#"register_command(#{ name: "help", run: |args| { prompt("hijacked") } });"#,
+        );
+        let (mut app, mut agent) = app_with(fixture.host());
+
+        let prompt = app.command(&mut agent, "/help");
+
+        assert_eq!(prompt, None, "the built-in ran, not the plugin");
+        assert!(
+            notices(&app)
+                .first()
+                .is_some_and(|text| text.contains("commands")),
+            "{:?}",
+            notices(&app)
+        );
+    }
+
+    #[test]
+    fn an_unknown_command_is_still_reported() {
+        let fixture = Fixture::new(r#"fn on_run_start(cx) {}"#);
+        let (mut app, mut agent) = app_with(fixture.host());
+
+        assert_eq!(app.command(&mut agent, "/nope"), None);
+        assert!(
+            notices(&app)[0].contains("unknown command `/nope`"),
+            "{:?}",
+            notices(&app)
+        );
+    }
+
+    #[test]
+    fn plugins_lists_what_loaded() {
+        let fixture = Fixture::new(
+            r#"
+            fn on_run_start(cx) {}
+            register_command(#{ name: "greet", description: "Say hello.", run: |a| { "hi" } });
+            "#,
+        );
+        let (mut app, mut agent) = app_with(fixture.host());
+
+        app.command(&mut agent, "/plugins");
+
+        let summary = notices(&app).remove(0);
+        assert!(summary.contains("kit"), "{summary}");
+        assert!(summary.contains("on_run_start"), "{summary}");
+        assert!(summary.contains("/greet"), "{summary}");
+        assert!(summary.contains("Say hello."), "{summary}");
     }
 }

@@ -381,6 +381,22 @@ pub(crate) fn register_tools(engine: &mut Engine, registry: &crate::tool::Regist
     });
 }
 
+/// Let a script declare slash commands while its body runs.
+pub(crate) fn register_commands(engine: &mut Engine, registry: &crate::command::Registry) {
+    let target = Arc::clone(registry);
+    engine.register_fn("register_command", move |declaration: Map| {
+        let spec = crate::command::spec(&declaration).map_err(fail)?;
+        match target.lock() {
+            Ok(mut specs) => {
+                specs.retain(|existing| existing.name != spec.name);
+                specs.push(spec);
+                Ok::<_, Box<EvalAltResult>>(())
+            }
+            Err(_) => Err(fail("the command registry is poisoned".to_owned())),
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

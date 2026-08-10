@@ -17,7 +17,7 @@ use rhai::Engine;
 
 /// Something a script asked the host to do to the run.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Action {
+pub(crate) enum Action {
     /// Append a system message at the tail of the transcript.
     Note(String),
     /// Append a user message at the tail of the transcript.

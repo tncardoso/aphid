@@ -220,3 +220,88 @@ fn a_malformed_declaration_is_refused_at_load_time() {
         diagnostics[0].message
     );
 }
+
+#[test]
+fn a_script_command_reports_and_steers() {
+    use aphid_plugin::Action;
+
+    let fixture = Fixture::new(
+        r#"
+        register_command(#{
+            name: "review",
+            description: "Ask for a review.",
+            run: |args| {
+                if args == "" { return notice("give me something to review"); }
+                [notice("reviewing " + args), prompt("Review " + args + " please.")]
+            }
+        });
+        "#,
+    );
+    let host = fixture.host();
+
+    let listed = host.commands();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].invocation, "review");
+    assert_eq!(listed[0].description, "Ask for a review.");
+
+    assert_eq!(
+        host.run_command("review", ""),
+        Some(vec![Action::Notice(
+            "give me something to review".to_owned()
+        )])
+    );
+    assert_eq!(
+        host.run_command("review", "src/lib.rs"),
+        Some(vec![
+            Action::Notice("reviewing src/lib.rs".to_owned()),
+            Action::Prompt("Review src/lib.rs please.".to_owned()),
+        ])
+    );
+    assert_eq!(host.run_command("nothing", ""), None, "no plugin owns it");
+}
+
+#[test]
+fn colliding_command_names_both_stay_reachable() {
+    use aphid_plugin::{Capabilities, Silent};
+
+    let one = Fixture::new(r#"register_command(#{ name: "review", run: |args| { "from one" } });"#);
+    let two = Fixture::new(r#"register_command(#{ name: "review", run: |args| { "from two" } });"#);
+
+    let files = vec![
+        explicit(&one.root.join(".aphid").join("plugins").join("kit.rhai")).expect("readable"),
+        explicit(&two.root.join(".aphid").join("plugins").join("kit.rhai")).expect("readable"),
+    ];
+    // Both files are named `kit`, so name them apart the way discovery would.
+    let mut files = files;
+    files[1].name = "kit2".to_owned();
+
+    let (host, diagnostics) =
+        PluginHost::load(&files, &Capabilities::full(&one.root), Arc::new(Silent));
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+    let listed = host.commands();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0].invocation, "review");
+    assert_eq!(
+        listed[1].invocation, "review:2",
+        "the later one is suffixed"
+    );
+
+    assert_eq!(
+        host.run_command("review:2", ""),
+        Some(vec![aphid_plugin::Action::Notice("from two".to_owned())])
+    );
+}
+
+#[test]
+fn a_command_that_raises_is_reported_and_does_nothing() {
+    let fixture =
+        Fixture::new(r#"register_command(#{ name: "boom", run: |args| { throw "nope" } });"#);
+    let host = fixture.host();
+
+    assert_eq!(
+        host.run_command("boom", ""),
+        Some(Vec::new()),
+        "the command is known, it just produced nothing"
+    );
+}
