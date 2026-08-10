@@ -57,7 +57,7 @@ fn the_status_line_shows_exact_provider_numbers() {
 
     assert_eq!(
         rendered[0],
-        " 12k/1.0M · in 8.2k · out 1.1k · $0.0041 · deepseek-v4-flash"
+        " deepseek-v4-flash · 12k/1.0M · 8.2k/1.1k tok · $0.0041"
     );
 }
 
