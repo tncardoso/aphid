@@ -71,9 +71,15 @@ impl Status {
         let dim = Style::default().fg(Color::DarkGray);
         let mut spans = vec![Span::styled(" ", dim)];
 
+        let model = match &self.thinking {
+            Some(thinking) => format!("{}({thinking})", self.model),
+            None => self.model.clone(),
+        };
+        spans.push(Span::styled(model, dim));
+
         spans.push(Span::styled(
             format!(
-                "{}/{}",
+                " · {}/{}",
                 tokens(self.context_used()),
                 tokens(self.context_window)
             ),
@@ -88,18 +94,17 @@ impl Status {
 
         spans.push(Span::styled(
             format!(
-                " · in {} · out {} · ${:.4}",
+                " · {}/{} tok",
                 tokens(self.total.input + self.total.cache_read),
                 tokens(self.total.output),
-                self.total.cost.total
             ),
             dim,
         ));
 
-        spans.push(Span::styled(format!(" · {}", self.model), dim));
-        if let Some(thinking) = &self.thinking {
-            spans.push(Span::styled(format!(" · think {thinking}"), dim));
-        }
+        spans.push(Span::styled(
+            format!(" · ${:.4}", self.total.cost.total),
+            dim,
+        ));
 
         if self.running {
             spans.push(Span::styled(
@@ -203,12 +208,29 @@ mod tests {
         status.queued = true;
 
         let rendered = status.line().to_string();
-        assert!(rendered.contains("in 8.2k"));
-        assert!(rendered.contains("out 1.1k"));
+        assert!(rendered.contains("8.2k/1.1k tok"));
         assert!(rendered.contains("$0.0041"));
         assert!(rendered.contains("deepseek-v4-flash"));
         assert!(rendered.contains("working…"));
         assert!(rendered.contains("(queued)"));
+    }
+
+    #[test]
+    fn thinking_level_is_parenthesised_after_the_model() {
+        let mut thinking = status(100, 0, 1_000);
+        thinking.thinking = Some("medium".into());
+        assert!(
+            thinking
+                .line()
+                .to_string()
+                .contains("deepseek-v4-flash(medium)")
+        );
+
+        let mut off = status(100, 0, 1_000);
+        off.thinking = None;
+        let rendered = off.line().to_string();
+        assert!(rendered.contains("deepseek-v4-flash"));
+        assert!(!rendered.contains('('));
     }
 
     #[test]

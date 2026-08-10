@@ -10,7 +10,6 @@ use aphid_code::plugins::scripts::Gate;
 use aphid_code::plugins::{DenyAll, Permissions};
 use aphid_code::session::{self, sessions_dir};
 use aphid_code::{Workspace, headless, tui};
-use aphid_core::ThinkingLevel;
 use aphid_core::providers::deepseek;
 
 use crate::Think;
@@ -88,11 +87,6 @@ impl Args {
             return None;
         }
         Some(self.words.join(" "))
-    }
-
-    #[must_use]
-    pub fn thinking(&self) -> Option<ThinkingLevel> {
-        self.think.and_then(Think::level)
     }
 }
 
@@ -174,8 +168,6 @@ pub async fn run(args: Args) -> ExitCode {
         args.prompt().is_none(),
     );
 
-    let thinking = args.thinking();
-
     let api_key = match api_key(&model) {
         Ok(key) => key,
         Err(message) => {
@@ -188,7 +180,10 @@ pub async fn run(args: Args) -> ExitCode {
 
     let mut options = HarnessOptions::new(workspace.clone());
     options.model = model;
-    options.thinking = thinking;
+    // Left at the harness default (medium) unless the user named a level.
+    if let Some(think) = args.think {
+        options.thinking = think.level();
+    }
     options.system = args.system;
     options.append_system = args.append_system;
     options.load_context = !args.no_context;

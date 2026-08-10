@@ -518,6 +518,10 @@ pub async fn run(
     app.view.watch(host.clone());
     app.host = Some(host.clone());
 
+    if resumed.is_none() {
+        app.view.push_logo();
+    }
+
     for note in &harness.notes {
         app.view.push_notice(note.clone());
     }

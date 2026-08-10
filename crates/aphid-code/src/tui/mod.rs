@@ -15,6 +15,7 @@
 pub mod app;
 pub mod event;
 pub mod input;
+pub mod logo;
 pub mod modal;
 pub mod status;
 pub mod view;

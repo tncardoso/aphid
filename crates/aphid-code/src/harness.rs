@@ -46,7 +46,8 @@ pub struct HarnessOptions {
 }
 
 impl HarnessOptions {
-    /// Defaults for a workspace: the catalog's first model, project context on.
+    /// Defaults for a workspace: the catalog's first model, medium thinking,
+    /// project context on.
     #[must_use]
     pub fn new(workspace: Workspace) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| workspace.root().to_path_buf());
@@ -54,7 +55,7 @@ impl HarnessOptions {
             workspace,
             cwd,
             model: Catalog::new().default_model(),
-            thinking: None,
+            thinking: Some(ThinkingLevel::Medium),
             system: None,
             append_system: None,
             load_context: true,

@@ -36,6 +36,8 @@ pub enum Entry {
     },
     /// A divider or a message from the harness itself.
     Notice(String),
+    /// The wordmark, shown once when a new session opens.
+    Logo,
 }
 
 /// The transcript pane's state.
@@ -82,6 +84,11 @@ impl View {
             host.notice(&text);
         }
         self.entries.push(Entry::Notice(text));
+        self.pin();
+    }
+
+    pub fn push_logo(&mut self) {
+        self.entries.push(Entry::Logo);
         self.pin();
     }
 
@@ -217,6 +224,15 @@ impl View {
                         for part in wrap(raw, width) {
                             lines.push(Line::styled(part, Style::default().fg(Color::DarkGray)));
                         }
+                    }
+                    lines.push(Line::default());
+                }
+                Entry::Logo => {
+                    let (r, g, b) = super::logo::COLOR;
+                    let style = Style::default().fg(Color::Rgb(r, g, b));
+                    lines.push(Line::default());
+                    for raw in super::logo::LINES {
+                        lines.push(Line::styled(raw, style));
                     }
                     lines.push(Line::default());
                 }
