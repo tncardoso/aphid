@@ -22,6 +22,7 @@ const HOOK_TOOL_CALL: usize = 3;
 const HOOK_TOOL_RESULT: usize = 4;
 const HOOK_TURN_END: usize = 5;
 const HOOK_RUN_END: usize = 6;
+const HOOK_TOOL_PROGRESS: usize = 7;
 
 /// Registered tools, split into the half the provider sees and the half that
 /// runs.
@@ -183,6 +184,18 @@ impl Plugins {
                 }
             }
         }
+    }
+
+    pub(crate) fn tool_progress(&self, call_id: &str, tool: &str, chunk: &str) {
+        for &index in &self.by_hook[HOOK_TOOL_PROGRESS] {
+            self.plugins[index as usize].on_tool_progress(call_id, tool, chunk);
+        }
+    }
+
+    /// Whether anybody is listening for partial tool output. A tool can check
+    /// this through [`ToolCx`](crate::ToolCx) before doing work only a UI needs.
+    pub(crate) fn observes_progress(&self) -> bool {
+        !self.by_hook[HOOK_TOOL_PROGRESS].is_empty()
     }
 
     pub(crate) fn tool_result(&self, outcome: &mut ToolOutcome, cx: &ResultCx<'_>) {

@@ -680,3 +680,120 @@ async fn resume_continues_without_a_new_prompt() {
     assert_eq!(script.request_count(), 2);
     assert_eq!(agent.transcript().len(), 3);
 }
+
+/// A tool that reports its work line by line before returning.
+fn chatty(name: &'static str) -> impl ToolHandler {
+    tool_fn(
+        name,
+        "Echo a value, noisily.",
+        schema(),
+        |args: Echo, cx: ToolCx| async move {
+            assert_eq!(cx.tool(), "chatty");
+            assert_eq!(cx.call_id(), "call_1");
+            for part in args.value.split(',') {
+                cx.progress(part);
+            }
+            ToolOutcome::text(args.value)
+        },
+    )
+}
+
+struct ProgressWatcher {
+    chunks: Arc<Mutex<Vec<String>>>,
+}
+
+impl Plugin for ProgressWatcher {
+    fn name(&self) -> &str {
+        "progress-watcher"
+    }
+
+    fn interests(&self) -> Interest {
+        Interest::TOOL_PROGRESS
+    }
+
+    fn on_tool_progress(&self, call_id: &str, tool: &str, chunk: &str) {
+        self.chunks
+            .lock()
+            .expect("lock")
+            .push(format!("{call_id}/{tool}/{chunk}"));
+    }
+}
+
+#[tokio::test]
+async fn tool_progress_reaches_a_subscribed_plugin_in_order() {
+    let chunks = Arc::new(Mutex::new(Vec::new()));
+
+    let (backend, _script) = scripted([
+        Turn::call("call_1", "chatty", r#"{"value":"a,b,c"}"#),
+        Turn::text("done"),
+    ]);
+
+    let mut agent = Agent::builder()
+        .model(model())
+        .tool(chatty("chatty"))
+        .plugin(ProgressWatcher {
+            chunks: Arc::clone(&chunks),
+        })
+        .stream_fn(backend)
+        .build();
+
+    agent.prompt("go").await;
+
+    assert_eq!(
+        chunks.lock().expect("lock").clone(),
+        vec![
+            "call_1/chatty/a".to_owned(),
+            "call_1/chatty/b".to_owned(),
+            "call_1/chatty/c".to_owned(),
+        ]
+    );
+    // The final result is still the authoritative output.
+    assert_eq!(tool_result_texts(&agent), vec!["a,b,c".to_owned()]);
+}
+
+struct SilentProgress;
+
+impl Plugin for SilentProgress {
+    fn name(&self) -> &str {
+        "silent"
+    }
+
+    fn interests(&self) -> Interest {
+        Interest::empty()
+    }
+}
+
+#[tokio::test]
+async fn a_tool_can_tell_when_nobody_is_watching_progress() {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&observed);
+
+    let probe = tool_fn(
+        "probe",
+        "Report whether progress is observed.",
+        schema(),
+        move |_args: Echo, cx: ToolCx| {
+            let sink = Arc::clone(&sink);
+            async move {
+                sink.lock().expect("lock").push(cx.is_observed());
+                ToolOutcome::text("ok")
+            }
+        },
+    );
+
+    let (backend, _script) = scripted([
+        Turn::call("call_1", "probe", r#"{"value":"x"}"#),
+        Turn::text("done"),
+    ]);
+
+    let mut agent = Agent::builder()
+        .model(model())
+        .tool(probe)
+        .plugin(SilentProgress)
+        .stream_fn(backend)
+        .build();
+
+    agent.prompt("go").await;
+
+    assert_eq!(observed.lock().expect("lock").clone(), vec![false]);
+}

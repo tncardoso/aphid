@@ -1,0 +1,5 @@
+//! Plugins the coding harness ships with.
+
+pub mod permissions;
+
+pub use permissions::{AllowAll, Confirmer, Decision, DenyAll, Permissions, Risk};

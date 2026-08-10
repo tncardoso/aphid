@@ -12,7 +12,7 @@ use aphid_core::{
 use crate::plugin::{EventListener, Plugin, StreamCx};
 use crate::registry::{Plugins, Tools};
 use crate::stream::{StreamFn, live_stream_fn};
-use crate::tool::{ToolCx, ToolHandler};
+use crate::tool::{ProgressSink, ToolCx, ToolHandler};
 
 /// How many turns a run takes before the loop gives up, unless configured
 /// otherwise. High enough not to interrupt real work, low enough that a model
@@ -59,6 +59,10 @@ impl AgentHandle {
     pub fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
     }
+
+    pub(crate) fn flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancel)
+    }
 }
 
 /// A configured agent: a transcript, a model, its tools, and the plugins that
@@ -67,7 +71,8 @@ pub struct Agent {
     pub(crate) transcript: Transcript,
     pub(crate) model: Model,
     pub(crate) tools: Tools,
-    pub(crate) plugins: Plugins,
+    /// Shared, because the progress sink handed to running tools holds it too.
+    pub(crate) plugins: Arc<Plugins>,
     pub(crate) options: SimpleStreamOptions,
     pub(crate) stream_fn: StreamFn,
     pub(crate) max_turns: u32,
@@ -147,10 +152,15 @@ impl Agent {
         }
     }
 
-    /// The context handed to running tools.
+    /// The context handed to running tools, before it is scoped to a call.
     #[must_use]
     pub fn tool_cx(&self) -> ToolCx {
-        ToolCx::new(Arc::clone(&self.cancel))
+        ToolCx::new(
+            Arc::clone(&self.cancel),
+            Arc::new(PluginProgress {
+                plugins: Arc::clone(&self.plugins),
+            }),
+        )
     }
 
     /// Register a tool after construction. Replaces any tool of the same name.
@@ -194,6 +204,21 @@ impl std::fmt::Debug for Agent {
             .field("plugins", &self.plugins)
             .field("max_turns", &self.max_turns)
             .finish()
+    }
+}
+
+/// Routes partial tool output to the plugins subscribed to it.
+struct PluginProgress {
+    plugins: Arc<Plugins>,
+}
+
+impl ProgressSink for PluginProgress {
+    fn progress(&self, call_id: &str, tool: &str, chunk: &str) {
+        self.plugins.tool_progress(call_id, tool, chunk);
+    }
+
+    fn is_observed(&self) -> bool {
+        self.plugins.observes_progress()
     }
 }
 
@@ -356,7 +381,7 @@ impl AgentBuilder<Model> {
             transcript,
             model: self.model,
             tools: self.tools,
-            plugins: self.plugins,
+            plugins: Arc::new(self.plugins),
             options: self.options,
             stream_fn: self.stream_fn.unwrap_or_else(live_stream_fn),
             max_turns: self.max_turns,

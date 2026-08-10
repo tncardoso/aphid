@@ -287,7 +287,7 @@ async fn execute(
                 .handler
                 .clone()
                 .expect("pending calls have a handler");
-            let cx = tool_cx.clone();
+            let cx = tool_cx.for_call(calls[index].id, calls[index].name);
             let id = calls[index].id.to_owned();
             let name = calls[index].name.to_owned();
             let arguments = calls[index].arguments.clone().into_owned();
@@ -315,6 +315,7 @@ async fn execute(
                 .as_ref()
                 .expect("pending calls have a handler")
                 .clone();
+            let cx = tool_cx.for_call(call.id, call.name);
             let outcome = handler
                 .execute(
                     ToolCall {
@@ -322,7 +323,7 @@ async fn execute(
                         name: call.name,
                         arguments: &call.arguments,
                     },
-                    tool_cx,
+                    &cx,
                 )
                 .await;
             outcomes[index] = Some(outcome);

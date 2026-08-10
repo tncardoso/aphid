@@ -31,13 +31,14 @@ impl Interest {
     pub const TOOL_RESULT: Interest = Interest(1 << 4);
     pub const TURN_END: Interest = Interest(1 << 5);
     pub const RUN_END: Interest = Interest(1 << 6);
+    pub const TOOL_PROGRESS: Interest = Interest(1 << 7);
 
     /// Every hook. The default, so a plugin that only overrides the methods it
     /// cares about still works.
-    pub const ALL: Interest = Interest(0b111_1111);
+    pub const ALL: Interest = Interest(0b1111_1111);
 
     /// How many hooks there are, and so how many index lists the registry keeps.
-    pub(crate) const COUNT: usize = 7;
+    pub(crate) const COUNT: usize = 8;
 
     #[must_use]
     pub const fn empty() -> Self {
@@ -334,6 +335,15 @@ pub trait Plugin: Send + Sync + 'static {
     fn on_tool_call(&self, _call: &mut PendingCall<'_>) -> Guard {
         Guard::Allow
     }
+
+    /// A running tool published partial output.
+    ///
+    /// Fires from the tool's own task, possibly while sibling tools are still
+    /// running, so chunks from different calls interleave — `call_id` is what
+    /// tells them apart. The final result still arrives through
+    /// [`Plugin::on_tool_result`]; these chunks are for showing progress, not
+    /// for accumulating the answer.
+    fn on_tool_progress(&self, _call_id: &str, _tool: &str, _chunk: &str) {}
 
     /// A tool finished. Hooks chain: each sees the previous one's edits.
     fn on_tool_result(&self, _outcome: &mut ToolOutcome, _cx: &ResultCx<'_>) {}

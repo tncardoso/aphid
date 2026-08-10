@@ -5,6 +5,7 @@
 //! and commit the finished turn back into the transcript.
 
 mod agent;
+mod code;
 mod render;
 
 use std::pin::Pin;
@@ -20,11 +21,11 @@ use futures_core::Stream;
 use render::{Style, banner, summary};
 
 const USAGE: &str = "\
-aphid — stream a DeepSeek completion and print the protocol events
+aphid raw / aphid agent — protocol-level tools for debugging the harness
 
 USAGE:
-    aphid [OPTIONS] <prompt>...          stream a single completion
-    aphid agent [OPTIONS] <prompt>...    run the agent loop, executing tools
+    aphid raw   [OPTIONS] <prompt>...    stream a single completion
+    aphid agent [OPTIONS] <prompt>...    run the agent loop with a demo tool
 
 OPTIONS:
     --pro                 use deepseek-v4-pro (default: deepseek-v4-flash)
@@ -41,12 +42,59 @@ ENVIRONMENT:
     DEEPSEEK_API_KEY      required, unless --request is given
 ";
 
+/// Which of the three front ends was asked for.
+enum Mode {
+    /// The coding agent. The default, so `aphid` alone opens the UI.
+    Code,
+    /// One request, every protocol event printed.
+    Raw,
+    /// The plain agent loop with a demo tool.
+    Agent,
+}
+
 fn main() -> ExitCode {
-    // `agent` is a subcommand, so it only counts as one when it comes first.
+    // `raw` and `agent` are subcommands, so they only count as one when they
+    // come first. Everything else is the coding agent.
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
-    let agent_mode = argv.first().is_some_and(|word| word == "agent");
-    if agent_mode {
+    let mode = match argv.first().map(String::as_str) {
+        Some("raw") => Mode::Raw,
+        Some("agent") => Mode::Agent,
+        _ => Mode::Code,
+    };
+    if !matches!(mode, Mode::Code) {
         argv.remove(0);
+    }
+
+    // The coding agent needs more than one worker: a permission prompt blocks
+    // the agent's task until the UI answers on another one.
+    let runtime = match mode {
+        Mode::Code => tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build(),
+        _ => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build(),
+    };
+    let runtime = match runtime {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("aphid: could not start the async runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if let Mode::Code = mode {
+        return match code::Args::parse(argv.into_iter()) {
+            Ok(Some(args)) => runtime.block_on(code::run(args)),
+            Ok(None) => {
+                print!("{}", code::USAGE);
+                ExitCode::SUCCESS
+            }
+            Err(message) => {
+                eprintln!("aphid: {message}\n\n{}", code::USAGE);
+                ExitCode::from(2)
+            }
+        };
     }
 
     let args = match Args::parse(argv.into_iter()) {
@@ -61,20 +109,9 @@ fn main() -> ExitCode {
         }
     };
 
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            eprintln!("aphid: could not start the async runtime: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    if agent_mode {
-        runtime.block_on(agent::run(args))
-    } else {
-        runtime.block_on(run(args))
+    match mode {
+        Mode::Agent => runtime.block_on(agent::run(args)),
+        _ => runtime.block_on(run(args)),
     }
 }
 

@@ -106,5 +106,6 @@ pub use plugin::{
 pub use registry::{Plugins, Tools};
 pub use stream::{Backend, BoxStream, DynAssistantStream, Live, StreamFn, live_stream_fn};
 pub use tool::{
-    BoxFuture, Execution, FnTool, ToolCall, ToolContent, ToolCx, ToolHandler, ToolOutcome, tool_fn,
+    BoxFuture, Execution, FnTool, ProgressSink, ToolCall, ToolContent, ToolCx, ToolHandler,
+    ToolOutcome, tool_fn,
 };

@@ -61,19 +61,82 @@ impl ToolCall<'_> {
     }
 }
 
+/// Where a tool's partial output goes.
+///
+/// The agent installs one that fans out to [`Plugin::on_tool_progress`]; a tool
+/// built and called on its own gets the no-op.
+///
+/// [`Plugin::on_tool_progress`]: crate::Plugin::on_tool_progress
+pub trait ProgressSink: Send + Sync + 'static {
+    fn progress(&self, call_id: &str, tool: &str, chunk: &str);
+
+    /// Whether anything is listening. A tool can skip assembling progress text
+    /// when nothing will read it.
+    fn is_observed(&self) -> bool {
+        true
+    }
+}
+
+/// The default sink, for a `ToolCx` built outside a run.
+struct Discard;
+
+impl ProgressSink for Discard {
+    fn progress(&self, _call_id: &str, _tool: &str, _chunk: &str) {}
+
+    fn is_observed(&self) -> bool {
+        false
+    }
+}
+
 /// What a running tool can see of the agent around it.
 ///
 /// Cheap to clone — a handle, not a snapshot — because the concurrent execution
-/// path hands one to every spawned task.
-#[derive(Clone, Debug, Default)]
+/// path hands one to every spawned task. Each call gets its own, carrying the
+/// identity the progress sink needs.
+#[derive(Clone)]
 pub struct ToolCx {
     cancel: Arc<AtomicBool>,
+    sink: Arc<dyn ProgressSink>,
+    call_id: CompactString,
+    tool: CompactString,
 }
 
 impl ToolCx {
+    /// A context bound to an agent's cancellation handle.
+    ///
+    /// For driving a tool outside a run — tests, a one-off invocation, a tool
+    /// called by another tool. Inside a run the agent builds these itself.
     #[must_use]
-    pub(crate) fn new(cancel: Arc<AtomicBool>) -> Self {
-        Self { cancel }
+    pub fn for_handle(handle: &crate::AgentHandle) -> Self {
+        Self::new(handle.flag(), Arc::new(Discard))
+    }
+
+    /// Send this context's progress somewhere.
+    #[must_use]
+    pub fn with_sink(mut self, sink: Arc<dyn ProgressSink>) -> Self {
+        self.sink = sink;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn new(cancel: Arc<AtomicBool>, sink: Arc<dyn ProgressSink>) -> Self {
+        Self {
+            cancel,
+            sink,
+            call_id: CompactString::default(),
+            tool: CompactString::default(),
+        }
+    }
+
+    /// Scope this context to one call.
+    #[must_use]
+    pub(crate) fn for_call(&self, call_id: &str, tool: &str) -> Self {
+        Self {
+            cancel: Arc::clone(&self.cancel),
+            sink: Arc::clone(&self.sink),
+            call_id: CompactString::new(call_id),
+            tool: CompactString::new(tool),
+        }
     }
 
     /// Whether the run has been cancelled. Long-running tools should poll this
@@ -81,6 +144,51 @@ impl ToolCx {
     #[must_use]
     pub fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// The id of the call being executed.
+    #[must_use]
+    pub fn call_id(&self) -> &str {
+        &self.call_id
+    }
+
+    /// The name of the tool being executed.
+    #[must_use]
+    pub fn tool(&self) -> &str {
+        &self.tool
+    }
+
+    /// Publish output produced so far.
+    ///
+    /// A tool that takes a while — a build, a test run — calls this as lines
+    /// arrive so a UI can show them live instead of a spinner. Chunks are
+    /// advisory: the authoritative output is still the [`ToolOutcome`] the tool
+    /// returns.
+    pub fn progress(&self, chunk: &str) {
+        self.sink.progress(&self.call_id, &self.tool, chunk);
+    }
+
+    /// Whether any plugin subscribed to progress. Checking this lets a tool
+    /// avoid formatting output nobody will see.
+    #[must_use]
+    pub fn is_observed(&self) -> bool {
+        self.sink.is_observed()
+    }
+}
+
+impl Default for ToolCx {
+    fn default() -> Self {
+        Self::new(Arc::new(AtomicBool::new(false)), Arc::new(Discard))
+    }
+}
+
+impl std::fmt::Debug for ToolCx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolCx")
+            .field("call_id", &self.call_id)
+            .field("tool", &self.tool)
+            .field("cancelled", &self.cancelled())
+            .finish()
     }
 }
 
