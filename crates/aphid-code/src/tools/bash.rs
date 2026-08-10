@@ -128,7 +128,7 @@ async fn execute(workspace: &Workspace, params: Params, cx: ToolCx) -> ToolOutco
         Wait::Signalled => text.push_str("\n[terminated by signal]"),
         Wait::TimedOut(seconds) => {
             return finish(
-                text + &format!("\n[timed out after {seconds}s]"),
+                format!("{text}\n[timed out after {seconds}s]"),
                 true,
                 truncated,
                 full_output_path,
@@ -139,7 +139,7 @@ async fn execute(workspace: &Workspace, params: Params, cx: ToolCx) -> ToolOutco
         }
         Wait::Failed(error) => {
             return finish(
-                text + &format!("\n[could not wait for the command: {error}]"),
+                format!("{text}\n[could not wait for the command: {error}]"),
                 true,
                 truncated,
                 full_output_path,

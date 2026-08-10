@@ -100,8 +100,8 @@ pub use agent::{
     create_agent,
 };
 pub use plugin::{
-    Cx, EventListener, Flow, Guard, Interest, PendingCall, Plugin, ResultCx, RunCx, StreamCx,
-    TurnCx, TurnSummary,
+    Cx, EventListener, Flow, Guard, Interest, PendingCall, Plugin, PromptDraft, ResultCx, RunCx,
+    StreamCx, TurnCx, TurnSummary,
 };
 pub use registry::{Plugins, Tools};
 pub use stream::{Backend, BoxStream, DynAssistantStream, Live, StreamFn, live_stream_fn};

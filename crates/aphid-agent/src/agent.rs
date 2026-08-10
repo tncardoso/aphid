@@ -35,6 +35,19 @@ pub struct RunOutcome {
 }
 
 impl RunOutcome {
+    /// The outcome of a run a [`Plugin::on_prompt`](crate::Plugin::on_prompt)
+    /// hook turned away: nothing was appended and no request was sent.
+    #[must_use]
+    pub(crate) fn rejected(reason: String) -> Self {
+        Self {
+            stop: StopReason::Aborted,
+            turns: 0,
+            usage: Usage::default(),
+            last: None,
+            error: Some(reason),
+        }
+    }
+
     /// Whether the run ended in a provider or transport failure.
     #[must_use]
     pub fn is_failure(&self) -> bool {

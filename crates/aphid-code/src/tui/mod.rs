@@ -20,6 +20,6 @@ pub mod status;
 pub mod view;
 
 pub use app::{App, run};
-pub use event::{UiConfirmer, UiEvent, UiPlugin};
+pub use event::{UiConfirmer, UiEvent, UiPlugin, UiSink};
 pub use status::Status;
 pub use view::View;

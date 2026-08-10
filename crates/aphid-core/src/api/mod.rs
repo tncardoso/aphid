@@ -10,4 +10,4 @@ mod transport;
 
 pub use openai_completions::encode_request;
 pub(crate) use transport::client;
-pub use transport::{CompletionStream, stream};
+pub use transport::{CompletionStream, stream, stream_body};

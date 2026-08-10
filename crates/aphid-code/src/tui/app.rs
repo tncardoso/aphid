@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use aphid_agent::{Agent, AgentHandle, RunOutcome};
 use aphid_core::{Model, ThinkingLevel, Transcript};
+use aphid_plugin::ScriptBackend;
 use compact_str::CompactString;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::crossterm::terminal::{
@@ -24,8 +25,9 @@ use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use crate::harness::{self, Harness, HarnessOptions};
 use crate::model::{Catalog, ResolveError, clamp_thinking};
 use crate::plugins::permissions::{Decision, Permissions};
+use crate::plugins::scripts;
 use crate::session::{self, SessionPlugin, sessions_dir};
-use crate::tui::event::{UiConfirmer, UiEvent, UiPlugin, spawn_input_thread};
+use crate::tui::event::{UiConfirmer, UiEvent, UiPlugin, UiSink, spawn_input_thread};
 use crate::tui::input::{Action, Input};
 use crate::tui::modal::{Confirm, Modal};
 use crate::tui::status::Status;
@@ -164,6 +166,7 @@ impl App {
                     self.view.push_notice(format!("error: {error}"));
                 }
             }
+            UiEvent::Notice(text) => self.view.push_notice(text),
             UiEvent::RunEnded(_) => self.status.running = false,
             UiEvent::Confirm {
                 tool,
@@ -403,6 +406,22 @@ pub async fn run(
     let thinking = options.thinking;
     let model_id = options.model.id.to_string();
 
+    // Scripts print through the app loop, because the UI owns the screen.
+    let plugin_files = std::mem::take(&mut options.plugin_files);
+    let (host, plugin_problems) = scripts::load(
+        &workspace,
+        &plugin_files,
+        Arc::new(UiSink::new(events.clone())),
+    );
+    if let Some(backend) = ScriptBackend::install(&host)
+        && options.stream_fn.is_none()
+    {
+        options.stream_fn = Some(backend);
+    }
+    if !host.is_empty() {
+        options.plugins.push(host.clone());
+    }
+
     // The session plugin has to be registered before the agent is built.
     let directory = sessions_dir(&workspace);
     let (session, resumed) = session::attach(&directory, &cwd, Some(&model_id), resume.as_deref())?;
@@ -421,6 +440,9 @@ pub async fn run(
             diagnostic.path.display(),
             diagnostic.message
         ));
+    }
+    for problem in &plugin_problems {
+        app.view.push_notice(problem.to_string());
     }
     if let Some(transcript) = resumed {
         app.replay(&transcript);

@@ -7,11 +7,12 @@
 
 use std::sync::Arc;
 
-use aphid_core::{Event, Tool};
+use aphid_core::{Event, MessageId, Tool};
 
 use crate::RunOutcome;
 use crate::plugin::{
-    Flow, Guard, Interest, PendingCall, Plugin, ResultCx, RunCx, StreamCx, TurnCx, TurnSummary,
+    Flow, Guard, Interest, PendingCall, Plugin, PromptDraft, ResultCx, RunCx, StreamCx, TurnCx,
+    TurnSummary,
 };
 use crate::tool::{ToolHandler, ToolOutcome};
 
@@ -23,6 +24,8 @@ const HOOK_TOOL_RESULT: usize = 4;
 const HOOK_TURN_END: usize = 5;
 const HOOK_RUN_END: usize = 6;
 const HOOK_TOOL_PROGRESS: usize = 7;
+const HOOK_PROMPT: usize = 8;
+const HOOK_MESSAGE: usize = 9;
 
 /// Registered tools, split into the half the provider sees and the half that
 /// runs.
@@ -150,6 +153,27 @@ impl Plugins {
     /// stream so an unobserved run skips the dispatch entirely.
     pub(crate) fn observes_events(&self) -> bool {
         !self.by_hook[HOOK_EVENT].is_empty()
+    }
+
+    /// Show a prompt to every subscriber before it is appended. All of them run
+    /// even once one has rejected it — an observer still wants to see a prompt
+    /// somebody else turned away — but the first rejection is the one reported.
+    pub(crate) fn prompt(&self, draft: &mut PromptDraft<'_>) {
+        for &index in &self.by_hook[HOOK_PROMPT] {
+            self.plugins[index as usize].on_prompt(draft);
+        }
+    }
+
+    pub(crate) fn message(&self, cx: &mut TurnCx<'_>, message: MessageId) {
+        for &index in &self.by_hook[HOOK_MESSAGE] {
+            self.plugins[index as usize].on_message(cx, message);
+        }
+    }
+
+    /// Whether anybody wants to see prompts. Checked before building a draft, so
+    /// an unobserved prompt never copies its text.
+    pub(crate) fn observes_prompts(&self) -> bool {
+        !self.by_hook[HOOK_PROMPT].is_empty()
     }
 
     pub(crate) fn run_start(&self, cx: &mut RunCx<'_>) {

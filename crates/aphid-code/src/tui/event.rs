@@ -54,8 +54,34 @@ pub enum UiEvent {
         risk: Risk,
         reply: Reply<Decision>,
     },
+    /// Something a plugin wants the user to see.
+    Notice(String),
     Key(KeyEvent),
     Resize,
+}
+
+/// Sends a plugin's `notify` output to the app loop.
+///
+/// The terminal UI owns the screen, so a plugin cannot simply print: its output
+/// has to arrive as an event like everything else. `log` still goes to standard
+/// error, where the UI is not drawing and a developer can capture it.
+pub struct UiSink {
+    events: UnboundedSender<UiEvent>,
+}
+
+impl UiSink {
+    #[must_use]
+    pub fn new(events: UnboundedSender<UiEvent>) -> Self {
+        Self { events }
+    }
+}
+
+impl aphid_plugin::Sink for UiSink {
+    fn notify(&self, plugin: &str, text: &str) {
+        let _ = self
+            .events
+            .send(UiEvent::Notice(format!("{plugin}: {text}")));
+    }
 }
 
 /// Forwards the run to the app loop.

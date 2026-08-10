@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 use aphid_code::harness::HarnessOptions;
 use aphid_code::model::Catalog;
+use aphid_code::plugins::scripts;
 use aphid_code::plugins::{DenyAll, Permissions};
 use aphid_code::session::{self, sessions_dir};
 use aphid_code::{Workspace, headless, tui};
@@ -52,6 +53,15 @@ pub struct Args {
     /// Skip AGENTS.md and skills
     #[arg(long)]
     pub no_context: bool,
+    /// Skip every .aphid/plugins file
+    #[arg(long)]
+    pub no_plugins: bool,
+    /// Load one plugin from a path, on top of whatever was discovered
+    #[arg(long = "plugin", value_name = "PATH")]
+    pub plugins: Vec<PathBuf>,
+    /// List the plugins that would load and exit
+    #[arg(long = "list-plugins")]
+    pub list_plugins: bool,
     /// Stop a run after this many provider requests
     #[arg(long, value_name = "N")]
     pub max_turns: Option<u32>,
@@ -126,6 +136,24 @@ pub async fn run(args: Args) -> ExitCode {
         None => catalog.default_model(),
     };
 
+    let plugin_files = collect_plugins(&workspace, args.no_plugins, &args.plugins);
+
+    if args.list_plugins {
+        if plugin_files.is_empty() {
+            println!("no plugins");
+        }
+        for file in &plugin_files {
+            let scope = if file.project { "project" } else { "global" };
+            println!(
+                "{:<20} {:<8} {}",
+                file.name,
+                scope,
+                file.description.as_deref().unwrap_or("")
+            );
+        }
+        return ExitCode::SUCCESS;
+    }
+
     let thinking = args.thinking();
 
     let api_key = match api_key(&model) {
@@ -144,6 +172,7 @@ pub async fn run(args: Args) -> ExitCode {
     options.system = args.system;
     options.append_system = args.append_system;
     options.load_context = !args.no_context;
+    options.plugin_files = plugin_files;
     options.api_key = Some(api_key.into());
     if let Some(max_turns) = args.max_turns {
         options.max_turns = max_turns;
@@ -201,6 +230,40 @@ pub async fn run(args: Args) -> ExitCode {
             }
         },
     }
+}
+
+/// The plugins to load: whatever was discovered, plus anything named on the
+/// command line.
+///
+/// An explicit `--plugin` is honoured even under `--no-plugins`, because the two
+/// say different things: one turns off discovery, the other names a file.
+fn collect_plugins(
+    workspace: &Workspace,
+    no_plugins: bool,
+    explicit: &[PathBuf],
+) -> Vec<aphid_plugin::PluginFile> {
+    let mut files = Vec::new();
+
+    if !no_plugins {
+        let (discovered, problems) =
+            scripts::discover(workspace, aphid_code::home_dir().as_deref());
+        for problem in problems {
+            eprintln!("aphid: {problem}");
+        }
+        files = discovered;
+    }
+
+    for path in explicit {
+        match aphid_plugin::explicit(path) {
+            Ok(file) => {
+                files.retain(|existing| existing.name != file.name);
+                files.push(file);
+            }
+            Err(problem) => eprintln!("aphid: {problem}"),
+        }
+    }
+
+    files
 }
 
 /// The key for this model, from the variable the model itself names.
