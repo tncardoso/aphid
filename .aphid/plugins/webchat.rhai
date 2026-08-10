@@ -1,9 +1,13 @@
 //! Chat with this session from a browser. Use /server start and /server stop.
-//!
-//! The plugin writes a small Python server into /tmp and starts it detached, so
-//! it keeps listening between hooks. What the browser sends is appended to an
-//! inbox file, which `on_tick` reads and sends to the model. What the model says
-//! goes the other way, as one POST per chunk while the reply streams.
+
+// How it works. A plugin is only awake inside a hook, so the server cannot live
+// here: `/server start` writes a small Python server into /tmp and starts it
+// detached, which keeps it listening between hooks. What the browser sends is
+// appended to an inbox file, which `on_tick` reads and puts to the model. What
+// the model says goes the other way, as one POST for each chunk of the reply.
+//
+// Nothing is written in the workspace, and nothing is left running: the pid goes
+// in the plugin's memory, and `/server stop` and the end of the session use it.
 
 /// The page the browser gets.
 ///

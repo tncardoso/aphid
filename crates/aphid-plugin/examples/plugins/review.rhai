@@ -6,8 +6,10 @@ register_command(#{
     run: |args| {
         let target = if args == "" { "" } else { " -- " + args };
         let diff = exec("git diff" + target).stdout;
+        // Rhai trims in place and gives back nothing.
+        diff.trim();
 
-        if diff.trim() == "" {
+        if diff == "" {
             return notice("nothing to review");
         }
 
