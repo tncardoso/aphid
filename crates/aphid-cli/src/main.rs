@@ -4,6 +4,7 @@
 //! out of a [`Transcript`] arena, stream the response, resolve each delta span,
 //! and commit the finished turn back into the transcript.
 
+mod agent;
 mod render;
 
 use std::pin::Pin;
@@ -22,7 +23,8 @@ const USAGE: &str = "\
 aphid — stream a DeepSeek completion and print the protocol events
 
 USAGE:
-    aphid [OPTIONS] <prompt>...
+    aphid [OPTIONS] <prompt>...          stream a single completion
+    aphid agent [OPTIONS] <prompt>...    run the agent loop, executing tools
 
 OPTIONS:
     --pro                 use deepseek-v4-pro (default: deepseek-v4-flash)
@@ -32,7 +34,7 @@ OPTIONS:
     --temperature <f>     sampling temperature
     --tool                offer a demo `get_weather` tool, to see tool-call deltas
     --events              print every Delta event with its span, instead of the text
-    --request             print the encoded request body and exit
+    --request             print the encoded request body and exit (single-shot only)
     -h, --help            show this help
 
 ENVIRONMENT:
@@ -40,7 +42,14 @@ ENVIRONMENT:
 ";
 
 fn main() -> ExitCode {
-    let args = match Args::parse(std::env::args().skip(1)) {
+    // `agent` is a subcommand, so it only counts as one when it comes first.
+    let mut argv: Vec<String> = std::env::args().skip(1).collect();
+    let agent_mode = argv.first().is_some_and(|word| word == "agent");
+    if agent_mode {
+        argv.remove(0);
+    }
+
+    let args = match Args::parse(argv.into_iter()) {
         Ok(Some(args)) => args,
         Ok(None) => {
             print!("{USAGE}");
@@ -62,7 +71,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    runtime.block_on(run(args))
+    if agent_mode {
+        runtime.block_on(agent::run(args))
+    } else {
+        runtime.block_on(run(args))
+    }
 }
 
 async fn run(args: Args) -> ExitCode {
@@ -118,7 +131,7 @@ async fn run(args: Args) -> ExitCode {
     let mut printer = render::EventPrinter::new(style.clone(), args.events);
 
     while let Some(event) = next(&mut stream).await {
-        printer.event(&event, &stream);
+        printer.event(&event, delta_text(&event, &stream));
     }
     printer.finish();
 
@@ -172,7 +185,7 @@ fn pretty_json(body: &str) -> String {
         .unwrap_or_else(|_| body.to_owned())
 }
 
-struct Args {
+pub struct Args {
     prompt: String,
     system: Option<String>,
     think: Option<ThinkingLevel>,
@@ -253,4 +266,12 @@ fn thinking_level(raw: &str) -> Result<ThinkingLevel, String> {
         "max" => ThinkingLevel::Max,
         other => return Err(format!("`{other}` is not a thinking level")),
     })
+}
+
+/// Resolve the bytes an [`Event::Delta`] names; everything else carries no text.
+fn delta_text<'s>(event: &Event, stream: &'s impl AssistantStream) -> &'s str {
+    match *event {
+        Event::Delta { span, .. } => stream.text(span),
+        _ => "",
+    }
 }

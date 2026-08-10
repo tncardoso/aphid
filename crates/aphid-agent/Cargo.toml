@@ -1,21 +1,21 @@
 [package]
-name = "aphid-cli"
-description = "Example driver that streams a DeepSeek completion and prints the events"
+name = "aphid-agent"
+description = "Agent loop, tool execution and the plugin API for the aphid agent harness"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[[bin]]
-name = "aphid"
-path = "src/main.rs"
-
 [dependencies]
-aphid-agent = { path = "../aphid-agent" }
 aphid-core = { path = "../aphid-core" }
+compact_str.workspace = true
 futures-core.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }

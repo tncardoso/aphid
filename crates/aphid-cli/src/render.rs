@@ -3,7 +3,7 @@
 use std::io::{StdoutLock, Write};
 use std::time::Duration;
 
-use aphid_core::{AssistantStream, BlockKind, Event, MessageRef, Model, StopReason, ThinkingLevel};
+use aphid_core::{BlockKind, Event, MessageRef, Model, StopReason, ThinkingLevel};
 
 /// ANSI styling, disabled when the output is not a terminal or `NO_COLOR` is set.
 #[derive(Clone)]
@@ -26,19 +26,19 @@ impl Style {
         }
     }
 
-    fn dim(&self, text: &str) -> String {
+    pub fn dim(&self, text: &str) -> String {
         self.paint("2", text)
     }
 
-    fn bold(&self, text: &str) -> String {
+    pub fn bold(&self, text: &str) -> String {
         self.paint("1", text)
     }
 
-    fn cyan(&self, text: &str) -> String {
+    pub fn cyan(&self, text: &str) -> String {
         self.paint("36", text)
     }
 
-    fn red(&self, text: &str) -> String {
+    pub fn red(&self, text: &str) -> String {
         self.paint("31", text)
     }
 }
@@ -84,7 +84,10 @@ impl EventPrinter {
         }
     }
 
-    pub fn event(&mut self, event: &Event, stream: &impl AssistantStream) {
+    /// `delta` is the text named by an [`Event::Delta`] span, already resolved
+    /// by the caller — the printer never sees the stream, so it works the same
+    /// against a raw `CompletionStream` and against an agent's event hook.
+    pub fn event(&mut self, event: &Event, delta: &str) {
         let mut out = std::io::stdout().lock();
         match *event {
             Event::Start => {
@@ -99,7 +102,7 @@ impl EventPrinter {
                 self.line(&mut out, &text);
             }
             Event::Delta { index, kind, span } => {
-                let text = stream.text(span);
+                let text = delta;
                 let stats = self.stats_for(index);
                 stats.deltas += 1;
                 stats.bytes += text.len();
