@@ -5,6 +5,11 @@ use ratatui::style::{Color, Style};
 use ratatui::widgets::{Block, Borders, Padding};
 use ratatui_textarea::TextArea;
 
+use super::logo::COLOR as BANNER;
+
+/// Border color of the input box: the banner green of the wordmark.
+const BORDER: Color = Color::Rgb(BANNER.0, BANNER.1, BANNER.2);
+
 /// What a keypress meant.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -87,7 +92,7 @@ impl Input {
         self.textarea.set_block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
+                .border_style(Style::default().fg(BORDER))
                 .padding(Padding::horizontal(1))
                 .title(title),
         );
