@@ -68,10 +68,12 @@ pub struct Server {
     shared: Arc<Shared>,
 }
 
-/// One attached terminal.
+/// One attached client.
 struct Connection {
     /// What it is watching. Frames for anything else are not sent to it.
     current: Mutex<Option<String>>,
+    /// What it said it was when it attached. `None` for a terminal.
+    channel: Mutex<Option<String>>,
     /// Envelopes meant for this one alone: its greeting, a session list, a
     /// replay it asked for.
     direct: mpsc::UnboundedSender<Envelope>,
@@ -195,10 +197,23 @@ impl Server {
         }
     }
 
-    /// Whether any terminal is attached.
+    /// Whether any client is attached.
     #[must_use]
     pub fn attached(&self) -> bool {
         self.shared.attached()
+    }
+
+    /// What a connection said it was when it attached.
+    ///
+    /// `None` for a terminal, which says nothing. The daemon reads it to name
+    /// the session it opens, so that a listing says where a conversation is
+    /// being had and not only that somebody is having it.
+    #[must_use]
+    pub fn channel(&self, connection: u64) -> Option<String> {
+        let connections = self.shared.connections.lock().ok()?;
+        let held = connections.get(&connection)?;
+        let channel = held.channel.lock().ok()?;
+        channel.clone()
     }
 }
 
@@ -349,6 +364,7 @@ async fn serve(
 
     let connection = Arc::new(Connection {
         current: Mutex::new(None),
+        channel: Mutex::new(None),
         direct,
     });
     if let Ok(mut connections) = shared.connections.lock() {
@@ -399,8 +415,13 @@ async fn serve(
                     // A probe connects and hangs up without saying this, which
                     // is how `is_listening` checks that an alate is awake
                     // without leaving a conversation behind it.
-                    if request == Request::Attach {
+                    if let Request::Attach { channel } = request {
                         announced = true;
+                        // Before the event, so the daemon can read it back the
+                        // moment it hears that somebody arrived.
+                        if let Ok(mut said) = connection.channel.lock() {
+                            *said = stated(channel);
+                        }
                         if events.send(Event::Opened { connection: id }).is_err() {
                             break;
                         }
@@ -464,6 +485,27 @@ fn stale(socket: &Path) -> bool {
         return false;
     }
     std::os::unix::net::UnixStream::connect(socket).is_err()
+}
+
+/// What a client says it is, made fit to print.
+///
+/// Not a trust boundary: anything that can open the socket can already make the
+/// agent run commands, so there is nothing here to defend. It is a rendering
+/// one. This string goes into a session list, and a newline or a kilobyte of it
+/// would break the list.
+fn stated(channel: Option<String>) -> Option<String> {
+    /// Long enough for `telegram: -1001234567890`, and short enough to sit in a
+    /// column beside an id and a time.
+    const LONGEST: usize = 32;
+
+    let said = channel?;
+    let clean: String = said
+        .trim()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(LONGEST)
+        .collect();
+    (!clean.is_empty()).then_some(clean)
 }
 
 /// Keep the socket to the user who made it.

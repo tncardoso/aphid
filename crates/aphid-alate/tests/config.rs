@@ -4,7 +4,9 @@ mod common;
 
 use std::time::Duration;
 
-use aphid_alate::config::{Config, Heartbeat, MemoryConfig, Permissions, Thinking, duration};
+use aphid_alate::config::{
+    Config, Heartbeat, MemoryConfig, Permissions, TOKEN_ENV, Telegram, Thinking, duration,
+};
 use common::Temp;
 
 #[test]
@@ -35,7 +37,54 @@ fn a_partial_file_keeps_every_other_default() {
     assert_eq!(config.model.as_deref(), Some("deepseek-chat"));
     assert_eq!(config.memory.recall, 5);
     assert_eq!(config.gateway.socket, None);
+    assert_eq!(config.gateway.telegram, None);
     assert_eq!(config.heartbeat.every, "15m");
+}
+
+#[test]
+fn a_bot_is_off_until_it_is_written_down() {
+    let temp = Temp::new("config");
+    let path = temp.write("alate.json", r#"{"gateway": {"telegram": {}}}"#);
+    let config = Config::load(&path).expect("load");
+    let bot = config.gateway.telegram.expect("a bot");
+
+    assert_eq!(bot, Telegram::default());
+    assert_eq!(bot.token_env, TOKEN_ENV);
+    // Whoever reaches the bot can make the agent run commands, so an allow list
+    // that was not written allows nobody.
+    assert!(bot.chats.is_empty());
+    assert!(!bot.tools);
+    assert_eq!(bot.interval().expect("a poll"), Duration::from_secs(25));
+}
+
+#[test]
+fn a_poll_of_no_length_is_refused() {
+    // `off` is a heartbeat that never fires. A poll that never waits is a loop
+    // asking Telegram as fast as it can answer, which is a different thing.
+    let bot = Telegram {
+        poll: "off".to_owned(),
+        ..Telegram::default()
+    };
+    assert!(bot.interval().is_err());
+}
+
+#[test]
+fn a_bot_keeps_what_was_written_for_it() {
+    let temp = Temp::new("config");
+    let path = temp.write(
+        "alate.json",
+        r#"{"gateway": {"telegram": {"chats": [42, -100], "tools": true, "poll": "5s"}}}"#,
+    );
+    let bot = Config::load(&path)
+        .expect("load")
+        .gateway
+        .telegram
+        .expect("a bot");
+
+    // Negative ids are groups, and are as ordinary as any other.
+    assert_eq!(bot.chats, vec![42, -100]);
+    assert!(bot.tools);
+    assert_eq!(bot.interval().expect("a poll"), Duration::from_secs(5));
 }
 
 #[test]

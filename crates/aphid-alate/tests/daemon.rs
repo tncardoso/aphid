@@ -534,3 +534,65 @@ async fn two_daemons_cannot_share_one_alate() {
 
     first.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_is_listed_under_the_channel_it_belongs_to() {
+    let temp = Temp::new("daemon");
+    let config = quiet();
+    let home = home(&temp, &config);
+    let socket = home.socket();
+
+    let (stream_fn, _script) = scripted([Turn::text("hello")]);
+    let daemon = tokio::spawn(daemon::run(Options {
+        home,
+        config,
+        stream_fn: Some(stream_fn),
+    }));
+
+    // A terminal, which says nothing about itself.
+    let mut terminal = attach(&socket).await;
+    let plain = greeting(&mut terminal).await;
+
+    // And a client that does.
+    let mut bot = Client::connect_as(&socket, Some("telegram: 42"))
+        .await
+        .expect("connect");
+    let chat = greeting(&mut bot).await;
+
+    terminal.send(&Request::Sessions).await.expect("send");
+    let listed = until(&mut terminal, |envelope| {
+        matches!(&envelope.frame, Frame::Sessions { .. })
+    })
+    .await;
+    let Frame::Sessions { live, .. } = listed.frame else {
+        panic!("a list");
+    };
+
+    let kind = |id: &str| {
+        live.iter()
+            .find(|info| info.id == id)
+            .unwrap_or_else(|| panic!("{id} is listed among {live:?}"))
+            .kind
+            .clone()
+    };
+    assert_eq!(kind(&chat), "telegram: 42");
+    assert_eq!(kind(&plain), "attached");
+    // The resident one belongs to no channel and never did.
+    assert!(live.iter().any(|info| info.kind == "resident"));
+
+    // And a second conversation on the same connection keeps the channel: it
+    // is the client that is a chat, not the conversation.
+    bot.send(&Request::New).await.expect("send");
+    let opened = until(&mut terminal, |envelope| {
+        matches!(&envelope.frame, Frame::SessionOpened { info } if info.id != chat && info.id != plain)
+    })
+    .await;
+    let Frame::SessionOpened { info } = opened.frame else {
+        panic!("a session");
+    };
+    assert_eq!(info.kind, "telegram: 42");
+
+    drop(terminal);
+    drop(bot);
+    daemon.abort();
+}

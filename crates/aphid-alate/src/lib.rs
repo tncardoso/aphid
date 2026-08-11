@@ -16,6 +16,8 @@
 //! - [`gateway`] — the socket the daemon listens on and clients attach to.
 //! - [`daemon`] — the loop that ties them together.
 //! - [`tui`] — the first client: a terminal attached to a running instance.
+//! - `telegram` — a second client, behind the `telegram` feature: a bot that
+//!   puts a chat on the same socket.
 //!
 //! The agent itself is still assembled by [`aphid_code::harness::build`]. This
 //! crate adds what a resident agent needs around it and changes nothing about
@@ -29,6 +31,8 @@ pub mod heartbeat;
 pub mod home;
 pub mod memory;
 pub mod sessions;
+#[cfg(feature = "telegram")]
+pub mod telegram;
 pub mod tui;
 
 pub use config::Config;

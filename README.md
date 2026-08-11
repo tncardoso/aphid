@@ -114,6 +114,13 @@ naming the conversation it belongs to. Every line is also appended to
 `alate.log`, so the hours when nobody was attached are still readable
 afterwards.
 
+The terminal is not the only client. Built with `--features telegram`, an alate
+also takes a Telegram bot: each chat attaches to that same socket and gets a
+conversation of its own, tool calls show as one line each, and a permission
+question arrives with buttons. It is an allow list of chat ids and a token read
+from the environment — nothing about the daemon changes to gain it, which is the
+point of the gateway being the only door.
+
 [docs/alate.md](docs/alate.md) gives the home layout, every configuration field,
 and the protocol.
 
@@ -313,6 +320,14 @@ cargo build
 cargo test
 cargo clippy
 cargo fmt
+```
+
+One optional feature: `telegram`, which adds the Telegram bot to `aphid alate`
+and an HTTP client to the build.
+
+```sh
+cargo build --features telegram
+cargo test -p aphid-alate --features telegram
 ```
 
 `aphid raw` and `aphid agent` are fully scriptable — their test suites run the

@@ -6,6 +6,11 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# The Telegram bridge. Off by default: it pulls in a TLS stack, and it is of no
+# use without a bot token.
+telegram = ["dep:reqwest"]
+
 [dependencies]
 aphid-agent = { path = "../aphid-agent" }
 aphid-code = { path = "../aphid-code" }
@@ -16,6 +21,7 @@ compact_str.workspace = true
 croner.workspace = true
 ratatui.workspace = true
 ratatui-textarea.workspace = true
+reqwest = { workspace = true, features = ["json"], optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

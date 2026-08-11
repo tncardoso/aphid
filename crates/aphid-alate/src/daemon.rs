@@ -215,8 +215,26 @@ pub async fn run(options: Options) -> Result<(), String> {
         alate.home.root().display()
     );
 
+    // A second client on the same socket, when one is asked for. It is started
+    // here because here is where the socket is bound; the loop below neither
+    // knows about it nor waits on it.
+    #[cfg(feature = "telegram")]
+    let telegram = telegram_bridge(&config, &socket, &alate.server);
+    #[cfg(not(feature = "telegram"))]
+    if config.gateway.telegram.is_some() {
+        alate.server.send(Envelope::daemon(Frame::Notice {
+            text: "gateway.telegram is set, but this build has no Telegram in it; \
+                   build with `--features telegram`"
+                .to_owned(),
+        }));
+    }
+
     drive(&mut alate, events).await;
 
+    #[cfg(feature = "telegram")]
+    if let Some(telegram) = telegram {
+        telegram.abort();
+    }
     alate.sessions.shutdown();
     alate.host.session_end(&SessionInfo {
         id: None,
@@ -392,9 +410,14 @@ async fn drive(alate: &mut Alate, mut events: UnboundedReceiver<Event>) {
 fn handle(alate: &mut Alate, event: Event) {
     match event {
         Event::Opened { connection } => {
-            // A terminal gets a conversation of its own, so two people attached
-            // are not typing into one transcript.
-            let Some(id) = alate.open(Kind::Attached { connection }) else {
+            // A client gets a conversation of its own, so two people attached
+            // are not typing into one transcript. It is named after whatever
+            // the client said it was, so a listing tells a terminal from a chat.
+            let channel = alate.server.channel(connection);
+            let Some(id) = alate.open(Kind::Attached {
+                connection,
+                channel,
+            }) else {
                 return;
             };
             alate.server.watch(connection, &id);
@@ -443,14 +466,18 @@ fn handle(alate: &mut Alate, event: Event) {
                 );
             }
             Request::New => {
-                if let Some(id) = alate.open(Kind::Attached { connection }) {
+                let channel = alate.server.channel(connection);
+                if let Some(id) = alate.open(Kind::Attached {
+                    connection,
+                    channel,
+                }) {
                     alate.watch(connection, &id);
                 }
             }
             // Both answered inside the server: an answer belongs to the tool
             // waiting on it, and an attach has already been turned into
             // `Event::Opened`.
-            Request::Answer { .. } | Request::Attach => {}
+            Request::Answer { .. } | Request::Attach { .. } => {}
         },
     }
 }
@@ -578,6 +605,76 @@ async fn shutdown() {
         _ = tokio::signal::ctrl_c() => {}
         _ = term.recv() => {}
     }
+}
+
+/// Start the Telegram bridge, when the configuration asks for one.
+///
+/// Every way this can fail is reported and shrugged off. A bot with no token is
+/// a reason to have no bot, not a reason for the alate not to wake up: the
+/// socket works, a terminal works, and the sentence saying why is on the wire
+/// and in `alate.log`.
+#[cfg(feature = "telegram")]
+fn telegram_bridge(
+    config: &Config,
+    socket: &std::path::Path,
+    server: &Server,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let wanted = config.gateway.telegram.as_ref()?;
+    let notices = server.publisher();
+
+    let poll = match wanted.interval() {
+        Ok(poll) => poll,
+        Err(why) => {
+            notices.send(Frame::Notice {
+                text: format!("telegram: {why}"),
+            });
+            return None;
+        }
+    };
+
+    let token = match std::env::var(&wanted.token_env) {
+        Ok(token) if !token.is_empty() => token,
+        _ => {
+            notices.send(Frame::Notice {
+                text: format!(
+                    "telegram: {} is not set, and the bot needs it",
+                    wanted.token_env
+                ),
+            });
+            return None;
+        }
+    };
+
+    let api = match crate::telegram::Live::new(
+        wanted.api.as_deref().unwrap_or(crate::telegram::API),
+        &token,
+        poll,
+    ) {
+        Ok(api) => api,
+        Err(why) => {
+            notices.send(Frame::Notice {
+                text: format!("telegram: {why}"),
+            });
+            return None;
+        }
+    };
+
+    // Said out loud, because a bot that answers every chat with a refusal looks
+    // broken and is only unconfigured.
+    if wanted.chats.is_empty() {
+        notices.send(Frame::Notice {
+            text: "telegram: gateway.telegram.chats is empty, so every chat is refused. \
+                   A refused chat is told the id to add."
+                .to_owned(),
+        });
+    }
+
+    Some(crate::telegram::spawn(crate::telegram::Bridge {
+        socket: socket.to_path_buf(),
+        config: wanted.clone(),
+        api: Arc::new(api),
+        notices: server.publisher(),
+    }))
 }
 
 /// The API key for a model, from the variable it names.

@@ -27,6 +27,19 @@ impl Client {
     /// Fails when nothing is listening, which is the ordinary case of an
     /// instance that is not running.
     pub async fn connect(socket: &Path) -> std::io::Result<Self> {
+        Self::connect_as(socket, None).await
+    }
+
+    /// Attach, and say what this client is.
+    ///
+    /// The name is shown against the session in a listing, so that somebody
+    /// reading it can tell a conversation in a terminal from one somewhere
+    /// else. A terminal passes `None` and is listed as attached.
+    ///
+    /// # Errors
+    ///
+    /// Fails when nothing is listening.
+    pub async fn connect_as(socket: &Path, channel: Option<&str>) -> std::io::Result<Self> {
         let stream = UnixStream::connect(socket).await?;
         let (reader, writer) = stream.into_split();
         let mut client = Self {
@@ -36,7 +49,11 @@ impl Client {
         // Announce, because connecting alone does not: `is_listening` connects
         // too, and an alate must not open a conversation for every check that
         // it is awake.
-        client.send(&Request::Attach).await?;
+        client
+            .send(&Request::Attach {
+                channel: channel.map(ToOwned::to_owned),
+            })
+            .await?;
         Ok(client)
     }
 

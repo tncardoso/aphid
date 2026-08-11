@@ -21,14 +21,23 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Request {
-    /// I am a terminal, not a probe. Sent by [`Client::connect`] before
-    /// anything else; the daemon opens a session and greets it on this.
+    /// I am a client, not a probe. Sent by [`Client::connect`] before anything
+    /// else; the daemon opens a session and greets it on this.
     ///
     /// Connecting is not enough, because `is_listening` connects too, and a
     /// check that an alate is awake must not leave a conversation behind it.
     ///
+    /// `channel` is what the client says it is — `telegram: 42`, and a terminal
+    /// says nothing. It becomes the name of the session in a listing, so that a
+    /// list of conversations says where each one is being had. It is absent on
+    /// the wire when there is none, which keeps `{"kind":"attach"}` the whole
+    /// handshake for anything written by hand.
+    ///
     /// [`Client::connect`]: super::Client::connect
-    Attach,
+    Attach {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
+    },
     /// Say this to the agent, as though it had been typed.
     Prompt { text: String },
     /// Stop the run in flight.

@@ -9,8 +9,9 @@
 //!
 //! - [`Kind::Resident`] is made at start-up and never closed. The heartbeat
 //!   wakes here, so context builds up across the day.
-//! - [`Kind::Attached`] is made by a terminal and dies with it. Work that
-//!   should outlive a terminal does not belong here.
+//! - [`Kind::Attached`] is made by a client and dies with it, and is named
+//!   after the channel that client said it was. Work that should outlive a
+//!   terminal does not belong here.
 //! - [`Kind::Cron`] is made by a job and ends when its run ends. It starts
 //!   empty every time.
 //!
@@ -49,7 +50,15 @@ pub enum Kind {
     /// Made at start-up, never closed. Where the heartbeat wakes.
     Resident,
     /// Made by a client, and ended when that connection closes.
-    Attached { connection: u64 },
+    ///
+    /// `channel` is what that client said it was — `telegram: 42` — and is
+    /// absent for a terminal, which says nothing. It exists so a listing says
+    /// **where** a conversation is being had: an alate with a bot on it has
+    /// sessions that nobody at this keyboard opened.
+    Attached {
+        connection: u64,
+        channel: Option<String>,
+    },
     /// Made by a job, and ended when its run ends.
     Cron { name: String },
 }
@@ -60,6 +69,10 @@ impl Kind {
     pub fn label(&self) -> String {
         match self {
             Kind::Resident => "resident".to_owned(),
+            Kind::Attached {
+                channel: Some(channel),
+                ..
+            } => channel.clone(),
             Kind::Attached { .. } => "attached".to_owned(),
             Kind::Cron { name } => format!("cron: {name}"),
         }
@@ -191,7 +204,9 @@ impl Sessions {
     pub fn owned_by(&self, connection: u64) -> Vec<String> {
         self.open
             .values()
-            .filter(|session| session.kind == Kind::Attached { connection })
+            .filter(|session| {
+                matches!(&session.kind, Kind::Attached { connection: owner, .. } if *owner == connection)
+            })
             .map(|session| session.id.clone())
             .collect()
     }

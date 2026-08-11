@@ -136,6 +136,10 @@ fn every_frame_round_trips() {
 #[test]
 fn every_request_round_trips() {
     for request in [
+        Request::Attach { channel: None },
+        Request::Attach {
+            channel: Some("telegram: 42".to_owned()),
+        },
         Request::Prompt {
             text: "hello".to_owned(),
         },
@@ -156,6 +160,21 @@ fn every_request_round_trips() {
             request
         );
     }
+}
+
+#[test]
+fn an_attach_with_nothing_to_say_is_still_an_attach() {
+    // What a client written by hand sends, and what every version before the
+    // channel sent. It has to keep working, or the protocol is not one.
+    assert_eq!(
+        serde_json::from_str::<Request>(r#"{"kind":"attach"}"#).expect("read"),
+        Request::Attach { channel: None }
+    );
+    // And nothing is added to it on the way out.
+    assert_eq!(
+        serde_json::to_string(&Request::Attach { channel: None }).expect("write"),
+        r#"{"kind":"attach"}"#
+    );
 }
 
 #[test]
@@ -472,4 +491,62 @@ async fn a_path_too_long_to_be_a_socket_says_so() {
     };
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     assert!(error.to_string().contains("gateway.socket"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_is_known_by_what_it_says_it_is() {
+    let temp = Temp::new("gateway");
+    let socket = temp.path("gateway.sock");
+    let (server, mut events) = Server::bind(&socket, None).expect("bind");
+
+    let _bot = Client::connect_as(&socket, Some("telegram: 42"))
+        .await
+        .expect("connect");
+    let Event::Opened { connection: bot } = event(&mut events).await else {
+        panic!("attached");
+    };
+    assert_eq!(server.channel(bot), Some("telegram: 42".to_owned()));
+
+    // A terminal says nothing, and is nothing in particular.
+    let _terminal = Client::connect(&socket).await.expect("connect");
+    let Event::Opened {
+        connection: terminal,
+    } = event(&mut events).await
+    else {
+        panic!("attached");
+    };
+    assert_eq!(server.channel(terminal), None);
+
+    // A connection nobody has heard of has nothing to say for itself.
+    assert_eq!(server.channel(999), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn what_a_client_calls_itself_still_fits_in_a_list() {
+    let temp = Temp::new("gateway");
+    let socket = temp.path("gateway.sock");
+    let (server, mut events) = Server::bind(&socket, None).expect("bind");
+
+    // A name with a line end in it would break the list it is printed in, and
+    // one this long would push everything else off the row.
+    let awkward = format!("  bad\nname{}  ", "x".repeat(100));
+    let _client = Client::connect_as(&socket, Some(&awkward))
+        .await
+        .expect("connect");
+    let Event::Opened { connection } = event(&mut events).await else {
+        panic!("attached");
+    };
+
+    let said = server.channel(connection).expect("a name");
+    assert_eq!(said, format!("badname{}", "x".repeat(25)));
+    assert_eq!(said.chars().count(), 32);
+
+    // A name of nothing at all is no name.
+    let _empty = Client::connect_as(&socket, Some("   "))
+        .await
+        .expect("connect");
+    let Event::Opened { connection } = event(&mut events).await else {
+        panic!("attached");
+    };
+    assert_eq!(server.channel(connection), None);
 }

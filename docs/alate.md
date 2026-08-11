@@ -14,6 +14,7 @@ Technical English.
 - [The heartbeat](#the-heartbeat)
 - [Cron](#cron)
 - [The gateway](#the-gateway)
+- [Telegram](#telegram)
 - [Permissions](#permissions)
 - [Plugins and skills](#plugins-and-skills)
 - [Files and environment variables](#files-and-environment-variables)
@@ -103,7 +104,7 @@ Three things make a session, and each ends differently:
 | Kind | Made when | Ends when |
 | --- | --- | --- |
 | resident | The alate starts. | Never. It stops with the alate. |
-| attached | A terminal attaches. | That terminal detaches. |
+| attached | A client attaches. | That client detaches. |
 | cron | A job comes due. | Its run ends. |
 
 The **resident** session is where the heartbeat wakes. It keeps its context all
@@ -113,6 +114,18 @@ Give it the work that must continue after you close the terminal.
 An **attached** session is yours, and it ends with your terminal. A run still in
 progress is stopped. This is deliberate: it keeps a day of attaching and
 detaching from filling the alate with conversations nobody returns to.
+
+A terminal is not the only client that can attach. A client can say what it is
+when it attaches, and the session list then shows that in place of `attached`. A
+chat on the Telegram bot is listed as `telegram: <chat id>`, so a list of
+conversations tells you where each one is being had:
+
+```
+  20260811T091500-0000  resident      2026-08-11 09:15  running
+* 20260811T142200-0000  attached      2026-08-11 14:22
+  20260811T143000-0000  telegram: 42  2026-08-11 14:30
+  20260811T090000-0000  cron: news    2026-08-11 09:00
+```
 
 A **cron** session starts empty each time. It cannot see what you are saying,
 and you cannot see it in your own window — but the memory is shared, so a job
@@ -180,7 +193,7 @@ Each field has a default. An absent file, and an empty file, give the defaults.
   "permissions": "ask",
   "heartbeat": { "every": "15m", "prompt": null },
   "memory": { "recall": 5 },
-  "gateway": { "socket": null }
+  "gateway": { "socket": null, "telegram": null }
 }
 ```
 
@@ -194,6 +207,7 @@ Each field has a default. An absent file, and an empty file, give the defaults.
 | `heartbeat.prompt` | What to say on a wake. See [The heartbeat](#the-heartbeat). |
 | `memory.recall` | The quantity of facts offered for each prompt. Use `0` for none. |
 | `gateway.socket` | The socket file. `gateway.sock` in the home when absent. |
+| `gateway.telegram` | A Telegram bot on the gateway. No bot when absent. See [Telegram](#telegram). |
 
 A file with a higher `version` than this build understands is refused by name.
 This prevents a new file from being read as an old one.
@@ -321,7 +335,7 @@ prompt, so the alate knows what it already told itself to do.
 ## The gateway
 
 The gateway is a Unix socket in the home. The daemon listens on it. Each
-terminal that attaches is a client.
+terminal that attaches is a client, and so is the [Telegram](#telegram) bot.
 
 The protocol is one JSON object for each line, in both directions. You can read
 it with `nc`, and you can write another client for it.
@@ -334,6 +348,11 @@ A client sends `{"kind":"attach"}` first. The daemon then opens a session for it
 and answers with `hello`. A program that only wants to know whether an alate is
 awake connects and closes without sending anything, and no conversation is made
 for it.
+
+A client can also say what it is: `{"kind":"attach","channel":"telegram: 42"}`.
+The name is what `/sessions` shows for that conversation. It is cut to 32
+characters, and line ends are removed, because it is printed in a list. The
+field can be absent, and a client that does not send it is listed as `attached`.
 
 A client sees the frames of the session it watches, and the daemon's own. To
 change what it watches, it sends `{"kind":"watch","id":"..."}`; the daemon then
@@ -361,13 +380,102 @@ The gateway needs a Unix socket, so `aphid alate` does not work on Windows.
 A socket file that no daemon is behind is removed and made again. Two daemons
 cannot serve one alate: the second one stops and says so.
 
+## Telegram
+
+A Telegram bot can speak to the alate. You send a message, the agent answers,
+and you can permit or refuse a tool from the chat.
+
+The bot is a client of the gateway, and not a second door. Each chat attaches to
+the same socket and gets its own conversation, in the same manner as a terminal.
+So two chats do not see each other, and `aphid alate attach` shows what a chat
+said and what the agent answered.
+
+This is behind a build feature, because it adds an HTTP client that a build
+without a bot does not need:
+
+```console
+$ cargo build --release --features telegram
+```
+
+To make a bot:
+
+1. Speak to `@BotFather` in Telegram and send `/newbot`. It gives you a token.
+2. Put the token in the environment of the daemon:
+   ```console
+   $ export TELEGRAM_BOT_TOKEN=123456:AA...
+   ```
+3. Put a `telegram` block in `alate.json`:
+   ```json
+   { "gateway": { "telegram": { "chats": [], "tools": true } } }
+   ```
+4. Start the alate, and send a message to the bot. The bot refuses, and the
+   refusal holds the id of your chat.
+5. Put that id in `chats`, and start the alate again.
+
+| Field | Effect |
+| --- | --- |
+| `token_env` | The variable that holds the bot token. `TELEGRAM_BOT_TOKEN` when absent. |
+| `chats` | The chats that can speak to this alate, by id. An empty list permits nobody. |
+| `poll` | How long one request waits for a message: `25s` when absent. |
+| `tools` | Show one line for each tool call. `false` when absent. |
+| `api` | The address of the Bot API. The Telegram one when absent. |
+
+The token is never in `alate.json`, only the name of the variable that holds it.
+This is the rule the model keys follow, and for the same cause: a configuration
+file is copied and shared, and a token in it goes with it.
+
+`chats` is an allow list, and an empty one permits nobody. Anything that can
+speak to the bot can make the agent run commands, so a bot that anybody found
+would be a bot that anybody could use. A chat that is refused is told its id one
+time.
+
+In a chat:
+
+| What you send | Effect |
+| --- | --- |
+| Anything else | Words for the agent. |
+| `/new` | Start a new conversation. The one before it stays on disk. |
+| `/cancel` | Stop the run in flight. |
+| `/start`, `/help` | Show these commands. |
+
+The agent's answer comes in one message for each turn, and not one for each
+word. Telegram permits approximately one message each second for a chat, and a
+message for each part of an answer would be held back. A long answer is cut into
+messages of 4096 characters, at a line end where there is one.
+
+The chat shows the text of the answer, and the errors. It does not show the
+thinking, the tool arguments or the tool results. Use `aphid alate attach` to
+read those. With `tools` set to `true`, each tool call also gives one short
+line, which makes a long run legible from a telephone.
+
+In `/sessions`, a chat is listed as `telegram: <chat id>` and not as `attached`,
+so you can tell a conversation in a chat from one in a terminal.
+
+A permission question comes to the chat with three buttons: **Allow**, **Allow
+always** and **Deny**. The question goes only to a chat with a run in flight. A
+question that belongs to a terminal or to a job is left for the terminal to
+answer.
+
+Note that a chat that has spoken stays attached until the daemon stops. So an
+alate with a bot **is attended**, and a tool that asks permission is asked in
+the chat instead of being refused. Before a chat speaks for the first time, no
+connection exists, and an unattended alate behaves as it does with no bot.
+
+If the bot cannot be reached, the daemon says so one time and tries again, and
+waits longer after each failure up to one minute. It says so again when Telegram
+answers.
+
+The bot is not necessary for the alate to start. A token that is absent, a
+`poll` that is not a length of time, and a Telegram that does not answer are all
+reported and passed over.
+
 ## Permissions
 
 `permissions` in `alate.json` controls the `bash`, `write` and `edit` tools.
 
 | Value | Effect |
 | --- | --- |
-| `ask` | Ask each attached terminal. The first answer decides. |
+| `ask` | Ask each attached client. The first answer decides. |
 | `allow` | Permit each call. |
 | `deny` | Refuse each call. |
 
@@ -401,3 +509,4 @@ README.
 | --- | --- |
 | `APHID_HOME` | Move `~/.aphid`. The alates move with it. |
 | `DEEPSEEK_API_KEY` | The key for the standard models. A model in the catalogue can name a different variable. |
+| `TELEGRAM_BOT_TOKEN` | The token of the Telegram bot. `gateway.telegram.token_env` can name a different variable. |

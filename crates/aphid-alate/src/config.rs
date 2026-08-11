@@ -214,6 +214,67 @@ impl Default for MemoryConfig {
 pub struct Gateway {
     /// `gateway.sock` in the home when absent.
     pub socket: Option<PathBuf>,
+    /// A Telegram bot on the same gateway. Absent means no bot.
+    pub telegram: Option<Telegram>,
+}
+
+/// A Telegram bot that speaks to this alate.
+///
+/// Kept in every build, and not behind the `telegram` feature, so one
+/// `alate.json` is the same file whichever build reads it. A build without the
+/// feature says so and carries on rather than failing to parse.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Telegram {
+    /// The variable the bot token is read from, never the token itself. The
+    /// same rule the model keys follow: a configuration file is copied and
+    /// shared, and a token in it goes with it.
+    pub token_env: String,
+    /// The chats that may talk to this alate, by id. An empty list allows
+    /// nobody: whoever can reach the bot can make the agent run commands, so
+    /// the default has to be closed. A chat that is refused is told its id.
+    pub chats: Vec<i64>,
+    /// How long one `getUpdates` waits for something to happen.
+    pub poll: String,
+    /// Post a line for each tool call, so a long run is legible from a phone.
+    pub tools: bool,
+    /// The API root. `https://api.telegram.org` when absent; a test server
+    /// otherwise.
+    pub api: Option<String>,
+}
+
+/// The variable a bot token is read from when the configuration names none.
+pub const TOKEN_ENV: &str = "TELEGRAM_BOT_TOKEN";
+
+impl Default for Telegram {
+    fn default() -> Self {
+        Self {
+            token_env: TOKEN_ENV.to_owned(),
+            chats: Vec::new(),
+            poll: "25s".to_owned(),
+            tools: false,
+            api: None,
+        }
+    }
+}
+
+impl Telegram {
+    /// How long one `getUpdates` waits.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `poll` is not a duration, or when it is `off` — a poll of no
+    /// length is a loop that asks Telegram as fast as it can answer.
+    pub fn interval(&self) -> Result<Duration, String> {
+        match duration(&self.poll)? {
+            Some(interval) => Ok(interval),
+            None => Err(format!(
+                "{:?} is not a length of time to wait for; gateway.telegram.poll \
+                 is how long one request holds open, such as \"25s\"",
+                self.poll
+            )),
+        }
+    }
 }
 
 /// Read a duration such as `30s`, `15m`, `2h` or `1d`.
