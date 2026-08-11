@@ -1,21 +1,16 @@
 //! `bash` — run a shell command, streaming its output.
 
-use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use aphid_agent::exec::{self, Registry, Spec, Status};
 use aphid_agent::{ToolCx, ToolHandler, ToolOutcome, tool_fn};
 use aphid_core::Json;
 use serde::Deserialize;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 
 use super::paths::Workspace;
 use super::truncate;
-
-/// How often the tool notices that the run was cancelled.
-const CANCEL_POLL: Duration = Duration::from_millis(50);
 
 pub const NAME: &str = "bash";
 
@@ -55,61 +50,50 @@ pub fn description() -> String {
 }
 
 #[must_use]
-pub fn tool(workspace: &Workspace) -> impl ToolHandler {
+pub fn tool(workspace: &Workspace, processes: &Arc<Registry>) -> impl ToolHandler {
     let workspace = workspace.clone();
+    let processes = Arc::clone(processes);
     tool_fn(NAME, description(), schema(), move |params: Params, cx| {
         let workspace = workspace.clone();
-        async move { execute(&workspace, params, cx).await }
+        let processes = Arc::clone(&processes);
+        async move { execute(&workspace, &processes, params, cx).await }
     })
 }
 
-async fn execute(workspace: &Workspace, params: Params, cx: ToolCx) -> ToolOutcome {
+async fn execute(
+    workspace: &Workspace,
+    processes: &Arc<Registry>,
+    params: Params,
+    cx: ToolCx,
+) -> ToolOutcome {
     if let Some(timeout) = params.timeout
         && (!timeout.is_finite() || timeout <= 0.0)
     {
         return ToolOutcome::error("timeout must be a positive number of seconds");
     }
 
-    let mut child = match Command::new("bash")
-        .arg("-c")
-        .arg(&params.command)
-        .current_dir(workspace.root())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // So an abandoned future does not leave a process behind.
-        .kill_on_drop(true)
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(error) => return ToolOutcome::error(format!("could not start bash: {error}")),
-    };
-
     // stdout and stderr are pumped concurrently and appended to one buffer, so
     // the output reads the way it would in a terminal. Interleaving between the
     // two pipes is inherently approximate.
     let collected = Arc::new(Mutex::new(String::new()));
-    let mut pumps = Vec::with_capacity(2);
-    if let Some(stdout) = child.stdout.take() {
-        pumps.push(tokio::spawn(pump(
-            stdout,
-            Arc::clone(&collected),
-            cx.clone(),
-        )));
-    }
-    if let Some(stderr) = child.stderr.take() {
-        pumps.push(tokio::spawn(pump(
-            stderr,
-            Arc::clone(&collected),
-            cx.clone(),
-        )));
-    }
+    let sink = {
+        let collected = Arc::clone(&collected);
+        let cx = cx.clone();
+        Arc::new(move |_stream, line: &str| {
+            if let Ok(mut buffer) = collected.lock() {
+                buffer.push_str(line);
+                buffer.push('\n');
+            }
+            if cx.is_observed() {
+                cx.progress(line);
+            }
+        })
+    };
 
-    let outcome = wait(&mut child, &params, &cx).await;
-
-    for pump in pumps {
-        let _ = pump.await;
-    }
+    let spec = Spec::new(NAME, params.command)
+        .cwd(Some(workspace.root().to_path_buf()))
+        .timeout(params.timeout.map(Duration::from_secs_f64));
+    let status = exec::run(processes, spec, Some(&cx), sink).await;
 
     let full = collected.lock().expect("output lock").clone();
     let capped = truncate::tail(&full);
@@ -120,13 +104,14 @@ async fn execute(workspace: &Workspace, params: Params, cx: ToolCx) -> ToolOutco
     let truncated = capped.truncated;
     let mut text = capped.into_text();
 
-    match outcome {
-        Wait::Exited(0) => {}
+    match status {
+        Status::Exited(0) => {}
         // A non-zero exit is not a tool failure — plenty of commands report
         // through their status. The model is told, and decides.
-        Wait::Exited(code) => text.push_str(&format!("\n[exit code {code}]")),
-        Wait::Signalled => text.push_str("\n[terminated by signal]"),
-        Wait::TimedOut(seconds) => {
+        Status::Exited(code) => text.push_str(&format!("\n[exit code {code}]")),
+        Status::Signalled => text.push_str("\n[terminated by signal]"),
+        Status::TimedOut => {
+            let seconds = params.timeout.unwrap_or_default();
             return finish(
                 format!("{text}\n[timed out after {seconds}s]"),
                 true,
@@ -134,17 +119,22 @@ async fn execute(workspace: &Workspace, params: Params, cx: ToolCx) -> ToolOutco
                 full_output_path,
             );
         }
-        Wait::Cancelled => {
+        Status::Cancelled => {
             return finish(text + "\n[cancelled]", true, truncated, full_output_path);
         }
-        Wait::Failed(error) => {
+        // Stopped from `/ps`, which is the user saying they have seen enough.
+        Status::Killed | Status::Killing => {
+            return finish(text + "\n[killed]", true, truncated, full_output_path);
+        }
+        Status::Failed(error) => {
             return finish(
-                format!("{text}\n[could not wait for the command: {error}]"),
+                format!("{text}\n[{error}]"),
                 true,
                 truncated,
                 full_output_path,
             );
         }
+        Status::Running => {}
     }
 
     if text.is_empty() {
@@ -169,73 +159,4 @@ fn finish(
         "full_output_path": full_output_path,
     }));
     outcome
-}
-
-enum Wait {
-    Exited(i32),
-    Signalled,
-    TimedOut(f64),
-    Cancelled,
-    Failed(std::io::Error),
-}
-
-async fn wait(child: &mut tokio::process::Child, params: &Params, cx: &ToolCx) -> Wait {
-    let outcome = match params.timeout {
-        Some(seconds) => {
-            let limit = Duration::from_secs_f64(seconds);
-            tokio::select! {
-                status = child.wait() => status_of(status),
-                () = cancelled(cx) => Wait::Cancelled,
-                () = tokio::time::sleep(limit) => Wait::TimedOut(seconds),
-            }
-        }
-        None => {
-            tokio::select! {
-                status = child.wait() => status_of(status),
-                () = cancelled(cx) => Wait::Cancelled,
-            }
-        }
-    };
-
-    if matches!(outcome, Wait::TimedOut(_) | Wait::Cancelled) {
-        let _ = child.kill().await;
-    }
-    outcome
-}
-
-fn status_of(status: std::io::Result<std::process::ExitStatus>) -> Wait {
-    match status {
-        Ok(status) => match status.code() {
-            Some(code) => Wait::Exited(code),
-            None => Wait::Signalled,
-        },
-        Err(error) => Wait::Failed(error),
-    }
-}
-
-/// `ToolCx::cancelled` is a flag, not a future, so it has to be polled.
-async fn cancelled(cx: &ToolCx) {
-    loop {
-        if cx.cancelled() {
-            return;
-        }
-        tokio::time::sleep(CANCEL_POLL).await;
-    }
-}
-
-/// Forward one pipe into the shared buffer, publishing each line as it lands.
-async fn pump<R>(reader: R, collected: Arc<Mutex<String>>, cx: ToolCx)
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    let mut lines = BufReader::new(reader).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        if let Ok(mut buffer) = collected.lock() {
-            buffer.push_str(&line);
-            buffer.push('\n');
-        }
-        if cx.is_observed() {
-            cx.progress(&line);
-        }
-    }
 }

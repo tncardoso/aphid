@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use aphid_agent::exec;
 use aphid_agent::testing::{Turn, scripted};
 use aphid_agent::{Agent, ToolCx, ToolOutcome, tool_fn};
 use aphid_core::{ContentRef, MessageRef, Role, StopReason, providers::deepseek};
@@ -76,12 +77,21 @@ impl Sink for Recorder {
 
 /// Load one plugin out of a fixture, with the filesystem confined to it.
 fn host(fixture: &Fixture, sink: &Recorder) -> Arc<PluginHost> {
+    host_recording(fixture, sink, &Arc::new(exec::Registry::new()))
+}
+
+/// The same, keeping hold of the registry the plugin's commands are recorded in.
+fn host_recording(
+    fixture: &Fixture,
+    sink: &Recorder,
+    processes: &Arc<exec::Registry>,
+) -> Arc<PluginHost> {
     let (files, problems) = discover(fixture.root(), None);
     assert!(problems.is_empty(), "discovery problems: {problems:?}");
     assert_eq!(files.len(), 1, "one plugin was written");
 
     let caps = Capabilities::full(fixture.root());
-    let (host, diagnostics) = PluginHost::load(&files, &caps, Arc::new(sink.clone()));
+    let (host, diagnostics) = PluginHost::load(&files, &caps, Arc::new(sink.clone()), processes);
     assert!(diagnostics.is_empty(), "load problems: {diagnostics:?}");
     Arc::new(host)
 }
@@ -497,4 +507,38 @@ fn a_plugin_without_a_tick_is_never_asked_for_one() {
     host.tick();
 
     assert!(sink.lines().is_empty(), "{:?}", sink.lines());
+}
+
+#[tokio::test]
+async fn a_command_a_plugin_runs_is_recorded_under_the_plugin_name() {
+    let fixture = Fixture::new(
+        "runner",
+        r#"
+        fn on_run_start(cx) {
+            let result = exec("echo from a plugin");
+            notify(result.stdout);
+        }
+        "#,
+    );
+    let sink = Recorder::default();
+    let processes = Arc::new(exec::Registry::new());
+
+    let (backend, _script) = scripted([Turn::text("done")]);
+    let mut agent = Agent::builder()
+        .model(deepseek::flash())
+        .plugin_arc(host_recording(&fixture, &sink, &processes))
+        .stream_fn(backend)
+        .build();
+
+    agent.prompt("go").await;
+
+    assert_eq!(sink.lines(), vec!["runner: from a plugin\n"]);
+
+    // The same record the `bash` tool writes to, and the same one `/ps` reads.
+    let recorded = processes.snapshot();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].origin, "runner");
+    assert_eq!(recorded[0].command, "echo from a plugin");
+    assert_eq!(recorded[0].status, exec::Status::Exited(0));
+    assert!(recorded[0].pid.is_some());
 }

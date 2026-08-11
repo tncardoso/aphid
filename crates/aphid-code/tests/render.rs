@@ -2,6 +2,7 @@
 //!
 //! `TestBackend` renders into memory, so these run in CI with no terminal.
 
+use aphid_agent::exec;
 use aphid_code::plugins::permissions::Risk;
 use aphid_code::tui::modal::{Confirm, Modal};
 use aphid_code::tui::status::Status;
@@ -260,4 +261,81 @@ fn the_permission_prompt_says_what_it_is_asking_about() {
     assert!(joined.contains("[y] once"), "{joined}");
     assert!(joined.contains("[a] always"), "{joined}");
     assert!(joined.contains("[n] no"), "{joined}");
+}
+
+#[tokio::test]
+async fn the_process_list_separates_what_is_running_from_what_just_ran() {
+    use std::sync::Arc;
+
+    let processes = Arc::new(exec::Registry::new());
+
+    // One that is over, so the recent section has something to show.
+    exec::run(
+        &processes,
+        exec::Spec::new("bash", "exit 7"),
+        None,
+        Arc::new(|_, _| {}),
+    )
+    .await;
+
+    // One that is still going while the list is drawn.
+    let running = tokio::spawn({
+        let processes = Arc::clone(&processes);
+        async move {
+            exec::run(
+                &processes,
+                exec::Spec::new("webchat", "sleep 30"),
+                None,
+                Arc::new(|_, _| {}),
+            )
+            .await
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let modal = Modal::Processes {
+        registry: Arc::clone(&processes),
+        selected: 0,
+    };
+    let rendered = draw(90, 14, |frame| {
+        modal.render(frame, Rect::new(0, 0, 90, 14));
+    });
+    let joined = rendered.join("\n");
+
+    assert!(joined.contains("processes"), "{joined}");
+    // The running one is selected, named after the plugin that started it, and
+    // counting.
+    assert!(joined.contains("▸"), "{joined}");
+    assert!(joined.contains("webchat"), "{joined}");
+    assert!(joined.contains("sleep 30"), "{joined}");
+    assert!(joined.contains("0:00"), "{joined}");
+    // The finished one keeps its exit code and how much it wrote.
+    assert!(joined.contains("recent"), "{joined}");
+    assert!(joined.contains("exit 7"), "{joined}");
+    assert!(joined.contains("✗ 7"), "{joined}");
+    assert!(joined.contains("0 B"), "{joined}");
+
+    let id = processes
+        .snapshot()
+        .into_iter()
+        .find(exec::Process::running)
+        .expect("the sleep")
+        .id;
+    processes.kill(id);
+    running.await.expect("the sleep");
+}
+
+#[tokio::test]
+async fn an_empty_process_list_says_so() {
+    let processes = std::sync::Arc::new(exec::Registry::new());
+    let modal = Modal::Processes {
+        registry: processes,
+        selected: 0,
+    };
+
+    let rendered = draw(90, 8, |frame| {
+        modal.render(frame, Rect::new(0, 0, 90, 8));
+    });
+
+    assert!(rendered.join("\n").contains("nothing running"));
 }

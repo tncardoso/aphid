@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use aphid_agent::exec;
 use aphid_agent::testing::{Turn, scripted};
 use aphid_agent::{Agent, ToolCx, ToolOutcome, tool_fn};
 use aphid_core::{ContentRef, MessageRef, providers::deepseek};
@@ -32,8 +33,12 @@ impl Fixture {
     fn host(&self) -> Arc<PluginHost> {
         let file =
             explicit(&self.root.join(".aphid").join("plugins").join("kit.rhai")).expect("readable");
-        let (host, diagnostics) =
-            PluginHost::load(&[file], &Capabilities::full(&self.root), Arc::new(Silent));
+        let (host, diagnostics) = PluginHost::load(
+            &[file],
+            &Capabilities::full(&self.root),
+            Arc::new(Silent),
+            &Arc::new(exec::Registry::new()),
+        );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         Arc::new(host)
     }
@@ -211,6 +216,7 @@ fn a_malformed_declaration_is_refused_at_load_time() {
         &[file],
         &Capabilities::full(&fixture.root),
         Arc::new(Silent),
+        &Arc::new(exec::Registry::new()),
     );
 
     assert_eq!(diagnostics.len(), 1, "the plugin did not load");
@@ -275,8 +281,12 @@ fn colliding_command_names_both_stay_reachable() {
     let mut files = files;
     files[1].name = "kit2".to_owned();
 
-    let (host, diagnostics) =
-        PluginHost::load(&files, &Capabilities::full(&one.root), Arc::new(Silent));
+    let (host, diagnostics) = PluginHost::load(
+        &files,
+        &Capabilities::full(&one.root),
+        Arc::new(Silent),
+        &Arc::new(exec::Registry::new()),
+    );
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
 
     let listed = host.commands();

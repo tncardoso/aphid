@@ -61,8 +61,9 @@ impl PluginHost {
         files: &[PluginFile],
         caps: &Capabilities,
         sink: Arc<dyn Sink>,
+        processes: &Arc<aphid_agent::exec::Registry>,
     ) -> (Self, Vec<Diagnostic>) {
-        let worker = Arc::new(Worker::spawn());
+        let worker = Arc::new(Worker::spawn(processes));
         let mut plugins = Vec::new();
         let mut diagnostics = Vec::new();
 

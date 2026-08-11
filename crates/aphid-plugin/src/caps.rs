@@ -194,7 +194,7 @@ pub(crate) fn register(
     register_verdicts(engine);
     register_output(engine, plugin, sink);
     register_fs(engine, caps);
-    register_exec(engine, caps, worker);
+    register_exec(engine, plugin, caps, worker);
     register_http(engine, caps, worker);
     register_storage(engine, plugin, caps, store);
 }
@@ -304,11 +304,12 @@ fn register_fs(engine: &mut Engine, caps: &Capabilities) {
     });
 }
 
-fn register_exec(engine: &mut Engine, caps: &Capabilities, worker: &Arc<Worker>) {
+fn register_exec(engine: &mut Engine, plugin: &str, caps: &Capabilities, worker: &Arc<Worker>) {
     let allowed = caps.exec;
     let timeout = caps.timeout;
     let cwd = caps.root.clone();
     let runner = Arc::clone(worker);
+    let origin = plugin.to_owned();
 
     engine.register_fn("exec", move |command: &str| {
         if !allowed {
@@ -322,6 +323,7 @@ fn register_exec(engine: &mut Engine, caps: &Capabilities, worker: &Arc<Worker>)
                 command: command.to_owned(),
                 cwd: cwd.clone(),
                 timeout,
+                origin: origin.clone(),
             })
             .map_err(fail)?;
 

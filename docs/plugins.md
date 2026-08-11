@@ -198,6 +198,15 @@ makes its own capabilities keeps the file functions in the workspace.
 `exec` and the http functions run on a different thread, and they stop after 30
 seconds.
 
+`exec` runs the command with `bash`. It uses the same code as the `bash` tool of
+the coding agent. Thus the runtime records each command that a plugin starts.
+In a session, type `/ps` to see these commands. The list gives the name of your
+plugin as the source of its commands. You can stop a command from that list; the
+`exec` that started it then gives an error, and the script can continue.
+
+`exec` reads the output while the command runs. Thus a command that writes many
+lines continues correctly.
+
 ## Settings and memory
 
 `config()` returns the settings of the plugin. Write them here:

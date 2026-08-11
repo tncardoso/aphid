@@ -88,6 +88,7 @@
 //! ```
 
 mod agent;
+pub mod exec;
 mod plugin;
 mod registry;
 mod run;

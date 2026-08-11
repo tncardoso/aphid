@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use aphid_agent::exec;
 use aphid_agent::{ProgressSink, ToolCall, ToolCx, ToolHandler, ToolOutcome};
 use aphid_code::Workspace;
 use aphid_code::tools::{bash, edit, read, truncate, write};
@@ -11,6 +12,9 @@ use aphid_code::tools::{bash, edit, read, truncate, write};
 /// A workspace in a fresh temp directory, removed when the guard drops.
 struct Temp {
     root: PathBuf,
+    workspace: Workspace,
+    /// What the tools started, for the tests that ask.
+    processes: Arc<exec::Registry>,
 }
 
 impl Temp {
@@ -22,13 +26,20 @@ impl Temp {
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&root).expect("temp dir");
+        let root = root.canonicalize().expect("canonical temp dir");
         Self {
-            root: root.canonicalize().expect("canonical temp dir"),
+            workspace: Workspace::new(&root),
+            root,
+            processes: Arc::new(exec::Registry::new()),
         }
     }
 
+    fn bash(&self) -> impl ToolHandler {
+        bash::tool(&self.workspace, &self.processes)
+    }
+
     fn workspace(&self) -> Workspace {
-        Workspace::new(&self.root)
+        self.workspace.clone()
     }
 
     fn write(&self, name: &str, contents: &str) -> PathBuf {
@@ -74,7 +85,7 @@ async fn call_with(tool: &impl ToolHandler, arguments: &str, cx: &ToolCx) -> Too
 async fn bash_runs_in_the_workspace_and_returns_output() {
     let temp = Temp::new();
     temp.write("marker.txt", "hi");
-    let tool = bash::tool(&temp.workspace());
+    let tool = temp.bash();
 
     let outcome = call(&tool, r#"{"command":"ls"}"#).await;
 
@@ -85,7 +96,7 @@ async fn bash_runs_in_the_workspace_and_returns_output() {
 #[tokio::test]
 async fn bash_merges_stderr_and_reports_a_non_zero_exit_without_failing() {
     let temp = Temp::new();
-    let tool = bash::tool(&temp.workspace());
+    let tool = temp.bash();
 
     let outcome = call(&tool, r#"{"command":"echo out; echo err >&2; exit 3"}"#).await;
 
@@ -108,7 +119,7 @@ async fn bash_streams_each_line_as_progress() {
     }
 
     let temp = Temp::new();
-    let tool = bash::tool(&temp.workspace());
+    let tool = temp.bash();
     let chunks = Arc::new(Mutex::new(Vec::new()));
     let cx = ToolCx::default().with_sink(Arc::new(Collect(Arc::clone(&chunks))));
 
@@ -129,7 +140,7 @@ async fn bash_streams_each_line_as_progress() {
 #[tokio::test]
 async fn bash_times_out_and_kills_the_child() {
     let temp = Temp::new();
-    let tool = bash::tool(&temp.workspace());
+    let tool = temp.bash();
 
     let started = std::time::Instant::now();
     let outcome = call(&tool, r#"{"command":"sleep 30","timeout":0.3}"#).await;
@@ -145,7 +156,7 @@ async fn bash_times_out_and_kills_the_child() {
 #[tokio::test]
 async fn bash_stops_when_the_run_is_cancelled() {
     let temp = Temp::new();
-    let tool = bash::tool(&temp.workspace());
+    let tool = temp.bash();
 
     let handle = aphid_agent::AgentHandle::default();
     let cx = ToolCx::for_handle(&handle);
@@ -166,7 +177,7 @@ async fn bash_stops_when_the_run_is_cancelled() {
 #[tokio::test]
 async fn bash_truncates_and_spills_long_output() {
     let temp = Temp::new();
-    let tool = bash::tool(&temp.workspace());
+    let tool = temp.bash();
 
     let outcome = call(
         &tool,
@@ -185,6 +196,45 @@ async fn bash_truncates_and_spills_long_output() {
     // The tail is what survives: the end of a command's output is the useful part.
     assert!(text.contains(&(truncate::MAX_LINES + 500).to_string()));
     let _ = std::fs::remove_file(spill);
+}
+
+#[tokio::test]
+async fn bash_records_what_it_ran() {
+    let temp = Temp::new();
+    let tool = temp.bash();
+
+    let outcome = call(&tool, r#"{"command":"echo recorded"}"#).await;
+    assert!(!outcome.is_error, "{}", outcome.text_content());
+
+    let recorded = temp.processes.snapshot();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].origin, "bash");
+    assert_eq!(recorded[0].command, "echo recorded");
+    assert_eq!(recorded[0].status, exec::Status::Exited(0));
+    assert!(recorded[0].pid.is_some());
+    assert_eq!(recorded[0].bytes, "recorded\n".len() as u64);
+}
+
+#[tokio::test]
+async fn bash_reports_a_command_stopped_from_the_process_list() {
+    let temp = Temp::new();
+    let tool = temp.bash();
+
+    let processes = Arc::clone(&temp.processes);
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let id = processes.snapshot().first().expect("the sleep").id;
+        processes.kill(id);
+    });
+
+    let outcome = call(&tool, r#"{"command":"sleep 30"}"#).await;
+
+    assert!(outcome.is_error);
+    assert!(
+        outcome.text_content().contains("[killed]"),
+        "{}",
+        outcome.text_content()
+    );
 }
 
 // ---------------------------------------------------------------- read
@@ -408,7 +458,7 @@ async fn edit_rejects_degenerate_replacements() {
 #[test]
 fn every_tool_is_registered_once_with_a_schema() {
     let temp = Temp::new();
-    let tools = aphid_code::tools::all(&temp.workspace(), None);
+    let tools = aphid_code::tools::all(&temp.workspace(), None, &Arc::new(exec::Registry::new()));
 
     let names: Vec<&str> = tools
         .iter()

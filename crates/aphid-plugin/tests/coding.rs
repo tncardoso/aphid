@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use aphid_agent::exec;
 use aphid_plugin::{Capabilities, Change, Permission, PluginHost, SessionInfo, Sink, explicit};
 
 /// A scratch tree holding plugins, config and state, removed on drop.
@@ -47,7 +48,12 @@ impl Fixture {
             .iter()
             .map(|path| explicit(path).expect("readable"))
             .collect();
-        let (host, diagnostics) = PluginHost::load(&files, &Capabilities::full(&self.root), sink);
+        let (host, diagnostics) = PluginHost::load(
+            &files,
+            &Capabilities::full(&self.root),
+            sink,
+            &Arc::new(exec::Registry::new()),
+        );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         host
     }

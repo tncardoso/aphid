@@ -483,7 +483,7 @@ fn markdown(text: &str, width: usize) -> Vec<Line<'static>> {
 }
 
 /// Compact byte counts: `412 B`, `1.2 kB`, `48 kB`.
-fn bytes(count: usize) -> String {
+pub(crate) fn bytes(count: usize) -> String {
     match count {
         0..=999 => format!("{count} B"),
         1_000..=999_999 => {

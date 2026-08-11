@@ -97,6 +97,19 @@ $ aphid --resume 20260810T012035-0000    # continue the session with this identi
 The identifier is optional. If you give no identifier, aphid continues the most
 recent session for the current directory.
 
+### See what is running
+
+In a session, type `/ps`. The list shows each command that runs now, and the
+last four commands that stopped. Each line gives the number of the command, its
+system process identifier, the source (`bash`, or the name of a plugin), the
+time, and, for a command that stopped, the result and the quantity of output.
+
+Press the arrow keys to select a command that runs now, and press `k` to stop
+it. This stops the command and each command that it started. Press `Esc` to
+close the list.
+
+The list opens while the agent runs also, which is when there is most to see.
+
 ### Control the tools
 
 `--confirm` makes aphid ask you before it runs a command that changes the

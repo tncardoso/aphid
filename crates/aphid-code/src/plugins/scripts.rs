@@ -96,8 +96,9 @@ pub fn load(
     workspace: &Workspace,
     files: &[PluginFile],
     sink: Arc<dyn Sink>,
+    processes: &Arc<aphid_agent::exec::Registry>,
 ) -> (Arc<PluginHost>, Vec<Diagnostic>) {
-    let (host, diagnostics) = PluginHost::load(files, &capabilities(workspace), sink);
+    let (host, diagnostics) = PluginHost::load(files, &capabilities(workspace), sink, processes);
     (Arc::new(host), diagnostics)
 }
 

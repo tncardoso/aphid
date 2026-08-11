@@ -164,7 +164,8 @@ pub async fn run(
     // the run instead of racing it.
     let plugin_files = std::mem::take(&mut options.plugin_files);
     let workspace = options.workspace.clone();
-    let (host, plugin_problems) = scripts::load(&workspace, &plugin_files, printer);
+    let processes = std::sync::Arc::clone(&options.processes);
+    let (host, plugin_problems) = scripts::load(&workspace, &plugin_files, printer, &processes);
     if let Some(backend) = aphid_plugin::ScriptBackend::install(&host)
         && options.stream_fn.is_none()
     {

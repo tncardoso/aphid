@@ -16,7 +16,7 @@ ratatui.workspace = true
 ratatui-textarea.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["fs", "process", "sync"] }
+tokio = { workspace = true, features = ["fs", "sync"] }
 
 [lints]
 workspace = true

@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use aphid_agent::exec;
 use aphid_plugin::{discover, explicit};
 
 /// A scratch tree with a workspace and a home directory, removed on drop.
@@ -141,7 +142,12 @@ fn the_shipped_examples_all_load() {
     assert!(files.len() >= 7, "found {} examples", files.len());
 
     let caps = Capabilities::full(&examples);
-    let (host, diagnostics) = PluginHost::load(&files, &caps, Arc::new(aphid_plugin::Silent));
+    let (host, diagnostics) = PluginHost::load(
+        &files,
+        &caps,
+        Arc::new(aphid_plugin::Silent),
+        &Arc::new(exec::Registry::new()),
+    );
 
     assert!(
         diagnostics.is_empty(),

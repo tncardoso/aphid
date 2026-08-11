@@ -40,6 +40,10 @@ pub struct HarnessOptions {
     pub plugin_files: Vec<aphid_plugin::PluginFile>,
     /// The loaded scripts. Set by the front end, which does the loading.
     pub host: Option<Arc<aphid_plugin::PluginHost>>,
+    /// Every command the runtime starts, from the `bash` tool or from a plugin.
+    /// The front end takes a handle to this before building, so the same record
+    /// backs the tools, the scripts and `/ps`.
+    pub processes: Arc<aphid_agent::exec::Registry>,
     /// Replace the provider backend. `None` talks to the real provider; tests
     /// and replays pass a scripted one.
     pub stream_fn: Option<StreamFn>,
@@ -64,6 +68,7 @@ impl HarnessOptions {
             plugins: Vec::new(),
             plugin_files: Vec::new(),
             host: None,
+            processes: Arc::new(aphid_agent::exec::Registry::new()),
             stream_fn: None,
         }
     }
@@ -101,6 +106,7 @@ pub fn build(options: HarnessOptions) -> Harness {
         // was never loaded and has nothing to contribute.
         plugin_files: _,
         host,
+        processes,
         stream_fn,
     } = options;
 
@@ -146,7 +152,7 @@ pub fn build(options: HarnessOptions) -> Harness {
     let mut builder = Agent::builder()
         .model(model)
         .system(system_prompt)
-        .tools(tools::all(&workspace, host))
+        .tools(tools::all(&workspace, host, &processes))
         .max_turns(max_turns);
 
     if let Some(level) = thinking {

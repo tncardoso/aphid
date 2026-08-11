@@ -26,13 +26,18 @@ pub use paths::Workspace;
 ///
 /// `host` is told about files the tools change; pass `None` when nothing is
 /// listening, which is the case for tests and for a session with no plugins.
+/// `processes` is where every command `bash` starts is recorded.
 #[must_use]
-pub fn all(workspace: &Workspace, host: Option<Arc<PluginHost>>) -> Vec<Arc<dyn ToolHandler>> {
+pub fn all(
+    workspace: &Workspace,
+    host: Option<Arc<PluginHost>>,
+    processes: &Arc<aphid_agent::exec::Registry>,
+) -> Vec<Arc<dyn ToolHandler>> {
     // Only worth carrying when somebody actually asked for it: the handle is
     // cloned into every call otherwise.
     let watcher = host.filter(|host| host.any_defines("on_file_change"));
     vec![
-        Arc::new(bash::tool(workspace)),
+        Arc::new(bash::tool(workspace, processes)),
         Arc::new(read::tool(workspace)),
         Arc::new(write::tool(workspace, watcher.clone())),
         Arc::new(edit::tool(workspace, watcher)),

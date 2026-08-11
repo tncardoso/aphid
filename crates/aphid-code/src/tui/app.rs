@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aphid_agent::{Agent, AgentHandle, RunOutcome};
+use aphid_agent::{Agent, AgentHandle, RunOutcome, exec};
 use aphid_core::{Model, ThinkingLevel, Transcript};
 use aphid_plugin::{Action as PluginAction, ScriptBackend, SessionInfo};
 use compact_str::CompactString;
@@ -48,6 +48,10 @@ const FRAME: Duration = Duration::from_millis(33);
 /// next one is due.
 const TICK: Duration = Duration::from_millis(250);
 
+/// How often the process list is redrawn while it is open. It counts in
+/// seconds, so this is as often as it can possibly need.
+const PS_REFRESH: Duration = Duration::from_millis(250);
+
 type Screen = Terminal<CrosstermBackend<Stdout>>;
 
 /// A run in flight, plus the agent it borrowed.
@@ -67,13 +71,19 @@ pub struct App {
     /// Waiting for the agent, in the order it arrived. A queue and not one slot
     /// because a plugin can send while the user types, and neither should lose.
     queued: VecDeque<String>,
+    /// Every command the runtime has started, for `/ps`.
+    processes: Arc<exec::Registry>,
     handle: AgentHandle,
     quit: bool,
 }
 
 impl App {
     #[must_use]
-    fn new(harness: &Harness, thinking: Option<ThinkingLevel>) -> Self {
+    fn new(
+        harness: &Harness,
+        thinking: Option<ThinkingLevel>,
+        processes: &Arc<exec::Registry>,
+    ) -> Self {
         let mut status = Status::from_model(harness.agent.model());
         status.thinking = thinking.map(|level| level.as_str().to_owned());
 
@@ -86,6 +96,7 @@ impl App {
             thinking,
             session: None,
             queued: VecDeque::new(),
+            processes: Arc::clone(processes),
             handle: harness.agent.handle(),
             host: None,
             quit: false,
@@ -103,6 +114,7 @@ impl App {
             thinking: None,
             session: None,
             queued: VecDeque::new(),
+            processes: Arc::new(exec::Registry::new()),
             handle: agent.handle(),
             host: None,
             quit: false,
@@ -253,6 +265,19 @@ impl App {
                 KeyCode::Esc | KeyCode::Char('q') => self.modal = None,
                 _ => {}
             },
+            Modal::Processes { .. } => match key.code {
+                KeyCode::Up => modal.move_selection(-1),
+                KeyCode::Down => modal.move_selection(1),
+                KeyCode::Char('k') => {
+                    if let Some(process) = modal.selected_process() {
+                        // Asking is all this does; the command's own task is
+                        // watching for the answer and does the stopping.
+                        self.processes.kill(process.id);
+                    }
+                }
+                KeyCode::Esc | KeyCode::Char('q') => self.modal = None,
+                _ => {}
+            },
             Modal::Confirm(_) => {
                 let decision = match key.code {
                     KeyCode::Char('y' | 'Y') | KeyCode::Enter => Some(Decision::Allow),
@@ -300,12 +325,13 @@ impl App {
 
     /// Run a slash command. Returns a prompt when the line was not one.
     fn command(&mut self, agent: &mut Agent, line: &str) -> Option<String> {
-        if !line.starts_with('/') {
+        let Some((name, rest)) = split_command(line) else {
             return Some(line.to_owned());
-        }
+        };
 
-        let (name, rest) = line[1..].split_once(' ').unwrap_or((&line[1..], ""));
-        let rest = rest.trim();
+        if self.command_solo(name, rest) {
+            return None;
+        }
 
         match name {
             "quit" | "q" | "exit" => self.quit = true,
@@ -381,6 +407,24 @@ impl App {
         None
     }
 
+    /// The commands that need nothing but the UI. `true` when the name was one.
+    ///
+    /// Kept apart from the rest because these are the only ones that still work
+    /// while a run holds the agent — which is exactly when a user wants to ask
+    /// what is running.
+    fn command_solo(&mut self, name: &str, _rest: &str) -> bool {
+        match name {
+            "ps" => {
+                self.modal = Some(Modal::Processes {
+                    registry: Arc::clone(&self.processes),
+                    selected: 0,
+                });
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Run a plugin's command, or report that nothing owns the name.
     ///
     /// A command reports by returning notices and steers by calling `prompt`,
@@ -451,6 +495,7 @@ const HELP: &str = "\
   /think  <level>  off | minimal | low | medium | high | xhigh | max
   /clear  /new     start a fresh conversation
   /tools           list the registered tools
+  /ps              what the runtime is running, and what it just ran
   /session         where this session is being written
   /plugins         list the loaded plugins and their commands
   /help            this list
@@ -513,12 +558,16 @@ pub async fn run(
     let thinking = options.thinking;
     let model_id = options.model.id.to_string();
 
+    // One record of what is running, shared by the tools, the scripts and `/ps`.
+    let processes = Arc::clone(&options.processes);
+
     // Scripts print through the app loop, because the UI owns the screen.
     let plugin_files = std::mem::take(&mut options.plugin_files);
     let (host, plugin_problems) = scripts::load(
         &workspace,
         &plugin_files,
         Arc::new(UiSink::new(events.clone())),
+        &processes,
     );
     if let Some(backend) = ScriptBackend::install(&host)
         && options.stream_fn.is_none()
@@ -545,7 +594,7 @@ pub async fn run(
     });
 
     let mut harness = harness::build(options);
-    let mut app = App::new(&harness, thinking);
+    let mut app = App::new(&harness, thinking, &processes);
     app.session = Some(session);
     app.view.watch(host.clone());
     app.host = Some(host.clone());
@@ -661,6 +710,10 @@ async fn drive(
             // A repaint tick, so a streaming reply animates rather than
             // redrawing once per token.
             () = tokio::time::sleep(FRAME), if app.status.running => dirty = true,
+            // The process list counts elapsed time, which has to keep moving
+            // even with an idle agent and nothing else arriving.
+            () = tokio::time::sleep(PS_REFRESH),
+                if matches!(app.modal, Some(Modal::Processes { .. })) => dirty = true,
             // The plugins' tick. Dispatched off the loop, because a hook that
             // reaches for `exec` or `http` blocks on the plugin worker and the
             // loop that draws the screen must never wait on that.
@@ -745,8 +798,13 @@ fn handle_key(app: &mut App, key: KeyEvent, agent: Option<&mut Agent>) {
             let Some(prompt) = ({
                 match agent {
                     Some(agent) => app.command(agent, &line),
-                    // Mid-run, only prompts queue — commands need the agent.
-                    None => Some(line),
+                    // Mid-run the agent is away with the run, so only the
+                    // commands that do not need it can run; the rest of the
+                    // line queues as a prompt, as it always did.
+                    None => match split_command(&line) {
+                        Some((name, rest)) if app.command_solo(name, rest) => None,
+                        _ => Some(line),
+                    },
                 }
             }) else {
                 return;
@@ -756,6 +814,13 @@ fn handle_key(app: &mut App, key: KeyEvent, agent: Option<&mut Agent>) {
             app.enqueue(prompt);
         }
     }
+}
+
+/// Split `/name rest` into its two halves. `None` when the line is a prompt.
+fn split_command(line: &str) -> Option<(&str, &str)> {
+    let line = line.strip_prefix('/')?;
+    let (name, rest) = line.split_once(' ').unwrap_or((line, ""));
+    Some((name, rest.trim()))
 }
 
 /// The input box grows with content up to this many rows, then scrolls.
@@ -1092,13 +1157,85 @@ mod tests {
         assert!(take_pending(&mut idle, &mut app).is_none());
         assert!(idle.is_some());
     }
+
+    #[tokio::test]
+    async fn ps_opens_the_process_list() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+        let mut idle = Some(agent);
+
+        type_line(&mut app, &mut idle, "/ps");
+
+        assert!(matches!(app.modal, Some(Modal::Processes { .. })));
+        assert!(app.queued().is_none(), "a command is not a prompt");
+    }
+
+    /// The one time a user most wants to know what is running is while
+    /// something is running, which is exactly when the agent is away.
+    #[tokio::test]
+    async fn ps_works_while_a_run_holds_the_agent() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+        let mut away: Option<Agent> = None;
+        app.status.running = true;
+
+        type_line(&mut app, &mut away, "/ps");
+
+        assert!(matches!(app.modal, Some(Modal::Processes { .. })));
+        assert_eq!(app.queued(), None, "it must not queue as a prompt");
+    }
+
+    #[tokio::test]
+    async fn a_command_that_needs_the_agent_still_queues_mid_run() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+        let mut away: Option<Agent> = None;
+        app.status.running = true;
+
+        type_line(&mut app, &mut away, "/tools");
+
+        assert!(app.modal.is_none());
+        assert_eq!(app.queued(), Some("/tools"));
+    }
+
+    #[tokio::test]
+    async fn k_stops_the_selected_process() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+        let mut idle = Some(agent);
+
+        let processes = Arc::clone(&app.processes);
+        let running = tokio::spawn({
+            let processes = Arc::clone(&processes);
+            async move {
+                exec::run(
+                    &processes,
+                    exec::Spec::new("bash", "sleep 30"),
+                    None,
+                    Arc::new(|_, _| {}),
+                )
+                .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        type_line(&mut app, &mut idle, "/ps");
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+            idle.as_mut(),
+        );
+
+        let status = running.await.expect("the sleep");
+        assert_eq!(status, exec::Status::Killed);
+    }
 }
 
 #[cfg(test)]
 mod plugin_tests {
     use std::sync::Arc;
 
-    use aphid_agent::Agent;
+    use aphid_agent::{Agent, exec};
     use aphid_core::providers::deepseek;
     use aphid_plugin::{Capabilities, PluginHost, Silent, explicit};
     use tokio::sync::mpsc::unbounded_channel;
@@ -1133,7 +1270,9 @@ mod plugin_tests {
         fn host_with(&self, sink: Arc<dyn aphid_plugin::Sink>) -> Arc<PluginHost> {
             let file = explicit(&self.0.join(".aphid").join("plugins").join("kit.rhai"))
                 .expect("readable");
-            let (host, problems) = PluginHost::load(&[file], &Capabilities::full(&self.0), sink);
+            let processes = Arc::new(exec::Registry::new());
+            let (host, problems) =
+                PluginHost::load(&[file], &Capabilities::full(&self.0), sink, &processes);
             assert!(problems.is_empty(), "{problems:?}");
             Arc::new(host)
         }

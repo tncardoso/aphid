@@ -1,8 +1,11 @@
-//! The two things that take over the screen: the model picker and the
-//! permission prompt.
+//! The things that take over the screen: the model picker, the permission
+//! prompt and the process list.
 
+use std::sync::Arc;
 use std::sync::mpsc::Sender;
+use std::time::Duration;
 
+use aphid_agent::exec::{Process, Registry, Status};
 use aphid_core::Model;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
@@ -12,11 +15,21 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::plugins::permissions::{Decision, Risk};
 use crate::tui::status::tokens;
+use crate::tui::view::{bytes, one_line};
 
 /// What is covering the transcript, if anything.
 pub enum Modal {
-    Models { models: Vec<Model>, selected: usize },
+    Models {
+        models: Vec<Model>,
+        selected: usize,
+    },
     Confirm(Confirm),
+    /// The process list holds the registry rather than a copy of it, so what it
+    /// draws is what is running at that moment.
+    Processes {
+        registry: Arc<Registry>,
+        selected: usize,
+    },
 }
 
 /// A gated tool call waiting on an answer.
@@ -37,29 +50,59 @@ impl Confirm {
 
 impl Modal {
     pub fn move_selection(&mut self, delta: isize) {
-        if let Modal::Models { models, selected } = self
-            && !models.is_empty()
-        {
-            let len = models.len() as isize;
-            let next = (*selected as isize + delta).rem_euclid(len);
-            *selected = next as usize;
+        let (len, selected) = match self {
+            Modal::Models { models, selected } => (models.len(), selected),
+            // Only the running ones can be selected: a finished process is a
+            // report, with nothing left to do to it.
+            Modal::Processes { registry, selected } => (running(registry).len(), selected),
+            Modal::Confirm(_) => return,
+        };
+        if len == 0 {
+            return;
         }
+        let next = (*selected as isize + delta).rem_euclid(len as isize);
+        *selected = next as usize;
     }
 
     #[must_use]
     pub fn selected_model(&self) -> Option<&Model> {
         match self {
             Modal::Models { models, selected } => models.get(*selected),
-            Modal::Confirm(_) => None,
+            Modal::Confirm(_) | Modal::Processes { .. } => None,
         }
+    }
+
+    /// The running process under the cursor, if this is the process list.
+    ///
+    /// The list changes underneath the cursor, so the index is clamped here
+    /// rather than trusted.
+    #[must_use]
+    pub fn selected_process(&self) -> Option<Process> {
+        let Modal::Processes { registry, selected } = self else {
+            return None;
+        };
+        let running = running(registry);
+        running.get(*selected).or_else(|| running.last()).cloned()
     }
 
     pub fn render(&self, frame: &mut Frame<'_>, area: Rect) {
         match self {
             Modal::Models { models, selected } => render_models(frame, area, models, *selected),
             Modal::Confirm(confirm) => render_confirm(frame, area, confirm),
+            Modal::Processes { registry, selected } => {
+                render_processes(frame, area, registry, *selected);
+            }
         }
     }
+}
+
+/// What the registry has running, in the order it started.
+fn running(registry: &Registry) -> Vec<Process> {
+    registry
+        .snapshot()
+        .into_iter()
+        .filter(Process::running)
+        .collect()
 }
 
 /// A centred box `width` columns wide and `height` rows tall, clamped to `area`.
@@ -120,6 +163,121 @@ fn render_models(frame: &mut Frame<'_>, area: Rect, models: &[Model], selected: 
         ),
         cell,
     );
+}
+
+/// The columns before the command, which are the same in both sections so the
+/// two read as one table.
+const COLUMNS: usize = 40;
+
+fn render_processes(frame: &mut Frame<'_>, area: Rect, registry: &Registry, selected: usize) {
+    let all = registry.snapshot();
+    let (live, done): (Vec<Process>, Vec<Process>) = all.into_iter().partition(Process::running);
+
+    let width = area.width.saturating_sub(8).min(96);
+    let room = (width as usize).saturating_sub(COLUMNS + 2);
+
+    let mut rows = Vec::new();
+    if live.is_empty() {
+        rows.push(Line::styled(
+            "  nothing running",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        // A list that changes under the cursor: clamp rather than trust.
+        let chosen = selected.min(live.len() - 1);
+        for (index, process) in live.iter().enumerate() {
+            rows.push(row(process, index == chosen, room));
+        }
+    }
+    if !done.is_empty() {
+        rows.push(Line::default());
+        rows.push(Line::styled(
+            "  recent",
+            Style::default().fg(Color::DarkGray),
+        ));
+        // Newest first: what just happened is what a reader came for.
+        for process in done.iter().rev() {
+            rows.push(row(process, false, room));
+        }
+    }
+
+    let cell = centred(area, width, rows.len() as u16 + 2);
+    frame.render_widget(Clear, cell);
+    frame.render_widget(
+        Paragraph::new(rows).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" processes — ↑↓ to move, k to stop, Esc to close ")
+                .border_style(Style::default().fg(Color::Cyan)),
+        ),
+        cell,
+    );
+}
+
+/// One process: what it is, then how it is going, then the command itself.
+fn row(process: &Process, chosen: bool, room: usize) -> Line<'static> {
+    let style = if chosen {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let pid = process
+        .pid
+        .map_or_else(|| "—".to_owned(), |pid| pid.to_string());
+    let size = if process.running() {
+        String::new()
+    } else {
+        bytes(process.bytes as usize)
+    };
+    let (token, colour) = state(&process.status);
+
+    Line::from(vec![
+        Span::styled(
+            format!(
+                "{} {:<3} {:>7} {:<9}",
+                if chosen { "▸" } else { " " },
+                process.id,
+                pid,
+                one_line(&process.origin, 9),
+            ),
+            style,
+        ),
+        Span::styled(format!(" {token:<9}"), Style::default().fg(colour)),
+        Span::styled(
+            format!("{:>5} {:>8}  ", elapsed(process.elapsed()), size),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw(one_line(&process.command, room)),
+    ])
+}
+
+/// How a process is going, in a word and a colour.
+fn state(status: &Status) -> (String, Color) {
+    match status {
+        Status::Running => (String::new(), Color::Reset),
+        Status::Killing => ("stopping…".to_owned(), Color::Yellow),
+        Status::Exited(0) => ("✓".to_owned(), Color::Green),
+        Status::Exited(code) => (format!("✗ {code}"), Color::Red),
+        Status::Signalled => ("signal".to_owned(), Color::Red),
+        Status::TimedOut => ("timeout".to_owned(), Color::Yellow),
+        Status::Cancelled => ("cancelled".to_owned(), Color::DarkGray),
+        Status::Killed => ("stopped".to_owned(), Color::Red),
+        Status::Failed(_) => ("failed".to_owned(), Color::Red),
+    }
+}
+
+/// `m:ss`, or `h:mm:ss` once it has been running that long.
+fn elapsed(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    let (hours, minutes, seconds) = (seconds / 3600, (seconds % 3600) / 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
 }
 
 fn render_confirm(frame: &mut Frame<'_>, area: Rect, confirm: &Confirm) {
