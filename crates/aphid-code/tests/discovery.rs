@@ -138,12 +138,21 @@ fn a_project_skill_shadows_a_global_one() {
         "home/.aphid/skills/release.md",
         "---\ndescription: global version\n---\n",
     );
+    temp.write(
+        "home/.aphid/skills/notes.md",
+        "---\ndescription: only global\n---\n",
+    );
     let workspace = Workspace::new(&temp.root);
 
     let (skills, _) = skills::discover(&workspace, Some(&temp.root.join("home")));
 
-    assert_eq!(skills.len(), 1);
-    assert_eq!(skills[0].description, "project version");
+    assert_eq!(skills.len(), 2);
+    // Sorted by name, so `notes` comes first.
+    assert_eq!(skills[1].description, "project version");
+    // Each skill remembers which root it came from, which is what `/skills`
+    // reports.
+    assert!(skills[1].project);
+    assert!(!skills[0].project);
 }
 
 #[test]

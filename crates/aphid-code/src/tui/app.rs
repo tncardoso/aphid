@@ -32,11 +32,12 @@ use crate::model::{Catalog, ResolveError, clamp_thinking};
 use crate::plugins::permissions::{Decision, Permissions};
 use crate::plugins::scripts;
 use crate::session::{self, SessionPlugin, sessions_dir};
+use crate::skills::{self, Skill};
 use crate::tui::event::{UiConfirmer, UiEvent, UiPlugin, UiSink, spawn_input_thread};
 use crate::tui::input::{Action, Input};
 use crate::tui::modal::{Confirm, Modal};
 use crate::tui::status::Status;
-use crate::tui::view::View;
+use crate::tui::view::{View, one_line};
 
 /// How often the screen is repainted while something is happening.
 const FRAME: Duration = Duration::from_millis(33);
@@ -73,6 +74,10 @@ pub struct App {
     queued: VecDeque<String>,
     /// Every command the runtime has started, for `/ps`.
     processes: Arc<exec::Registry>,
+    /// The skills the model was told about, for `/skills`.
+    skills: Vec<Skill>,
+    /// Skill files that did not load, for the same list.
+    skill_diagnostics: Vec<skills::Diagnostic>,
     handle: AgentHandle,
     quit: bool,
 }
@@ -97,6 +102,8 @@ impl App {
             session: None,
             queued: VecDeque::new(),
             processes: Arc::clone(processes),
+            skills: harness.skills.clone(),
+            skill_diagnostics: harness.diagnostics.clone(),
             handle: harness.agent.handle(),
             host: None,
             quit: false,
@@ -115,6 +122,8 @@ impl App {
             session: None,
             queued: VecDeque::new(),
             processes: Arc::new(exec::Registry::new()),
+            skills: Vec::new(),
+            skill_diagnostics: Vec::new(),
             handle: agent.handle(),
             host: None,
             quit: false,
@@ -400,6 +409,7 @@ impl App {
             }
             "help" => self.view.push_notice(HELP),
             "plugins" => self.view.push_notice(self.plugin_summary()),
+            "skills" => self.view.push_notice(self.skills_summary()),
             // Built-ins win, so a plugin can never take `/quit` away.
             other => self.plugin_command(other, rest),
         }
@@ -487,7 +497,38 @@ impl App {
 
         format!("── plugins ──\n{}", lines.join("\n"))
     }
+
+    /// What `/skills` prints.
+    fn skills_summary(&self) -> String {
+        if self.skills.is_empty() && self.skill_diagnostics.is_empty() {
+            return "no skills are loaded".to_owned();
+        }
+
+        let mut lines = Vec::new();
+        for skill in &self.skills {
+            let origin = if skill.project { "project" } else { "global" };
+            lines.push(format!(
+                "  {:<16} {} [{origin}]",
+                skill.name,
+                one_line(&skill.description, SKILL_DESCRIPTION)
+            ));
+        }
+
+        for problem in &self.skill_diagnostics {
+            lines.push(format!(
+                "  ! {}: {}",
+                problem.path.display(),
+                problem.message
+            ));
+        }
+
+        format!("── skills ──\n{}", lines.join("\n"))
+    }
 }
+
+/// The widest description a `/skills` line carries. A skill may describe itself
+/// in up to a kilobyte, which is worth having in the prompt and not on screen.
+const SKILL_DESCRIPTION: usize = 60;
 
 const HELP: &str = "\
 ── commands ──────────────────────────────────────
@@ -498,6 +539,7 @@ const HELP: &str = "\
   /ps              what the runtime is running, and what it just ran
   /session         where this session is being written
   /plugins         list the loaded plugins and their commands
+  /skills          list the skills the model can open
   /help            this list
   /quit            exit
 
@@ -1156,6 +1198,81 @@ mod tests {
         assert!(app.queued().is_none(), "a command is not a prompt");
         assert!(take_pending(&mut idle, &mut app).is_none());
         assert!(idle.is_some());
+    }
+
+    fn notice_lines(app: &App) -> Vec<String> {
+        use crate::tui::view::Entry;
+        app.view
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Notice(text) => Some(text.clone()),
+                _ => None,
+            })
+            .flat_map(|text| {
+                text.lines()
+                    .map(std::borrow::ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn skill(name: &str, description: &str, project: bool) -> Skill {
+        Skill {
+            name: name.to_owned(),
+            description: description.to_owned(),
+            path: PathBuf::from(format!("/w/.aphid/skills/{name}.md")),
+            project,
+        }
+    }
+
+    #[tokio::test]
+    async fn skills_lists_what_loaded_and_what_did_not() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+        let mut idle = Some(agent);
+        app.skills = vec![
+            skill("release", "How to cut a release.", true),
+            skill("review", &"a very wordy description ".repeat(20), false),
+        ];
+        app.skill_diagnostics = vec![skills::Diagnostic {
+            path: PathBuf::from("/w/.aphid/skills/broken.md"),
+            message: "no `description` in the frontmatter".to_owned(),
+        }];
+
+        type_line(&mut app, &mut idle, "/skills");
+
+        let lines = notice_lines(&app);
+        assert!(
+            lines.iter().any(|line| line.contains("release")
+                && line.contains("How to cut a release.")
+                && line.ends_with("[project]")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains('…') && line.ends_with("[global]")),
+            "a long description is cut to one line: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("  !") && line.contains("broken.md")),
+            "{lines:?}"
+        );
+        assert!(app.queued().is_none(), "a command is not a prompt");
+    }
+
+    #[tokio::test]
+    async fn skills_says_so_when_there_are_none() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+        let mut idle = Some(agent);
+
+        type_line(&mut app, &mut idle, "/skills");
+
+        assert!(notice_lines(&app).contains(&"no skills are loaded".to_owned()));
     }
 
     #[tokio::test]

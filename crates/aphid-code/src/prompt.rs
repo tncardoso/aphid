@@ -216,6 +216,7 @@ mod tests {
             name: "release".into(),
             description: "How to cut a release".into(),
             path: PathBuf::from("/w/.aphid/skills/release/SKILL.md"),
+            project: true,
         }];
 
         let prompt = build(&options, Path::new("/w"));
@@ -232,6 +233,7 @@ mod tests {
             name: "x".into(),
             description: "handles <tags> & \"quotes\"".into(),
             path: PathBuf::from("/w/x.md"),
+            project: true,
         }];
 
         let prompt = build(&options, Path::new("/w"));

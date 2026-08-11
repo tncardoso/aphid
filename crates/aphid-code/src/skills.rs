@@ -25,6 +25,8 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     pub path: PathBuf,
+    /// Whether this came from the workspace rather than the home directory.
+    pub project: bool,
 }
 
 /// A skill file that could not be used, and why.
@@ -43,16 +45,16 @@ pub struct Diagnostic {
 /// Project skills come first and shadow a global skill of the same name.
 #[must_use]
 pub fn discover(workspace: &Workspace, home: Option<&Path>) -> (Vec<Skill>, Vec<Diagnostic>) {
-    let mut roots = vec![workspace.root().join(".aphid").join("skills")];
+    let mut roots = vec![(workspace.root().join(".aphid").join("skills"), true)];
     if let Some(home) = home {
-        roots.push(home.join(".aphid").join("skills"));
+        roots.push((home.join(".aphid").join("skills"), false));
     }
 
     let mut skills: Vec<Skill> = Vec::new();
     let mut diagnostics = Vec::new();
 
-    for root in roots {
-        let (found, problems) = load_dir(&root);
+    for (root, project) in roots {
+        let (found, problems) = load_dir(&root, project);
         for skill in found {
             if !skills.iter().any(|existing| existing.name == skill.name) {
                 skills.push(skill);
@@ -65,7 +67,7 @@ pub fn discover(workspace: &Workspace, home: Option<&Path>) -> (Vec<Skill>, Vec<
     (skills, diagnostics)
 }
 
-fn load_dir(root: &Path) -> (Vec<Skill>, Vec<Diagnostic>) {
+fn load_dir(root: &Path, project: bool) -> (Vec<Skill>, Vec<Diagnostic>) {
     let mut skills = Vec::new();
     let mut diagnostics = Vec::new();
 
@@ -88,7 +90,7 @@ fn load_dir(root: &Path) -> (Vec<Skill>, Vec<Diagnostic>) {
             continue;
         }
 
-        match load(&candidate) {
+        match load(&candidate, project) {
             Ok(skill) => skills.push(skill),
             Err(message) => diagnostics.push(Diagnostic {
                 path: candidate,
@@ -100,7 +102,7 @@ fn load_dir(root: &Path) -> (Vec<Skill>, Vec<Diagnostic>) {
     (skills, diagnostics)
 }
 
-fn load(path: &Path) -> Result<Skill, String> {
+fn load(path: &Path, project: bool) -> Result<Skill, String> {
     let text = std::fs::read_to_string(path).map_err(|error| format!("could not read: {error}"))?;
     let front = frontmatter(&text);
 
@@ -129,6 +131,7 @@ fn load(path: &Path) -> Result<Skill, String> {
         name,
         description: description.clone(),
         path: path.to_path_buf(),
+        project,
     })
 }
 

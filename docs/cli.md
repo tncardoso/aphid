@@ -118,6 +118,11 @@ workspace. A headless run has no terminal for a question. Thus `--confirm` and
 
 `--no-context` prevents aphid from reading the `AGENTS.md` files and the skills.
 
+In a session, type `/skills` to see the skills that loaded. Each line gives the
+name of the skill, its description, and whether the skill comes from the
+workspace (`project`) or from your home directory (`global`). A line that starts
+with `!` shows a skill file that aphid could not read, and the reason.
+
 The plugin options control the Rhai plugins in `.aphid/plugins`. A plugin in your
 home directory always loads. A plugin that comes with a workspace needs your
 agreement the first time; aphid asks before the terminal user interface starts,

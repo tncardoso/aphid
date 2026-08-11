@@ -246,6 +246,9 @@ workspace and then under `~/.aphid`:
 .aphid/skills/<name>.md
 ```
 
+Type `/skills` in a session to see the skills that loaded, and the skill files
+that aphid could not read.
+
 ## Sessions
 
 A session is one JSONL file per conversation, appended to as messages are
