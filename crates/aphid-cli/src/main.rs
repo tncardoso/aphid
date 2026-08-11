@@ -1,14 +1,16 @@
-//! The `aphid` binary: four front ends over one harness.
+//! The `aphid` binary: five front ends over one harness.
 //!
 //! `aphid` is the coding agent, and the default — everything else is a
-//! subcommand. `raw` streams one completion and prints every protocol event as
-//! it fires. `agent` runs the plain agent loop with a demo tool. `model`
-//! manages `~/.aphid/models.json`.
+//! subcommand. `alate` runs a resident agent, and attaches a terminal to one
+//! already running. `raw` streams one completion and prints every protocol
+//! event as it fires. `agent` runs the plain agent loop with a demo tool.
+//! `model` manages `~/.aphid/models.json`.
 //!
 //! The debugging front ends exist because the interesting failures are on the
 //! wire: `raw --events` shows each delta with its span, and `raw --request`
 //! prints the encoded body without sending it.
 
+mod alate;
 mod code;
 mod model;
 mod render;
@@ -48,6 +50,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Run or attach to a resident agent
+    #[command(subcommand)]
+    Alate(alate::Command),
     /// Stream a single completion, printing protocol events
     Raw(ProtocolArgs),
     /// Run the plain agent loop with a demo tool
@@ -133,9 +138,11 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     // The coding agent needs more than one worker: a permission prompt blocks
-    // the agent's task until the UI answers on another one. Nothing else does.
+    // the agent's task until the UI answers on another one. So does an alate,
+    // for the same reason and also because its memory runs on a blocking task.
+    // Nothing else does.
     let runtime = match cli.command {
-        None => tokio::runtime::Builder::new_multi_thread()
+        None | Some(Command::Alate(_)) => tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build(),
         Some(_) => tokio::runtime::Builder::new_current_thread()
@@ -152,6 +159,7 @@ fn main() -> ExitCode {
 
     match cli.command {
         None => runtime.block_on(code::run(cli.code)),
+        Some(Command::Alate(command)) => runtime.block_on(alate::run(command)),
         Some(Command::Raw(args)) => runtime.block_on(run(args)),
         Some(Command::Agent(args)) => runtime.block_on(agent::run(args)),
         Some(Command::Model(command)) => runtime.block_on(model::run(command)),

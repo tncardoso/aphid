@@ -37,11 +37,12 @@ $ aphid -p "what does this crate do?"
 $ aphid "what does this crate do?"
 ```
 
-## The four front ends
+## The five front ends
 
 ```
 aphid [OPTIONS]                 open the terminal UI
 aphid [OPTIONS] -p <prompt>     run one prompt and print the result
+aphid alate <command>           run a resident agent, or attach a terminal to one
 aphid raw   [OPTIONS] <prompt>  stream a single completion, printing protocol events
 aphid agent [OPTIONS] <prompt>  run the plain agent loop with a demo tool
 aphid model <command>           manage the models in ~/.aphid/models.json
@@ -70,6 +71,51 @@ OPTIONS:
     --quiet               headless: drop the line-by-line output of running tools
     -h, --help            show this help
 ```
+
+### Resident agent (`aphid alate`)
+
+An alate is the winged aphid — the form that leaves the plant and lives on its
+own. Where the coding agent starts in a repository and forgets everything when
+the terminal closes, an alate keeps a home directory it owns, a memory that
+outlasts any session, a clock that wakes it, and a socket you attach to and
+detach from while it carries on.
+
+```
+aphid alate run    [--name NAME]   run the alate in this terminal
+aphid alate attach [--name NAME]   open a terminal on a running alate
+aphid alate list                   show the alates on this machine
+```
+
+```console
+$ aphid alate run --name work        # one terminal
+$ aphid alate attach --name work     # another, whenever you want it
+```
+
+An alate holds several conversations at once. The resident one is where the
+heartbeat wakes, and it keeps its context all day. Attaching gives you one of
+your own that ends when you detach. A scheduled job gets a third, so it never
+lands in the middle of what you were saying — `/sessions` lists them all, and
+`/session <id>` opens any of them, including ones that finished last week.
+
+The memory is markdown in the home — one file for each path, one line for each
+fact — so `grep` reads it and the agent edits it with the same tools it edits
+anything else. It is shared across sessions, so a job can write a fact you
+recall an hour later. Two tools reach it, `remember` and `recall`, and the facts
+a prompt needs arrive on their own, as a system note beside it and never folded
+into it.
+
+The heartbeat is a pulse on the interval in `alate.json`. For anything that has
+to happen at a *time*, the `cron` tool writes a crontab — five-field
+expressions in local time, kept in `cron.json` — and each job runs in a fresh
+session with the prompt it was given.
+
+The gateway is a Unix socket: one JSON object per line, in both directions, each
+naming the conversation it belongs to. Every line is also appended to
+`alate.log`, so the hours when nobody was attached are still readable
+afterwards.
+
+[docs/alate.md](docs/alate.md) gives the home layout, every configuration field,
+and the protocol.
 
 ### Models (`aphid model`)
 
@@ -135,7 +181,7 @@ OPTIONS:
 
 ## Design
 
-The workspace splits into five crates, a narrow step at each one:
+The workspace splits into six crates, a narrow step at each one:
 
 - **[`aphid-core`]** — message, model and streaming types. The `Transcript`
   arena layout, spans, thinking levels, the OpenAI-completions encoder, and the
@@ -149,7 +195,10 @@ The workspace splits into five crates, a narrow step at each one:
 - **[`aphid-code`]** — the specialization. The tools a coding agent needs,
   system-prompt assembly from the project's conventions, skill discovery,
   on-disk sessions, permission plugins, and the TUI.
-- **[`aphid-cli`]** — the thin `aphid` binary, wiring the four front ends
+- **[`aphid-alate`]** — the resident agent. A home directory, a memory of facts,
+  a heartbeat, and the socket clients attach to. Builds its agent with
+  `aphid-code`'s harness unchanged.
+- **[`aphid-cli`]** — the thin `aphid` binary, wiring the five front ends
   together.
 
 ### The memory model

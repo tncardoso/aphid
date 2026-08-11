@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 aphid-agent = { path = "../aphid-agent" }
+aphid-alate = { path = "../aphid-alate" }
 aphid-code = { path = "../aphid-code" }
 aphid-core = { path = "../aphid-core" }
 aphid-plugin = { path = "../aphid-plugin" }

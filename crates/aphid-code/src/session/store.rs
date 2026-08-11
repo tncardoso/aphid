@@ -182,7 +182,7 @@ pub fn resolve(dir: &Path, id: &str) -> Option<Summary> {
 ///
 /// Unparseable lines are skipped rather than failing the load: a session
 /// truncated by a crash should still open.
-fn read(path: &Path) -> std::io::Result<(Header, Vec<Record>)> {
+pub(super) fn read(path: &Path) -> std::io::Result<(Header, Vec<Record>)> {
     let file = File::open(path)?;
     let mut header = None;
     let mut records = Vec::new();

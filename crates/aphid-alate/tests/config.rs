@@ -1,0 +1,102 @@
+//! `alate.json`, and the durations written in it.
+
+mod common;
+
+use std::time::Duration;
+
+use aphid_alate::config::{Config, Heartbeat, MemoryConfig, Permissions, Thinking, duration};
+use common::Temp;
+
+#[test]
+fn a_missing_file_is_the_defaults() {
+    let temp = Temp::new("config");
+    let config = Config::load(&temp.path("nothing.json")).expect("load");
+    assert_eq!(config, Config::default());
+    assert_eq!(config.permissions, Permissions::Ask);
+    assert_eq!(config.thinking, Some(Thinking::Medium));
+    assert_eq!(config.memory.recall, 5);
+}
+
+#[test]
+fn an_empty_file_is_the_defaults_too() {
+    // What a truncated write leaves behind. Reporting a parse error nobody can
+    // act on would be worse than starting with what a new alate starts with.
+    let temp = Temp::new("config");
+    let path = temp.write("alate.json", "   \n");
+    assert_eq!(Config::load(&path).expect("load"), Config::default());
+}
+
+#[test]
+fn a_partial_file_keeps_every_other_default() {
+    let temp = Temp::new("config");
+    let path = temp.write("alate.json", r#"{"model": "deepseek-chat"}"#);
+    let config = Config::load(&path).expect("load");
+
+    assert_eq!(config.model.as_deref(), Some("deepseek-chat"));
+    assert_eq!(config.memory.recall, 5);
+    assert_eq!(config.gateway.socket, None);
+    assert_eq!(config.heartbeat.every, "15m");
+}
+
+#[test]
+fn it_round_trips() {
+    let temp = Temp::new("config");
+    let path = temp.path("alate.json");
+
+    let config = Config {
+        model: Some("some-model".to_owned()),
+        permissions: Permissions::Allow,
+        heartbeat: Heartbeat {
+            every: "2h".to_owned(),
+            prompt: Some("Look around.".to_owned()),
+        },
+        memory: MemoryConfig { recall: 9 },
+        ..Config::default()
+    };
+    config.save(&path).expect("save");
+
+    assert_eq!(Config::load(&path).expect("load"), config);
+}
+
+#[test]
+fn a_newer_version_is_refused_by_name() {
+    let temp = Temp::new("config");
+    let path = temp.write("alate.json", r#"{"version": 99}"#);
+    let error = Config::load(&path).expect_err("refused").to_string();
+    assert!(error.contains("99"), "{error}");
+    assert!(error.contains("alate.json"), "{error}");
+}
+
+#[test]
+fn durations_read_the_way_they_look() {
+    assert_eq!(duration("30s"), Ok(Some(Duration::from_secs(30))));
+    assert_eq!(duration("15m"), Ok(Some(Duration::from_secs(900))));
+    assert_eq!(duration("2h"), Ok(Some(Duration::from_secs(7200))));
+    assert_eq!(duration("1d"), Ok(Some(Duration::from_secs(86400))));
+    // A bare number is seconds, because the alternative is guessing.
+    assert_eq!(duration("45"), Ok(Some(Duration::from_secs(45))));
+    assert_eq!(duration(" 15m "), Ok(Some(Duration::from_secs(900))));
+}
+
+#[test]
+fn a_heartbeat_can_be_turned_off() {
+    for text in ["off", "never", "none", "0", "", "0m"] {
+        assert_eq!(duration(text), Ok(None), "{text:?}");
+    }
+}
+
+#[test]
+fn a_duration_that_is_not_one_says_so() {
+    assert!(duration("soon").is_err());
+    assert!(duration("15 fortnights").is_err());
+    assert!(duration("m15").is_err());
+}
+
+#[test]
+fn the_heartbeat_reads_its_own_interval() {
+    let config = Config::default();
+    assert_eq!(
+        config.heartbeat.interval(),
+        Ok(Some(Duration::from_secs(900)))
+    );
+}

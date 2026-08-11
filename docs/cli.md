@@ -7,6 +7,7 @@ Simplified Technical English.
 
 - [Invocation](#invocation)
 - [The coding agent](#the-coding-agent)
+- [`alate`](#alate)
 - [`raw` and `agent`](#raw-and-agent)
 - [`model`](#model)
 - [Files and environment variables](#files-and-environment-variables)
@@ -16,14 +17,15 @@ Simplified Technical English.
 
 ```
 aphid [OPTIONS] [PROMPT]...    the coding agent
+aphid alate <COMMAND>               run a resident agent, or attach to one
 aphid raw   [OPTIONS] <PROMPT>...   stream one completion, and print each protocol event
 aphid agent [OPTIONS] <PROMPT>...   run the agent loop with a demo tool
 aphid model <COMMAND>               manage the models in ~/.aphid/models.json
 ```
 
-The coding agent is the default. If the first word is `raw`, `agent` or `model`,
-aphid runs that subcommand. If the first word is something different, aphid uses
-the full command line as a prompt for the coding agent.
+The coding agent is the default. If the first word is `alate`, `raw`, `agent` or
+`model`, aphid runs that subcommand. If the first word is something different,
+aphid uses the full command line as a prompt for the coding agent.
 
 Give a prompt to run the agent one time. Give no prompt to open the terminal
 user interface.
@@ -131,6 +133,47 @@ a question, and thus does not load the plugins of the workspace unless you give
 `--trust-plugins`. `--plugin` names a file directly and does not ask.
 Read [plugins.md](plugins.md) to write one.
 Use it to make the start of a run fully predictable.
+
+## `alate`
+
+`aphid alate` runs a resident agent. An alate has a home directory of its own, a
+memory that continues between sessions, a clock that wakes it, and a socket that
+a terminal attaches to.
+
+```
+aphid alate run    [--name NAME]    run the alate in this terminal
+aphid alate attach [--name NAME]    open a terminal on a running alate
+aphid alate list                    show the alates on this machine
+```
+
+| Option | Effect |
+| --- | --- |
+| `-n`, `--name <NAME>` | Select the instance. The default is `default`. |
+
+`run` holds the terminal until you stop it. `attach` opens a terminal on an
+alate that already runs; close it, and the alate continues.
+
+An alate holds more than one conversation. Attaching gives you one of your own;
+`/sessions` and `/session <id>` move between them, and a scheduled job runs in a
+conversation of its own.
+
+```console
+$ aphid alate run --name work
+aphid: work is awake in /home/you/.aphid/alate/work
+aphid: attach with `aphid alate attach --name work`
+```
+
+```console
+$ aphid alate list
+work                 awake
+notes                asleep
+```
+
+Each instance is configured by `~/.aphid/alate/<name>/alate.json`.
+[docs/alate.md](alate.md) gives the home directory, each field of that file, the
+memory, the heartbeat and the protocol of the socket.
+
+`aphid alate` needs a Unix socket, so it does not work on Windows.
 
 ## `raw` and `agent`
 
@@ -369,6 +412,7 @@ models that it supplies. A mistake in this file cannot prevent a start.
 | `<workspace>/.aphid/plugins/` | The plugins of this workspace. |
 | `~/.aphid/plugins/` | Your plugins, for each workspace. |
 | `~/.aphid/trust.json` | The workspaces whose plugins you agreed to. |
+| `~/.aphid/alate/<name>/` | One resident agent. See [docs/alate.md](alate.md). |
 
 aphid reads each `AGENTS.md` file from the workspace root down to the current
 directory. The most specific file is last, and it has the final word.

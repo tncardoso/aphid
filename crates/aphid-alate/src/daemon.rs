@@ -1,0 +1,593 @@
+//! The loop that keeps an alate awake.
+//!
+//! It is [`aphid_code::tui::app::drive`] with the terminal taken out, a clock
+//! put in, and one conversation grown into several. Every session runs on its
+//! own task and hands its agent back when the run ends; the loop meanwhile
+//! serves terminals, ticks the plugins and watches the time.
+//!
+//! Four things put words to an alate, and each says which conversation it means:
+//!
+//! - a terminal, into the session it is watching;
+//! - a rhai plugin calling `prompt`, into the resident session;
+//! - the heartbeat, into the resident session;
+//! - a cron job, into a session opened for it, which is why a job never lands
+//!   in the middle of what somebody was saying.
+
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use aphid_agent::StreamFn;
+use aphid_code::model::Catalog;
+use aphid_code::plugins::scripts;
+use aphid_code::session::sessions_dir;
+use aphid_code::tools::Workspace;
+use aphid_plugin::{PluginHost, ScriptBackend, SessionInfo};
+use chrono::Local;
+use tokio::sync::mpsc::UnboundedReceiver;
+
+use crate::config::Config;
+use crate::cron::{self, Crontab};
+use crate::gateway::wire::{Envelope, Frame, Request};
+use crate::gateway::{Event, GatewaySink, Server};
+use crate::heartbeat::Schedule;
+use crate::home::Home;
+use crate::memory::Memory;
+use crate::sessions::{Blueprint, Kind, Sessions, stored};
+
+/// How often the rhai plugins get their `on_tick`. The terminal UI's cadence,
+/// for the same reason: often enough to feel live, rare enough to cost nothing.
+const TICK: Duration = Duration::from_millis(250);
+
+/// How often the clock is read. A heartbeat and a crontab are measured in
+/// minutes, so this is finer than either needs.
+const CLOCK: Duration = Duration::from_secs(5);
+
+/// What to start an alate with.
+pub struct Options {
+    pub home: Home,
+    pub config: Config,
+    /// Replace the provider backend. `None` talks to the real provider; tests
+    /// pass a scripted one, exactly as [`HarnessOptions::stream_fn`] does.
+    ///
+    /// [`HarnessOptions::stream_fn`]: aphid_code::harness::HarnessOptions::stream_fn
+    pub stream_fn: Option<StreamFn>,
+}
+
+/// Everything the loop holds between passes.
+struct Alate {
+    home: Home,
+    server: Server,
+    host: Arc<PluginHost>,
+    blueprint: Blueprint,
+    sessions: Sessions,
+    schedule: Schedule,
+    crontab: cron::Shared,
+    workspace: Workspace,
+    model: String,
+    context_window: u32,
+    thinking: Option<String>,
+}
+
+/// Run one instance until it is asked to stop.
+///
+/// # Errors
+///
+/// Fails when the model cannot be resolved, the API key is missing, the socket
+/// cannot be bound — which usually means this instance is already running — or
+/// the resident session cannot be opened.
+pub async fn run(options: Options) -> Result<(), String> {
+    let Options {
+        home,
+        config,
+        stream_fn,
+    } = options;
+
+    let catalog = Catalog::new();
+    let model = match &config.model {
+        Some(name) => catalog.resolve(name).map_err(|error| error.to_string())?,
+        None => catalog.default_model(),
+    };
+
+    // A scripted backend reaches no provider, so it needs no key. Demanding one
+    // would mean a test had to put a fake in the environment of the whole
+    // process, which is both a lie and a race between tests.
+    let api_key = match stream_fn {
+        Some(_) => None,
+        None => Some(api_key(&model)?),
+    };
+
+    // The workspace is the home unless the configuration points elsewhere, so a
+    // fresh alate can only write inside the directory it was given.
+    let workspace = Workspace::new(
+        config
+            .workspace
+            .clone()
+            .unwrap_or_else(|| home.root().to_path_buf()),
+    );
+
+    let memory = Arc::new(Mutex::new(
+        Memory::open(&home.memory_dir()).map_err(|error| error.to_string())?,
+    ));
+    let (crontab, crontab_problems) = Crontab::open(&home.cron_file());
+    let crontab = Arc::new(Mutex::new(crontab));
+    let schedule = Schedule::open(
+        &home.state_file(),
+        &config.heartbeat,
+        std::fs::read_to_string(home.heartbeat_file()).ok(),
+    );
+
+    let socket = config
+        .gateway
+        .socket
+        .clone()
+        .unwrap_or_else(|| home.socket());
+    let (server, events) =
+        Server::bind(&socket, Some(&home.log_file())).map_err(|error| match error.kind() {
+            // The one failure with an obvious cause and an obvious fix, so it
+            // gets its own sentence rather than being guessed at for every
+            // other kind of failure too.
+            std::io::ErrorKind::AddrInUse => format!(
+                "{} is already in use — this alate is probably already running",
+                socket.display()
+            ),
+            _ => format!("could not listen on {}: {error}", socket.display()),
+        })?;
+
+    // Once for the whole daemon, not once per session: loading the scripts
+    // twice would double every hook, and the host's own session is the
+    // daemon's lifetime.
+    let processes = Arc::new(aphid_agent::exec::Registry::new());
+    let (files, discovery) = scripts::discover(&workspace, None);
+    let (host, mut problems) = scripts::load(
+        &workspace,
+        &files,
+        Arc::new(GatewaySink::new(server.publisher())),
+        &processes,
+    );
+    problems.extend(discovery);
+
+    let mut stream_fn = stream_fn;
+    if let Some(backend) = ScriptBackend::install(&host)
+        && stream_fn.is_none()
+    {
+        stream_fn = Some(backend);
+    }
+    host.session_start(&SessionInfo {
+        id: None,
+        path: None,
+        reason: "new",
+        restored: 0,
+    });
+
+    let blueprint = Blueprint {
+        home: home.clone(),
+        config: config.clone(),
+        model: model.clone(),
+        api_key,
+        workspace: workspace.clone(),
+        publisher: server.publisher(),
+        memory,
+        crontab: crontab.clone(),
+        host: (!host.is_empty()).then(|| host.clone()),
+        stream_fn,
+        processes,
+        permissions: Blueprint::permissions(&config, server.confirmer()),
+    };
+
+    let mut alate = Alate {
+        model: model.id.to_string(),
+        context_window: model.context_window,
+        thinking: config
+            .thinking
+            .map(|level| format!("{level:?}").to_lowercase()),
+        home,
+        server,
+        host: host.clone(),
+        blueprint,
+        sessions: Sessions::new(),
+        schedule,
+        crontab,
+        workspace,
+    };
+
+    // The resident session, which the heartbeat wakes into and which outlives
+    // every terminal.
+    let resident = alate.blueprint.open(Kind::Resident)?;
+    let resident_id = resident.id.clone();
+    alate.sessions.insert(resident);
+    alate.opened(&resident_id);
+
+    for problem in problems
+        .iter()
+        .map(ToString::to_string)
+        .chain(crontab_problems)
+    {
+        alate
+            .server
+            .send(Envelope::daemon(Frame::Notice { text: problem }));
+    }
+
+    // Said here and not by the caller, because here is where it becomes true:
+    // the socket is bound and the resident session exists.
+    let name = alate.home.name();
+    eprintln!(
+        "aphid: {name} is awake in {}\naphid: attach with `aphid alate attach --name {name}`",
+        alate.home.root().display()
+    );
+
+    drive(&mut alate, events).await;
+
+    alate.sessions.shutdown();
+    alate.host.session_end(&SessionInfo {
+        id: None,
+        path: None,
+        reason: "end",
+        restored: 0,
+    });
+    Ok(())
+}
+
+impl Alate {
+    /// Tell everybody a session started.
+    fn opened(&self, id: &str) {
+        if let Some(session) = self.sessions.get(id) {
+            self.server.send(Envelope::daemon(Frame::SessionOpened {
+                info: session.info(),
+            }));
+        }
+    }
+
+    /// Put words into a session, and show everybody watching it what was said.
+    fn enqueue(&mut self, id: &str, text: String) {
+        let Some(session) = self.sessions.get_mut(id) else {
+            return;
+        };
+        session.enqueue(text.clone());
+        self.server.send(Envelope::from(id, Frame::Prompt { text }));
+    }
+
+    /// The session a plugin's `prompt` and the heartbeat go to.
+    fn resident(&self) -> Option<String> {
+        self.sessions.resident().map(ToOwned::to_owned)
+    }
+
+    /// Open a session, announce it, and give back its id.
+    fn open(&mut self, kind: Kind) -> Option<String> {
+        match self.blueprint.open(kind) {
+            Ok(session) => {
+                let id = session.id.clone();
+                self.sessions.insert(session);
+                self.opened(&id);
+                Some(id)
+            }
+            Err(error) => {
+                self.server
+                    .send(Envelope::daemon(Frame::Notice { text: error }));
+                None
+            }
+        }
+    }
+
+    fn close(&mut self, id: &str) {
+        if self.sessions.close(id).is_some() {
+            self.server
+                .send(Envelope::daemon(Frame::SessionClosed { id: id.to_owned() }));
+        }
+    }
+
+    /// Replay a session to one terminal, live or stored, and point it there.
+    ///
+    /// The same path for both: a running session's transcript is the same shape
+    /// as a finished one's, so there is one way to draw a conversation and no
+    /// second one to keep in step.
+    fn watch(&self, connection: u64, id: &str) {
+        let path = match self
+            .sessions
+            .get(id)
+            .and_then(crate::sessions::Session::path)
+        {
+            Some(path) => Some(path),
+            None => aphid_code::session::resolve(&sessions_dir(&self.workspace), id)
+                .map(|summary| summary.path),
+        };
+        let Some(path) = path else {
+            self.server.reply(
+                connection,
+                Envelope::daemon(Frame::Notice {
+                    text: format!("there is no session {id}"),
+                }),
+            );
+            return;
+        };
+
+        self.server.watch(connection, id);
+        self.server.reply(
+            connection,
+            Envelope::from(id, Frame::HistoryStart { id: id.to_owned() }),
+        );
+
+        match aphid_code::session::load(&path) {
+            Ok((_header, transcript)) => {
+                for frame in replay(&transcript) {
+                    self.server.reply(connection, Envelope::from(id, frame));
+                }
+            }
+            Err(error) => self.server.reply(
+                connection,
+                Envelope::from(
+                    id,
+                    Frame::Notice {
+                        text: format!("could not read {}: {error}", path.display()),
+                    },
+                ),
+            ),
+        }
+
+        self.server.reply(
+            connection,
+            Envelope::from(id, Frame::HistoryEnd { id: id.to_owned() }),
+        );
+    }
+}
+
+/// The loop.
+async fn drive(alate: &mut Alate, mut events: UnboundedReceiver<Event>) {
+    // Armed only when a plugin is waiting on it, so an instance with no scripts
+    // pays for no timer. An `interval` and not a fresh `sleep`: a sleep built
+    // inside `select!` restarts whenever another branch wins.
+    let ticked = alate
+        .host
+        .any_defines("on_tick")
+        .then(|| alate.host.clone());
+    let mut ticker = tokio::time::interval(TICK);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut clock = tokio::time::interval(CLOCK);
+    clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            (id, outcome) = alate.sessions.finished() => {
+                if outcome.is_none() {
+                    alate.server.send(Envelope::daemon(Frame::Notice {
+                        text: format!("the run in session {id} panicked; the session is closed"),
+                    }));
+                    alate.server.send(Envelope::daemon(Frame::SessionClosed { id: id.clone() }));
+                    continue;
+                }
+                // A job's session exists for its run, and the run is over. Its
+                // transcript stays on disk, where `/session` can still open it.
+                if matches!(alate.sessions.get(&id).map(|s| &s.kind), Some(Kind::Cron { .. })) {
+                    alate.close(&id);
+                }
+            }
+            event = events.recv() => match event {
+                // The listener is gone, which is the daemon shutting down.
+                None => break,
+                Some(event) => handle(alate, event),
+            },
+            // Dispatched off the loop: a hook that reaches for `exec` blocks the
+            // plugin worker, and the loop that serves terminals must not wait on
+            // that. A plugin's `prompt` arrives through the sink, so nothing is
+            // lost by not awaiting the tick.
+            _ = ticker.tick(), if ticked.is_some() => {
+                let host = ticked.clone().expect("only polled while some");
+                tokio::task::spawn_blocking(move || host.tick());
+            }
+            _ = clock.tick() => wake(alate),
+            () = shutdown() => break,
+        }
+
+        // Every session that can run, runs. This is what makes a job concurrent
+        // with a conversation: a long turn in one session holds up nothing in
+        // another.
+        //
+        // Nothing is announced here. `GatewayPlugin::on_turn_start` reports the
+        // turn from inside the run, and a frame sent here as well would be the
+        // same news twice — on the wire and in `alate.log`.
+        alate.sessions.start_ready();
+    }
+}
+
+/// What a terminal asked for.
+fn handle(alate: &mut Alate, event: Event) {
+    match event {
+        Event::Opened { connection } => {
+            // A terminal gets a conversation of its own, so two people attached
+            // are not typing into one transcript.
+            let Some(id) = alate.open(Kind::Attached { connection }) else {
+                return;
+            };
+            alate.server.watch(connection, &id);
+            // In an envelope naming the session, which is how the terminal
+            // learns which conversation is its own.
+            alate.server.reply(
+                connection,
+                Envelope::from(
+                    &id,
+                    Frame::Hello {
+                        instance: alate.home.name().to_owned(),
+                        model: alate.model.clone(),
+                        context_window: alate.context_window,
+                        thinking: alate.thinking.clone(),
+                    },
+                ),
+            );
+        }
+        Event::Closed { connection } => {
+            for id in alate.sessions.owned_by(connection) {
+                alate.close(&id);
+            }
+        }
+        Event::Asked {
+            connection,
+            session,
+            request,
+        } => match request {
+            Request::Prompt { text } => {
+                if let Some(id) = session {
+                    alate.enqueue(&id, text);
+                }
+            }
+            Request::Cancel => {
+                if let Some(session) = session.and_then(|id| alate.sessions.get(&id)) {
+                    session.cancel();
+                }
+            }
+            Request::Watch { id } => alate.watch(connection, &id),
+            Request::Sessions => {
+                let live = alate.sessions.list();
+                let stored = stored(&alate.workspace, &alate.sessions);
+                alate.server.reply(
+                    connection,
+                    Envelope::daemon(Frame::Sessions { live, stored }),
+                );
+            }
+            Request::New => {
+                if let Some(id) = alate.open(Kind::Attached { connection }) {
+                    alate.watch(connection, &id);
+                }
+            }
+            // Both answered inside the server: an answer belongs to the tool
+            // waiting on it, and an attach has already been turned into
+            // `Event::Opened`.
+            Request::Answer { .. } | Request::Attach => {}
+        },
+    }
+}
+
+/// The clock: the heartbeat, and anything the crontab has come due.
+fn wake(alate: &mut Alate) {
+    let now = Local::now();
+
+    // Into the resident session, and only while it is idle. A heartbeat that
+    // queued behind a running turn would arrive with its moment already past.
+    if let Some(id) = alate.resident()
+        && alate
+            .sessions
+            .get(&id)
+            .is_some_and(|session| session.ready() || !session.info().running)
+        && let Some(note) = alate.schedule.due(now.with_timezone(&chrono::Utc))
+    {
+        alate.server.send(Envelope::daemon(Frame::Heartbeat {
+            at: now.format("%Y-%m-%d %H:%M %Z").to_string(),
+            note: note.clone(),
+        }));
+        alate.enqueue(&id, note);
+    }
+
+    let due = cron::lock(&alate.crontab).due(now);
+    for entry in due {
+        // Its own session, always: a job starts from nothing and leaves nothing
+        // behind in a conversation somebody else is having.
+        let Some(id) = alate.open(Kind::Cron {
+            name: entry.name.clone(),
+        }) else {
+            continue;
+        };
+        // Nothing is announced here: `open` already sent `SessionOpened`, and
+        // its kind names the job.
+        alate.enqueue(&id, entry.prompt.clone());
+    }
+}
+
+/// A stored conversation, as the frames that would have drawn it.
+///
+/// System messages are left out: the prompt, the recalled facts and the map of
+/// the memory are how the agent was set up, not what was said.
+fn replay(transcript: &aphid_core::Transcript) -> Vec<Frame> {
+    use aphid_core::{ContentRef, Role};
+
+    let mut frames = Vec::new();
+    for message in transcript.iter() {
+        match message.role() {
+            Role::System => {}
+            Role::User => {
+                let text: String = message
+                    .content()
+                    .filter_map(|content| match content {
+                        ContentRef::Text(text) => Some(text.text().to_owned()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !text.is_empty() {
+                    frames.push(Frame::Prompt { text });
+                }
+            }
+            Role::Assistant => {
+                for content in message.content() {
+                    match content {
+                        ContentRef::Text(text) if !text.text().is_empty() => {
+                            frames.push(Frame::Text {
+                                text: text.text().to_owned(),
+                            });
+                        }
+                        ContentRef::Thinking(thinking) if !thinking.text().is_empty() => {
+                            frames.push(Frame::Thinking {
+                                text: thinking.text().to_owned(),
+                            });
+                        }
+                        ContentRef::ToolCall(call) => frames.push(Frame::ToolCall {
+                            id: call.id().to_owned(),
+                            name: call.name().to_owned(),
+                            arguments: call.arguments_raw().to_owned(),
+                        }),
+                        _ => {}
+                    }
+                }
+            }
+            Role::ToolResult => {
+                let text: String = message
+                    .content()
+                    .filter_map(|content| match content {
+                        ContentRef::Text(text) => Some(text.text().to_owned()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let meta = message.tool_result();
+                frames.push(Frame::ToolResult {
+                    id: meta
+                        .map(|meta| meta.tool_call_id.to_string())
+                        .unwrap_or_default(),
+                    name: meta
+                        .map(|meta| meta.tool_name.to_string())
+                        .unwrap_or_default(),
+                    text,
+                    is_error: meta.is_some_and(|meta| meta.is_error),
+                    details: None,
+                });
+            }
+        }
+    }
+    frames
+}
+
+/// Resolves when the process is asked to stop.
+///
+/// Both signals, because an alate is as likely to be stopped by a service
+/// manager as by somebody at a keyboard.
+async fn shutdown() {
+    let mut term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(term) => term,
+        // With no way to listen, waiting for ever is right: the loop's other
+        // branches still work, and the process can still be killed.
+        Err(_) => return std::future::pending().await,
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+    }
+}
+
+/// The API key for a model, from the variable it names.
+fn api_key(model: &aphid_core::Model) -> Result<String, String> {
+    let variable = model
+        .api_key_env
+        .as_deref()
+        .unwrap_or(aphid_core::providers::deepseek::API_KEY_ENV);
+    match std::env::var(variable) {
+        Ok(key) if !key.is_empty() => Ok(key),
+        _ => Err(format!("{variable} is not set, and {} needs it", model.id)),
+    }
+}
