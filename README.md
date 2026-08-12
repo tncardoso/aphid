@@ -9,33 +9,33 @@ plugin hook you can observe, block, or rewrite.
 
 ## Highlights
 
-- **Zero memory copy where it matters.** A talk-turn is staged in a
-  [`MessageBuffer`]'s arenas and committed into the [`Transcript`] with one
-  memcpy per arena, however many tokens streamed. Layout guarantees are enforced
-  at compile time.
+- **Zero memory copy where it matters.** A talk-turn is staged in a message
+  buffer's arenas and committed into the transcript with one memcpy per arena,
+  however many tokens streamed. Layout guarantees are enforced at compile time.
 - **Data-oriented design.** Spans, not owned strings. The whole session is a
-  handful of allocations freed together when the transcript drops, and a
-  `Transcript` is a single owned, `Send` value.
+  handful of allocations freed together when the transcript drops.
 - **Fast startup.** The CLI is thin; discovery resolves the workspace, its
   `AGENTS.md` instructions, and its skills up front so the agent starts without
   surprises.
 - **Fully debuggable.** `aphid raw` prints every protocol event as it fires, and
-  `aphid agent --request` dumps the encoded request body.
+  `aphid raw --request` dumps the encoded request body.
 - **Extensible via plugins.** Everything interesting is interceptable through a
-  synchronous hook API — see [Plugins](#plugins).
+  synchronous hook API, in Rhai or in Rust.
 
-## What it looks like
+## Install
 
-```
-$ aphid
+```sh
+cargo install --path crates/aphid-cli
+export DEEPSEEK_API_KEY=sk-...
 ```
 
-opens the terminal UI. A prompt runs one time and prints the result:
+```sh
+$ aphid                              # the terminal UI
+$ aphid -p "what does this crate do?"  # one prompt, printed
+```
 
-```
-$ aphid -p "what does this crate do?"
-$ aphid "what does this crate do?"
-```
+[docs/getting-started.md](docs/getting-started.md) covers the rest: adding a
+model from another provider, project instructions, and a first resident agent.
 
 ## The five front ends
 
@@ -48,270 +48,45 @@ aphid agent [OPTIONS] <prompt>  run the plain agent loop with a demo tool
 aphid model <command>           manage the models in ~/.aphid/models.json
 ```
 
-[docs/cli.md](docs/cli.md) gives each option and each file.
+## Documentation
 
-### Coding agent (`aphid`)
+The book is in [`docs/`](docs/), and `mdbook serve` renders it.
 
-The default. Interactive TUI or one-shot `-p`, sessions that survive a restart,
-a permissions gate, and a prompt assembled from the project's own conventions.
-
-```
-OPTIONS:
-    -p, --print <prompt>  run headless: stream to stdout and exit
-    --model <name>        model id, or a unique part of one
-    --models              list the known models and exit
-    --think <level>       off | minimal | low | medium | high | xhigh | max
-    --system <text>       replace the built-in instructions
-    --append-system <t>   add to the instructions
-    --resume [id]         continue the newest session here, or one named by id
-    --sessions            list saved sessions for this workspace and exit
-    --confirm             ask before running anything that changes the workspace
-    --no-context          skip AGENTS.md and skills
-    --max-turns <n>       stop a run after this many provider requests
-    --quiet               headless: drop the line-by-line output of running tools
-    -h, --help            show this help
-```
-
-### Resident agent (`aphid alate`)
-
-An alate is the winged aphid — the form that leaves the plant and lives on its
-own. Where the coding agent starts in a repository and forgets everything when
-the terminal closes, an alate keeps a home directory it owns, a memory that
-outlasts any session, a clock that wakes it, and a socket you attach to and
-detach from while it carries on.
-
-```
-aphid alate run    [--name NAME]   run the alate in this terminal
-aphid alate attach [--name NAME]   open a terminal on a running alate
-aphid alate list                   show the alates on this machine
-```
-
-```console
-$ aphid alate run --name work        # one terminal
-$ aphid alate attach --name work     # another, whenever you want it
-```
-
-An alate holds several conversations at once. The resident one is where the
-heartbeat wakes, and it keeps its context all day. Attaching gives you one of
-your own that ends when you detach. A scheduled job gets a third, so it never
-lands in the middle of what you were saying — `/sessions` lists them all, and
-`/session <id>` opens any of them, including ones that finished last week.
-
-The memory is markdown in the home — one file for each path, one line for each
-fact — so `grep` reads it and the agent edits it with the same tools it edits
-anything else. It is shared across sessions, so a job can write a fact you
-recall an hour later. Two tools reach it, `remember` and `recall`, and the facts
-a prompt needs arrive on their own, as a system note beside it and never folded
-into it.
-
-The heartbeat is a pulse on the interval in `alate.json`. For anything that has
-to happen at a *time*, the `cron` tool writes a crontab — five-field
-expressions in local time, kept in `cron.json` — and each job runs in a fresh
-session with the prompt it was given.
-
-The gateway is a Unix socket: one JSON object per line, in both directions, each
-naming the conversation it belongs to. Every line is also appended to
-`alate.log`, so the hours when nobody was attached are still readable
-afterwards.
-
-The terminal is not the only client. Built with `--features telegram`, an alate
-also takes a Telegram bot: each chat attaches to that same socket and gets a
-conversation of its own, tool calls show as one line each, and a permission
-question arrives with buttons. It is an allow list of chat ids and a token read
-from the environment — nothing about the daemon changes to gain it, which is the
-point of the gateway being the only door.
-
-[docs/alate.md](docs/alate.md) gives the home layout, every configuration field,
-and the protocol.
-
-### Models (`aphid model`)
-
-The catalog is the models aphid supplies, and then your own
-`~/.aphid/models.json`. A model in the file with the same id as a built-in
-replaces it, so aphid works with no configuration at all.
-
-```
-aphid model add <provider/model>   add a model, described by models.dev
-aphid model remove <name>          remove one of your models
-aphid model list [--all]           list your models, or the whole catalog
-aphid model search <query>         find a model on models.dev
-aphid model update                 refresh the cached models.dev document
-```
-
-`add` reads [models.dev](https://models.dev) rather than making you write out a
-context window and a price by hand, and records which environment variable holds
-that provider's key — so a model you add authenticates against its own provider,
-not against DeepSeek. The document is cached at `~/.aphid/models.dev.json` and
-reused for a day, so only the first command in a while pays for the download.
-
-```
-$ aphid model add zhipuai/glm-5
-added glm-5 in /home/you/.aphid/models.json
-  provider  zhipuai
-  endpoint  https://open.bigmodel.cn/api/paas/v4
-  limits    204800 context · 131072 output
-  price     $1.00 in · $3.20 out per M tokens
-  key       $ZHIPU_API_KEY
-
-$ aphid --model glm-5 -p "what does this crate do?"
-```
-
-The file is meant to be edited. Everything models.dev cannot know — which
-request fields an endpoint actually rejects — is a named compatibility profile
-plus the flags that differ from it, so a correction is usually one line.
-
-### Protocol debugging (`aphid raw` and `aphid agent`)
-
-Tiny tools that exercise the whole path — encode a request, stream it, resolve
-each delta span, commit the turn — and print the events rather than the text.
-
-```
-OPTIONS:
-    --pro                 use deepseek-v4-pro (default: deepseek-v4-flash)
-    --system <text>       prepend a system message
-    --think <level>       minimal | low | medium | high | xhigh | max
-    --max-tokens <n>      cap the response length
-    --temperature <f>     sampling temperature
-    --tool                offer a demo `get_weather` tool, to see tool-call deltas
-    --events              print every Delta event with its span, instead of the text
-    --request             print the encoded request body and exit (single-shot only)
-    -h, --help            show this help
-```
-
-## Environment
-
-- `DEEPSEEK_API_KEY` — required by the models aphid ships, and by `raw` and
-  `agent`. The `--request` flag can inspect an encoded request without one.
-- Models added from models.dev name their own key variable, and the coding agent
-  reads the one belonging to the model you selected.
-- `APHID_HOME` — replaces `~/.aphid`, for a sandboxed configuration.
+| Chapter | What is in it |
+| --- | --- |
+| [Introduction](docs/introduction.md) | What aphid is, and how the crates fit together. |
+| [Getting started](docs/getting-started.md) | Build, key, first run, first alate. |
+| [Core](docs/core.md) | The transcript, the wire protocol, thinking levels, the model catalog. |
+| [Aphid](docs/aphid.md) | The coding harness, and every command-line option. |
+| [Commands](docs/aphid/commands.md) · [Skills](docs/aphid/skills.md) · [Plugins](docs/aphid/plugins.md) | The three things you extend. |
+| [Alate](docs/alate.md) | The resident agent: home, memory, heartbeat, cron. |
+| [Gateway](docs/alate/gateway.md) | The socket, and the clients that speak it. |
 
 ## Design
 
 The workspace splits into six crates, a narrow step at each one:
 
-- **[`aphid-core`]** — message, model and streaming types. The `Transcript`
-  arena layout, spans, thinking levels, the OpenAI-completions encoder, and the
-  SSE transport.
-- **[`aphid-agent`]** — the agent loop. `Agent::prompt` runs *request → stream →
+- **`aphid-core`** — message, model and streaming types. The transcript arena
+  layout, spans, thinking levels, the OpenAI-completions encoder, and the SSE
+  transport.
+- **`aphid-agent`** — the agent loop. `Agent::prompt` runs *request → stream →
   commit → execute tools* until the model stops asking for tools, plus the tool
   registry and the plugin API. Deliberately unopinionated.
-- **[`aphid-plugin`]** — the Rhai host. Plugin discovery, the script engine and
+- **`aphid-plugin`** — the Rhai host. Plugin discovery, the script engine and
   its capabilities, and the trust gate. Keeps the scripting runtime out of the
   loop crate entirely.
-- **[`aphid-code`]** — the specialization. The tools a coding agent needs,
+- **`aphid-code`** — the specialization. The tools a coding agent needs,
   system-prompt assembly from the project's conventions, skill discovery,
   on-disk sessions, permission plugins, and the TUI.
-- **[`aphid-alate`]** — the resident agent. A home directory, a memory of facts,
+- **`aphid-alate`** — the resident agent. A home directory, a memory of facts,
   a heartbeat, and the socket clients attach to. Builds its agent with
   `aphid-code`'s harness unchanged.
-- **[`aphid-cli`]** — the thin `aphid` binary, wiring the five front ends
+- **`aphid-cli`** — the thin `aphid` binary, wiring the five front ends
   together.
 
-### The memory model
-
-A conversation lives in a `Transcript`: a flat list of messages over two
-append-only arenas, one for text and one for binary payloads. Content blocks
-hold byte ranges rather than owned strings. Streaming appends each delta to the
-arena tail exactly once, and an [`Event`] carries only the [`Span`] of the bytes
-just written; `Transcript::commit` then moves the finished turn across in one
-memcpy per arena.
-
-The system prompt is not special — it is a message with `Role::System`, mapped
-to the wire format by a provider encoder.
-
-## Plugins
-
-Plugins contribute tools, add context before a request, watch every protocol
-event, block or rewrite a tool call, patch a tool result, and stop the run. Hooks
-are **synchronous** — the only per-token hook is `Plugin::on_event`, and boxing a
-future for each token would undo the point of the arena layout. Anything that
-must await belongs in a `ToolHandler`. Plugins declare an `Interest` set, so a
-hook nobody wants costs an empty-slice check.
-
-Example — a plugin that vetoes one city:
-
-```rust
-use aphid_agent::{Guard, Plugin, PendingCall};
-
-struct NoCityName;
-
-impl Plugin for NoCityName {
-    fn name(&self) -> &str { "no-lisbon" }
-    fn on_tool_call(&self, call: &mut PendingCall<'_>) -> Guard {
-        if call.arguments().contains("CityName") {
-            return Guard::block("CityName is off limits.");
-        }
-        Guard::Allow
-    }
-}
-```
-
-### Rhai plugins
-
-You can also write a plugin as one file of [Rhai](https://rhai.rs), with no need
-to compile aphid again. Put the file in the workspace or in your home directory:
-
-```text
-.aphid/plugins/<name>.rhai
-.aphid/plugins/<name>/main.rhai
-```
-
-A plugin declares a hook when it declares a function with the correct name.
-Aphid reads the names from the compiled script, and subscribes to only those
-hooks.
-
-```rhai
-//! Keeps the model away from the changelog.
-
-fn on_tool_call(tool) {
-    if tool.name == "write" && tool.arguments.contains("CHANGELOG") {
-        return block("the changelog is written by hand");
-    }
-}
-
-fn on_turn_end(cx, turn) {
-    if turn.stop_reason == "length" { cx.note("the last answer was cut short"); }
-}
-```
-
-A plugin can also add a tool with `register_tool` and a command with
-`register_command`, keep settings in `<name>.json`, and remember things with
-`save_state`.
-
-A plugin in your home directory is yours and always loads. A plugin that comes
-with a checkout is different: aphid asks you the first time, and keeps the answer
-in `~/.aphid/trust.json`.
-
-This repository has one such plugin: `.aphid/plugins/webchat.rhai`. Type
+This repository ships one plugin of its own: `.aphid/plugins/webchat.rhai`. Type
 `/server start` and it puts a chat page on port 8000, so you can talk to the
 running session from a browser, on this machine or on your phone.
-
-Read [docs/plugins.md](docs/plugins.md) for the hooks, the return values, the
-capabilities and the limits. WebAssembly plugins are still to come.
-
-## Skills
-
-Skills are instruction files the model opens on demand. Only each skill's name,
-description and path go into the system prompt; the model reads the body with the
-`read` tool when a task matches (progressive disclosure). Layout, searched in the
-workspace and then under `~/.aphid`:
-
-```text
-.aphid/skills/<name>/SKILL.md
-.aphid/skills/<name>.md
-```
-
-Type `/skills` in a session to see the skills that loaded, and the skill files
-that aphid could not read.
-
-## Sessions
-
-A session is one JSONL file per conversation, appended to as messages are
-committed. Nothing is ever rewritten, so a crash costs at most the turn that was
-in flight, and `--resume` is a replay of the file. Headless runs are recorded
-too, so `--sessions` and `--resume` see them the same way they see interactive
-ones.
 
 ## Building and testing
 

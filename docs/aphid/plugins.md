@@ -1,26 +1,11 @@
 # Plugins
 
-This document tells you how to write a plugin for aphid. It is written in
-Simplified Technical English.
-
 A plugin is one file of [Rhai](https://rhai.rs) code. It can look at a run, stop
 a tool, change a prompt, add a tool, and add a command. You do not compile
 aphid again to add one.
 
-## Contents
-
-- [Where plugins go](#where-plugins-go)
-- [Trust](#trust)
-- [Hooks](#hooks)
-- [How a hook changes a run](#how-a-hook-changes-a-run)
-- [The run context](#the-run-context)
-- [Capabilities](#capabilities)
-- [Settings and memory](#settings-and-memory)
-- [Tools](#tools)
-- [Commands](#commands)
-- [When a plugin fails](#when-a-plugin-fails)
-- [Limits](#limits)
-- [Command-line options](#command-line-options)
+A plugin can also be written in Rust, and compiled in. Refer to
+[Plugins in Rust](#plugins-in-rust).
 
 ## Where plugins go
 
@@ -86,7 +71,6 @@ These hooks come from the agent loop:
 | `on_tool_result(result)` | A tool completed |
 | `on_turn_end(cx, turn)` | A turn is complete |
 | `on_run_end(cx, outcome)` | The run stopped |
-| `on_request(body)` | Before aphid sends the request body |
 
 These hooks come from the coding agent:
 
@@ -99,6 +83,22 @@ These hooks come from the coding agent:
 | `on_file_change(change)` | `write` or `edit` changed a file |
 | `on_notify(text)` | Aphid showed a message to the user |
 | `on_tick()` | Every 250 milliseconds, in the terminal UI |
+
+One more hook is not a hook of the loop:
+
+| Function | When it runs |
+| --- | --- |
+| `on_request(body)` | Before aphid sends the encoded request body |
+
+The loop hands the transcript to a backend, and never sees a request body: the
+body is made inside the transport. Thus `on_request` **replaces** the transport
+rather than watching it. Return a map to send that body in place of the one you
+were given, and return nothing to send it unchanged. A script that fails here
+leaves the body as it was.
+
+Because it owns the transport, `on_request` cannot be joined with a backend that
+the program that embeds aphid supplied itself. The coding agent has no such
+backend, so this affects an embedder only.
 
 `on_tick` is the only hook that the agent does not cause. Use it to look at
 something outside the session: a file, a queue, a clock. Keep it short. It runs
@@ -265,29 +265,8 @@ running it at the same time as other tools.
 
 ## Commands
 
-Call `register_command` at the top level. The command shows in `/plugins`.
-
-```rhai
-register_command(#{
-    name: "review",
-    description: "Ask for a review of the changes.",
-    run: |args| {
-        let diff = exec("git diff").stdout;
-        if diff == "" { return notice("nothing to review"); }
-        prompt("Review this diff:\n" + diff);
-        notice("reviewing…")
-    }
-});
-```
-
-`args` is the text after the name of the command.
-
-Return `notice(text)`, a text, or an array of them to show text to the user. To
-send text to the model, call `prompt(text)`. Aphid shows the notices first, and
-then the prompt, whatever the order in the command.
-
-A standard command always wins. If two plugins use one name, aphid keeps both:
-the second becomes `/review:2`.
+A plugin adds a slash command with `register_command`, at the top level of the
+file. Refer to [Commands](commands.md#commands-from-plugins).
 
 ## When a plugin fails
 
@@ -322,6 +301,38 @@ hold 100 000 items. A hook that goes past a limit stops with an error.
 
 In the terminal user interface, `/plugins` shows what loaded, the commands that
 plugins added, and the files that did not load.
+
+## Plugins in Rust
+
+A program that embeds aphid can supply a plugin as a Rust type. The hooks are
+the same hooks, with the same names.
+
+```rust
+use aphid_agent::{Guard, PendingCall, Plugin};
+
+struct NoCityName;
+
+impl Plugin for NoCityName {
+    fn name(&self) -> &str { "no-lisbon" }
+
+    fn on_tool_call(&self, call: &mut PendingCall<'_>) -> Guard {
+        if call.arguments().contains("CityName") {
+            return Guard::block("CityName is off limits.");
+        }
+        Guard::Allow
+    }
+}
+```
+
+The hooks are **synchronous**. The only hook that runs for each token is
+`on_event`, and to box a future for each token would remove the point of the
+memory layout that [Core](../core.md) describes. Anything that must wait belongs
+in a tool, because a tool is the one part of this surface that is asynchronous.
+
+A plugin declares an `Interest` set, and thus a hook that no plugin wants costs
+the check of an empty list.
+
+Use `cargo doc -p aphid-agent --open` for the full trait.
 
 ## Examples
 

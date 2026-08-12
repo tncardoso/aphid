@@ -1,17 +1,74 @@
-# The aphid command line
+# Aphid — the AI harness
 
-This document tells you how to use the `aphid` command. It is written in
-Simplified Technical English.
+The coding agent is what `aphid` runs when you give it no subcommand. It is the
+agent loop of `aphid-agent`, with everything a coding agent needs put around it:
+the tools, a system prompt made from the conventions of the project, the skills,
+the sessions and the permission gate.
 
-## Contents
+This chapter tells you what the harness does, and gives each option of the
+command. The [Commands](aphid/commands.md), [Skills](aphid/skills.md) and
+[Plugins](aphid/plugins.md) chapters describe the three parts that you control.
 
-- [Invocation](#invocation)
-- [The coding agent](#the-coding-agent)
-- [`alate`](#alate)
-- [`raw` and `agent`](#raw-and-agent)
-- [`model`](#model)
-- [Files and environment variables](#files-and-environment-variables)
-- [Exit codes](#exit-codes)
+## The workspace
+
+Aphid finds the workspace when it starts. This is the root of the repository, or
+the directory that you are in when there is no repository.
+
+The `read`, `write` and `edit` tools can touch only this directory. The `bash`
+tool is not limited in this manner, because a shell reads and writes anywhere.
+
+| Tool | Effect |
+| --- | --- |
+| `bash` | Runs a command. Not limited to the workspace. |
+| `read` | Reads a file, or a part of one. |
+| `write` | Writes a full file. |
+| `edit` | Replaces text in a file. |
+
+The output of a tool is cut when it is very long, and the full output is kept in
+a file that the message gives the name of.
+
+## The instructions
+
+Aphid reads each `AGENTS.md` file from the root of the workspace down to the
+current directory. The most specific file is last, and it has the final word. A
+file at `~/.aphid/AGENTS.md` is read before all of them, and thus is applied in
+each workspace.
+
+Put the conventions of the project in these files: how to run the tests, how to
+write a commit message, what not to touch.
+
+For instructions that are only necessary sometimes, write a
+[skill](aphid/skills.md). A skill costs almost nothing until the model opens it.
+
+`--no-context` stops aphid from reading the `AGENTS.md` files and the skills.
+
+## Sessions
+
+Aphid records each session as one file of JSON lines in
+`<workspace>/.aphid/sessions`, and adds to it as each message is committed.
+Nothing is written a second time. Thus a failure costs the turn that was in
+flight and no more, and `--resume` is a replay of the file.
+
+Headless runs are recorded also, and `--sessions` and `--resume` see them in the
+same manner as the sessions of the terminal.
+
+```console
+$ aphid --sessions                       # print the saved sessions
+$ aphid --resume                         # continue the most recent session here
+$ aphid --resume 20260810T012035-0000    # continue the session with this identifier
+```
+
+The identifier is optional. If you give no identifier, aphid continues the most
+recent session for the current directory.
+
+## Permissions
+
+`--confirm` makes aphid ask you before it runs a command that changes the
+workspace. A headless run has no terminal for a question. Thus `--confirm` and
+`-p` together refuse each such command, and do not permit it quietly.
+
+A plugin can answer these questions in place of you, with the `on_permission`
+hook. Refer to [Plugins](aphid/plugins.md).
 
 ## Invocation
 
@@ -39,7 +96,7 @@ $ aphid "fix the failing test"       # the same, with no -p
 `-p` and the bare words do the same thing. Only an empty prompt opens the
 terminal user interface.
 
-## The coding agent
+## The options
 
 | Option | Effect |
 | --- | --- |
@@ -62,7 +119,7 @@ terminal user interface.
 
 ### Select a model
 
-`--model` accepts the full identifier, the last part of it, or a prefix. aphid
+`--model` accepts the full identifier, the last part of it, or a prefix. Aphid
 tries these three forms in that sequence. If two or more models match, aphid
 refuses the name and prints the models that matched.
 
@@ -71,59 +128,23 @@ $ aphid --model deepseek-v4-pro -p "hello"   # the full identifier
 $ aphid --model pro -p "hello"               # the last part
 ```
 
-If you give no `--model`, aphid uses the first model in the catalog.
+If you give no `--model`, aphid uses the first model in the catalogue.
 
-`--models` prints the catalog. The catalog contains the models that aphid
+`--models` prints the catalogue. The catalogue contains the models that aphid
 supplies and the models in `~/.aphid/models.json`. To add a model, refer to
 [`model`](#model).
 
 ### Set the quantity of reasoning
 
 `--think` accepts these levels: `off`, `minimal`, `low`, `medium`, `high`,
-`xhigh` and `max`. `off` is the default.
+`xhigh` and `max`. `medium` is the default.
 
-Each model supplies a different set of levels. aphid decreases the level to the
+Each model supplies a different set of levels. Aphid decreases the level to the
 nearest level that the model supplies, and prints a note. If the model cannot
-reason, aphid ignores the option and prints a note.
+reason, aphid ignores the option and prints a note. Refer to
+[Thinking levels](core.md#thinking-levels).
 
-### Continue a session
-
-aphid records each session, and it records the headless runs also.
-
-```console
-$ aphid --sessions                       # print the saved sessions
-$ aphid --resume                         # continue the most recent session here
-$ aphid --resume 20260810T012035-0000    # continue the session with this identifier
-```
-
-The identifier is optional. If you give no identifier, aphid continues the most
-recent session for the current directory.
-
-### See what is running
-
-In a session, type `/ps`. The list shows each command that runs now, and the
-last four commands that stopped. Each line gives the number of the command, its
-system process identifier, the source (`bash`, or the name of a plugin), the
-time, and, for a command that stopped, the result and the quantity of output.
-
-Press the arrow keys to select a command that runs now, and press `k` to stop
-it. This stops the command and each command that it started. Press `Esc` to
-close the list.
-
-The list opens while the agent runs also, which is when there is most to see.
-
-### Control the tools
-
-`--confirm` makes aphid ask you before it runs a command that changes the
-workspace. A headless run has no terminal for a question. Thus `--confirm` and
-`-p` together refuse each such command.
-
-`--no-context` prevents aphid from reading the `AGENTS.md` files and the skills.
-
-In a session, type `/skills` to see the skills that loaded. Each line gives the
-name of the skill, its description, and whether the skill comes from the
-workspace (`project`) or from your home directory (`global`). A line that starts
-with `!` shows a skill file that aphid could not read, and the reason.
+### Control the plugins
 
 The plugin options control the Rhai plugins in `.aphid/plugins`. A plugin in your
 home directory always loads. A plugin that comes with a workspace needs your
@@ -131,8 +152,9 @@ agreement the first time; aphid asks before the terminal user interface starts,
 and keeps the answer in `~/.aphid/trust.json`. A headless run has no terminal for
 a question, and thus does not load the plugins of the workspace unless you give
 `--trust-plugins`. `--plugin` names a file directly and does not ask.
-Read [plugins.md](plugins.md) to write one.
-Use it to make the start of a run fully predictable.
+
+Use `--no-plugins` to make the start of a run fully predictable. Read
+[Plugins](aphid/plugins.md) to write one.
 
 ## `alate`
 
@@ -153,25 +175,9 @@ aphid alate list                    show the alates on this machine
 `run` holds the terminal until you stop it. `attach` opens a terminal on an
 alate that already runs; close it, and the alate continues.
 
-An alate holds more than one conversation. Attaching gives you one of your own;
-`/sessions` and `/session <id>` move between them, and a scheduled job runs in a
-conversation of its own.
-
-```console
-$ aphid alate run --name work
-aphid: work is awake in /home/you/.aphid/alate/work
-aphid: attach with `aphid alate attach --name work`
-```
-
-```console
-$ aphid alate list
-work                 awake
-notes                asleep
-```
-
-Each instance is configured by `~/.aphid/alate/<name>/alate.json`.
-[docs/alate.md](alate.md) gives the home directory, each field of that file, the
-memory, the heartbeat and the protocol of the socket.
+[Alate](alate.md) gives the home directory, each field of the configuration, the
+memory, the heartbeat and the crontab. [CLI](alate/gateway/cli.md) gives the
+terminal that attaches.
 
 `aphid alate` needs a Unix socket, so it does not work on Windows.
 
@@ -204,9 +210,10 @@ These two subcommands always use a DeepSeek model, and they always read
 ## `model`
 
 `aphid model` manages `~/.aphid/models.json`. The command `aphid models` does
-the same thing.
+the same thing. [Core](core.md#the-catalogue) describes the catalogue and the
+format of the file.
 
-The model descriptions come from [models.dev](https://models.dev). aphid keeps a
+The model descriptions come from [models.dev](https://models.dev). Aphid keeps a
 copy of that document in `~/.aphid/models.dev.json`, and it uses the copy while
 the copy is less than 24 hours old.
 
@@ -242,7 +249,7 @@ aphid: `deepseek-v4-pro` is served by 23 providers:
 Name one of them, or pass --provider <id>.
 ```
 
-Some model identifiers contain a slash. aphid reads the full name as a model
+Some model identifiers contain a slash. Aphid reads the full name as a model
 identifier first, and as `provider/model` second. Thus both of these commands
 find the same model:
 
@@ -257,28 +264,14 @@ $ aphid model add wandb/openai/gpt-oss-120b
 | `--base-url <URL>` | Give the endpoint URL. models.dev does not list one for each provider. |
 | `--api <API>` | Set the wire protocol. |
 | `--api-key-env <VAR>` | Set the environment variable that holds the API key. |
-| `--compat <PROFILE>` | Set the endpoint behaviour. Refer to the table that follows. |
-| `--force` | Replace a model that is already in the catalog. |
+| `--compat <PROFILE>` | Set the endpoint behaviour. Refer to [Core](core.md#the-wire). |
+| `--force` | Replace a model that is already in the catalogue. |
 | `--refresh` | Get the models.dev document again, even if the copy is new. |
 | `--offline` | Use the local copy only. Fail if there is no copy. |
 
-aphid speaks the OpenAI chat-completions protocol only. If the provider speaks a
+Aphid speaks the OpenAI chat-completions protocol only. If the provider speaks a
 different protocol, aphid refuses the model. `--api openai-completions` makes
 aphid add the model regardless.
-
-`--compat` accepts these profiles:
-
-| Profile | Use |
-| --- | --- |
-| `compatible` | A different company's OpenAI-compatible server. The default. |
-| `openai` | OpenAI and Azure. |
-| `deepseek` | DeepSeek. |
-| `none` | No behaviour table. |
-
-models.dev describes models. It does not describe which request fields a server
-refuses. Thus aphid selects the profile from the provider, and you can correct
-it. Refer to
-[Correct a model by hand](#correct-a-model-by-hand).
 
 ### `model remove`
 
@@ -309,7 +302,7 @@ models that aphid supplies also, and gives the source of each model.
 aphid model search [OPTIONS] <QUERY>
 ```
 
-This command finds models on models.dev, but it adds no model. aphid compares
+This command finds models on models.dev, but it adds no model. Aphid compares
 the query with the provider identifier, the model identifier and the model name.
 
 ```console
@@ -352,53 +345,7 @@ This command changes the local copy only. It does not change
 `add` and `search` also get the document if the local copy is more than 24 hours
 old. Use `model update` to get the document immediately.
 
-If aphid cannot get the document, and a local copy exists, aphid uses the local
-copy and tells you that the data is old. An old price is more useful than an
-error.
-
-### Correct a model by hand
-
-`~/.aphid/models.json` is a file that you can edit. Each model looks like this:
-
-```json
-{
-  "version": 1,
-  "models": [
-    {
-      "id": "glm-5",
-      "name": "GLM-5",
-      "provider": "zhipuai",
-      "api": "openai-completions",
-      "base_url": "https://open.bigmodel.cn/api/paas/v4",
-      "api_key_env": "ZHIPU_API_KEY",
-      "reasoning": true,
-      "input": ["text"],
-      "context_window": 204800,
-      "max_tokens": 131072,
-      "cost": { "input": 1.0, "output": 3.2, "cache_read": 0.2, "cache_write": 0.0 },
-      "compat": { "profile": "compatible", "supports_reasoning_effort": false }
-    }
-  ]
-}
-```
-
-A model needs an `id`, a `base_url`, a `context_window` and a `max_tokens`. All
-the other fields have defaults.
-
-`compat` gives the name of a profile, and then each behaviour that is different
-from that profile. In the example above, the endpoint is a usual OpenAI-
-compatible server, but it refuses the `reasoning_effort` field.
-
-`thinking_levels` gives the value to send for each level. A text value is the
-value to send. `false` means that the model refuses the level. If a level is not
-in the file, aphid sends the name of the level.
-
-```json
-"thinking_levels": { "off": "disabled", "minimal": "low", "max": "max", "xhigh": false }
-```
-
-If aphid cannot read the file, it prints the problem and continues with the
-models that it supplies. A mistake in this file cannot prevent a start.
+To correct a model by hand, refer to [The file](core.md#the-file).
 
 ## Files and environment variables
 
@@ -409,18 +356,22 @@ models that it supplies. A mistake in this file cannot prevent a start.
 | `~/.aphid/AGENTS.md` | Instructions for each workspace. |
 | `<workspace>/AGENTS.md` | Instructions for one workspace. |
 | `<workspace>/.aphid/sessions/` | The saved sessions. |
+| `<workspace>/.aphid/skills/` | The skills of this workspace. |
 | `<workspace>/.aphid/plugins/` | The plugins of this workspace. |
+| `~/.aphid/skills/` | Your skills, for each workspace. |
 | `~/.aphid/plugins/` | Your plugins, for each workspace. |
 | `~/.aphid/trust.json` | The workspaces whose plugins you agreed to. |
-| `~/.aphid/alate/<name>/` | One resident agent. See [docs/alate.md](alate.md). |
-
-aphid reads each `AGENTS.md` file from the workspace root down to the current
-directory. The most specific file is last, and it has the final word.
+| `~/.aphid/alate/<name>/` | One resident agent. See [Alate](alate.md). |
 
 | Variable | Effect |
 | --- | --- |
 | `APHID_HOME` | Replaces `~/.aphid`. Use it to keep a separate configuration. |
 | `DEEPSEEK_API_KEY` | The key for the models that aphid supplies. |
+
+`APHID_HOME` moves the model catalogue, the trust file and the alates. It does
+not move `AGENTS.md`, the skills or the plugins of your home directory: those
+follow `HOME`, so that a separate catalogue does not take your instructions away
+with it.
 
 Each model gives the name of the variable that holds its key. The coding agent
 reads the variable of the model that you selected. Thus a model from a different
