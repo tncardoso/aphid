@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use aphid_agent::{Guard, Interest, PendingCall, Plugin};
+use tokio::runtime::RuntimeFlavor;
 
 /// How much damage a command could do.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -77,6 +78,31 @@ impl Permissions {
             remembered: Mutex::new(HashSet::new()),
         }
     }
+
+    /// Put the question, without stranding the runtime while it waits.
+    ///
+    /// [`Confirmer::confirm`] blocks until somebody answers, and it is called
+    /// from inside the agent's task. A worker thread that blocks keeps whatever
+    /// else was queued on it, and what was queued on it is the very work that
+    /// carries the question out — the frames a terminal or a chat has to
+    /// receive before anybody can answer. So the question would wait on its own
+    /// answer until the timeout.
+    ///
+    /// [`block_in_place`] hands that work to another thread before blocking,
+    /// which is the whole of the fix. It is only allowed on a multi-threaded
+    /// runtime, so a current-thread one — a test, a headless run — blocks in
+    /// place as before; there is no other worker for it to strand.
+    ///
+    /// [`block_in_place`]: tokio::task::block_in_place
+    fn ask(&self, tool: &str, summary: &str, risk: Risk) -> Decision {
+        let multi = tokio::runtime::Handle::try_current()
+            .is_ok_and(|handle| handle.runtime_flavor() == RuntimeFlavor::MultiThread);
+        if multi {
+            tokio::task::block_in_place(|| self.confirmer.confirm(tool, summary, risk))
+        } else {
+            self.confirmer.confirm(tool, summary, risk)
+        }
+    }
 }
 
 impl Plugin for Permissions {
@@ -105,7 +131,7 @@ impl Plugin for Permissions {
             return Guard::Allow;
         }
 
-        match self.confirmer.confirm(call.name(), &summary, risk) {
+        match self.ask(call.name(), &summary, risk) {
             Decision::Allow => Guard::Allow,
             Decision::AllowAlways => {
                 if let Ok(mut remembered) = self.remembered.lock() {
