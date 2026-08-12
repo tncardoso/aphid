@@ -13,6 +13,7 @@ path = "src/main.rs"
 [features]
 # Passed through so `cargo run --features telegram` works from the binary.
 telegram = ["aphid-alate/telegram"]
+colony = ["aphid-alate/colony"]
 
 [dependencies]
 aphid-agent = { path = "../aphid-agent" }

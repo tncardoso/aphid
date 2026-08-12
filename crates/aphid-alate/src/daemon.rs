@@ -168,6 +168,12 @@ pub async fn run(options: Options) -> Result<(), String> {
         restored: 0,
     });
 
+    // The tools' half of the colony, made before the blueprint because every
+    // session registers them. The bridge's half is started after the socket is
+    // bound, below.
+    #[cfg(feature = "colony")]
+    let (colony, colony_outbound) = colony_handle(&config);
+
     let blueprint = Blueprint {
         home: home.clone(),
         config: config.clone(),
@@ -181,6 +187,8 @@ pub async fn run(options: Options) -> Result<(), String> {
         stream_fn,
         processes,
         permissions: Blueprint::permissions(&config, server.confirmer()),
+        #[cfg(feature = "colony")]
+        colony: colony.clone(),
     };
 
     let mut alate = Alate {
@@ -231,6 +239,25 @@ pub async fn run(options: Options) -> Result<(), String> {
     // knows about it nor waits on it.
     #[cfg(feature = "telegram")]
     let telegram = telegram_bridge(&config, &socket, &alate.server);
+    #[cfg(feature = "colony")]
+    let colony_bridge = colony_bridge(
+        &config,
+        &socket,
+        &alate.server,
+        alate.home.name(),
+        colony,
+        colony_outbound,
+    );
+    #[cfg(not(feature = "colony"))]
+    if config.gateway.colony.is_some() {
+        tracing::warn!("colony configured but this build has no colony feature");
+        alate.server.send(Envelope::daemon(Frame::Notice {
+            text: "gateway.colony is set, but this build has no colony in it; \
+                   build with `--features colony`"
+                .to_owned(),
+        }));
+    }
+
     #[cfg(not(feature = "telegram"))]
     if config.gateway.telegram.is_some() {
         tracing::warn!("telegram configured but this build has no telegram feature");
@@ -246,6 +273,10 @@ pub async fn run(options: Options) -> Result<(), String> {
     #[cfg(feature = "telegram")]
     if let Some(telegram) = telegram {
         telegram.abort();
+    }
+    #[cfg(feature = "colony")]
+    if let Some(colony) = colony_bridge {
+        colony.abort();
     }
     alate.sessions.shutdown();
     alate.host.session_end(&SessionInfo {
@@ -710,4 +741,100 @@ fn api_key(model: &aphid_core::Model) -> Result<String, String> {
         Ok(key) if !key.is_empty() => Ok(key),
         _ => Err(format!("{variable} is not set, and {} needs it", model.id)),
     }
+}
+
+/// The tools' half of a colony.
+///
+/// Made whether or not a colony is configured, because the alternative is a
+/// `None` threaded through every session for a feature that is off. With no
+/// bridge on the other end the tools answer "the colony bridge has stopped",
+/// which is true and is what a model needs to hear.
+#[cfg(feature = "colony")]
+fn colony_handle(
+    config: &Config,
+) -> (
+    Option<crate::colony::Shared>,
+    tokio::sync::mpsc::UnboundedReceiver<crate::colony::Outbound>,
+) {
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let wanted = config.gateway.colony.as_ref();
+
+    let colony = wanted.and_then(|wanted| match crate::colony::keys(&wanted.key_env) {
+        Ok(keys) => Some(Arc::new(crate::colony::Colony::new(
+            sender,
+            keys.public_key(),
+        ))),
+        Err(why) => {
+            tracing::error!(%why, "colony: no key");
+            None
+        }
+    });
+    (colony, receiver)
+}
+
+/// The bridge's half.
+///
+/// Every failure here is a notice and a `None`, never a stop: a colony with no
+/// relay is a reason to have no colony, not a reason for the alate not to wake
+/// up. The same rule [`telegram_bridge`] follows.
+#[cfg(feature = "colony")]
+fn colony_bridge(
+    config: &Config,
+    socket: &std::path::Path,
+    server: &Server,
+    name: &str,
+    colony: Option<crate::colony::Shared>,
+    outbound: tokio::sync::mpsc::UnboundedReceiver<crate::colony::Outbound>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let wanted = config.gateway.colony.as_ref()?;
+    let notices = server.publisher();
+
+    let Some(colony) = colony else {
+        notices.send(Frame::Notice {
+            text: format!(
+                "colony: {} is not set, and this agent needs a key to talk with",
+                wanted.key_env
+            ),
+        });
+        return None;
+    };
+
+    let keys = match crate::colony::keys(&wanted.key_env) {
+        Ok(keys) => keys,
+        Err(why) => {
+            notices.send(Frame::Notice {
+                text: format!("colony: {why}"),
+            });
+            return None;
+        }
+    };
+
+    if let Err(why) = wanted.interval() {
+        notices.send(Frame::Notice {
+            text: format!("colony: {why}"),
+        });
+        return None;
+    }
+
+    let url = wanted.relay.clone();
+    let connect: crate::colony::Connect = Arc::new(move || {
+        let url = url.clone();
+        Box::pin(async move {
+            crate::colony::Live::connect(&url)
+                .await
+                .map(|live| Arc::new(live) as crate::colony::RelayFn)
+        })
+    });
+
+    tracing::info!(relay = %wanted.relay, "colony bridge started");
+    Some(crate::colony::spawn(crate::colony::Bridge {
+        socket: socket.to_path_buf(),
+        config: wanted.clone(),
+        keys,
+        name: wanted.name.clone().unwrap_or_else(|| name.to_owned()),
+        connect,
+        notices,
+        colony,
+        outbound,
+    }))
 }

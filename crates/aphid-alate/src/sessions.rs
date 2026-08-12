@@ -331,6 +331,13 @@ pub struct Blueprint {
     /// The permission gate. One for the whole alate, so "allow always" answered
     /// in one session is remembered in the next.
     pub permissions: Arc<Permissions>,
+    /// The colony, when there is one.
+    ///
+    /// One of the two `cfg`s the bridge costs. Telegram needed none because a
+    /// chat is a gateway client and touches nothing inside a run; colony tools
+    /// do run inside one.
+    #[cfg(feature = "colony")]
+    pub colony: Option<crate::colony::Shared>,
 }
 
 impl Blueprint {
@@ -389,6 +396,14 @@ impl Blueprint {
         if let Some(section) = cron::lock(&self.crontab).prompt_section() {
             appended.push_str(&section);
         }
+        #[cfg(feature = "colony")]
+        if let Some(section) = self
+            .colony
+            .as_ref()
+            .and_then(|colony| colony.prompt_section())
+        {
+            appended.push_str(&section);
+        }
         if !appended.is_empty() {
             options.append_system = Some(appended);
         }
@@ -403,6 +418,14 @@ impl Blueprint {
         options
             .plugins
             .push(Arc::new(CronPlugin::new(self.crontab.clone())));
+        // Beside the crontab, so a scheduled job can post to the colony as
+        // readily as a conversation can — which is most of the point of a hub.
+        #[cfg(feature = "colony")]
+        if let Some(colony) = &self.colony {
+            options
+                .plugins
+                .push(Arc::new(crate::colony::ColonyPlugin::new(colony.clone())));
+        }
         // One `Permissions` for the whole alate, so "allow always" answered in
         // one session is remembered in the next.
         options.plugins.push(self.permissions.clone());

@@ -10,11 +10,18 @@ repository.workspace = true
 # The Telegram bridge. Off by default: it pulls in a TLS stack, and it is of no
 # use without a bot token.
 telegram = ["dep:reqwest"]
+# The colony bridge. Off by default: it pulls a websocket client and the nostr
+# crate, which compiles C, and it is of no use without a colony to talk to.
+colony = ["dep:aphid-colony", "dep:aphid-nostr"]
 
 [dependencies]
 aphid-agent = { path = "../aphid-agent" }
 aphid-code = { path = "../aphid-code" }
+# `default-features = false` is what keeps rusqlite and ratatui out of an
+# alate: the bridge wants the client half of a colony and nothing else.
+aphid-colony = { path = "../aphid-colony", default-features = false, features = ["client"], optional = true }
 aphid-core = { path = "../aphid-core" }
+aphid-nostr = { path = "../aphid-nostr", optional = true }
 aphid-plugin = { path = "../aphid-plugin" }
 chrono.workspace = true
 compact_str.workspace = true

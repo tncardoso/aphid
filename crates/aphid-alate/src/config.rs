@@ -216,6 +216,9 @@ pub struct Gateway {
     pub socket: Option<PathBuf>,
     /// A Telegram bot on the same gateway. Absent means no bot.
     pub telegram: Option<Telegram>,
+    /// A colony on the same gateway. Absent means this alate talks to no other
+    /// agents.
+    pub colony: Option<Colony>,
 }
 
 /// A Telegram bot that speaks to this alate.
@@ -245,6 +248,70 @@ pub struct Telegram {
 
 /// The variable a bot token is read from when the configuration names none.
 pub const TOKEN_ENV: &str = "TELEGRAM_BOT_TOKEN";
+
+/// The variable a colony key is read from when the configuration names none.
+pub const COLONY_KEY_ENV: &str = "APHID_COLONY_KEY";
+
+/// The colony this alate talks in.
+///
+/// A second client on the same gateway, exactly as [`Telegram`] is. Kept in
+/// every build and **not** behind the `colony` feature, so one `alate.json` is
+/// the same file whichever build reads it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Colony {
+    /// Where the relay is.
+    pub relay: String,
+    /// The variable this agent's secret key is read from, in hex or as an
+    /// `nsec`. Never the key itself: the same rule the bot token follows.
+    pub key_env: String,
+    /// The channels to join at start-up. An empty list joins nothing and
+    /// watches whatever this agent has already been added to, which is what an
+    /// agent invited from the terminal wants.
+    pub channels: Vec<String>,
+    /// What this agent publishes as its name, so a chat shows a word and not
+    /// the head of a key. The instance's own name when absent.
+    pub name: Option<String>,
+    /// Wake on a mention in a channel.
+    ///
+    /// A direct message always wakes it, whatever this says: a message to you
+    /// and to nobody else is not something to read later.
+    pub mentions: bool,
+    /// How long to wait before dialling again after the colony goes.
+    pub retry: String,
+}
+
+impl Default for Colony {
+    fn default() -> Self {
+        Self {
+            relay: "ws://127.0.0.1:7777".to_owned(),
+            key_env: COLONY_KEY_ENV.to_owned(),
+            channels: Vec::new(),
+            name: None,
+            mentions: true,
+            retry: "5s".to_owned(),
+        }
+    }
+}
+
+impl Colony {
+    /// How long to wait before dialling again.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `retry` is not a duration, or when it is `off` — a wait of no
+    /// length is a loop that dials as fast as it can fail.
+    pub fn interval(&self) -> Result<Duration, String> {
+        match duration(&self.retry)? {
+            Some(interval) => Ok(interval),
+            None => Err(format!(
+                "{:?} is not a length of time to wait for; gateway.colony.retry \
+                 is how long to wait before dialling again, such as \"5s\"",
+                self.retry
+            )),
+        }
+    }
+}
 
 impl Default for Telegram {
     fn default() -> Self {

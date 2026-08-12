@@ -149,3 +149,44 @@ fn the_heartbeat_reads_its_own_interval() {
         Ok(Some(Duration::from_secs(900)))
     );
 }
+
+#[test]
+fn a_colony_configuration_round_trips() {
+    let temp = Temp::new("config-colony");
+    let path = temp.path("alate.json");
+
+    let mut config = Config::default();
+    config.gateway.colony = Some(aphid_alate::config::Colony {
+        relay: "ws://127.0.0.1:9999".to_owned(),
+        key_env: "SCOUT_COLONY_KEY".to_owned(),
+        channels: vec!["general".to_owned(), "build".to_owned()],
+        name: Some("scout".to_owned()),
+        mentions: true,
+        retry: "10s".to_owned(),
+    });
+
+    config.save(&path).expect("saves");
+    assert_eq!(Config::load(&path).expect("loads"), config);
+}
+
+#[test]
+fn an_alate_json_without_a_colony_still_parses() {
+    // The struct is compiled into every build, colony feature or not, so one
+    // alate.json is the same file whichever build reads it.
+    let temp = Temp::new("config-colony");
+    let path = temp.write("alate.json", r#"{"version": 1, "gateway": {}}"#);
+    let config = Config::load(&path).expect("loads");
+    assert!(config.gateway.colony.is_none());
+}
+
+#[test]
+fn a_colony_retry_that_is_not_a_length_of_time_is_a_sentence() {
+    let colony = aphid_alate::config::Colony {
+        retry: "off".to_owned(),
+        ..aphid_alate::config::Colony::default()
+    };
+    let error = colony
+        .interval()
+        .expect_err("a wait of no length is a busy loop");
+    assert!(error.contains("gateway.colony.retry"), "{error}");
+}

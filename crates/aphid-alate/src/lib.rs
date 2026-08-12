@@ -23,6 +23,8 @@
 //! crate adds what a resident agent needs around it and changes nothing about
 //! how an agent is built.
 
+#[cfg(feature = "colony")]
+pub mod colony;
 pub mod config;
 pub mod cron;
 pub mod daemon;
