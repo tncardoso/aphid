@@ -6,6 +6,7 @@ members = [
     "crates/aphid-cli",
     "crates/aphid-code",
     "crates/aphid-core",
+    "crates/aphid-nostr",
     "crates/aphid-plugin",
 ]
 
@@ -22,6 +23,10 @@ compact_str = { version = "0.9", features = ["serde"] }
 croner = "3"
 bytes = "1"
 futures-core = "0.3"
+# Default features are `std` alone. NIP-04, NIP-44 and NIP-59 are opt-in there
+# and stay off: a colony is cleartext, and every one of them costs a cipher.
+# `os-rng` is what `Keys::generate` needs.
+nostr = { version = "0.45", features = ["os-rng"] }
 ratatui = "0.30"
 ratatui-textarea = "0.9"
 serde = { version = "1", features = ["derive"] }
