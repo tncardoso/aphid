@@ -1,0 +1,5 @@
+{{ $footer := .Params.footer }}
+<footer class="site-footer">
+  <span class="site-footer__license">{{ $footer.license }}</span>
+  <a class="site-footer__github" href="{{ $footer.github_href }}" target="_blank" rel="noopener">{{ $footer.github_label }}</a>
+</footer>

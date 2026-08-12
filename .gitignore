@@ -2,4 +2,7 @@
 /.aphid/*
 !/.aphid/plugins/
 .aphid/plugins/state
-/book
+/site/public/
+/site/.hugo_build.lock
+/site/resources/
+/site/static/docs

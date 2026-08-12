@@ -1,0 +1,20 @@
+{{ $hero := .Params.hero }}
+{{ $bgURL := "" }}
+{{ with resources.Get "images/bg.png" }}{{ $bgURL = .RelPermalink }}{{ end }}
+<section class="hero" style="{{ printf "--hero-bg-image:url('%s');" $bgURL | safeCSS }}">
+  <div class="hero__inner">
+    <div class="hero__text">
+      <p class="hero__eyebrow">{{ $hero.eyebrow }}</p>
+      <h1 class="hero__headline">{{ $hero.headline }}</h1>
+      <p class="hero__subhead">{{ $hero.subhead }}</p>
+      <div class="cta-row">
+        <a class="btn btn--primary" href="{{ $hero.cta_primary_href }}">{{ $hero.cta_primary_label }}</a>
+        <a class="btn btn--secondary" href="{{ $hero.cta_secondary_href }}">{{ $hero.cta_secondary_label }}</a>
+      </div>
+    </div>
+    {{ with resources.Get "images/aphid-mascot.png" }}
+      {{ $mascot := .Resize "260x" }}
+      <img class="hero__mascot" src="{{ $mascot.RelPermalink }}" width="{{ $mascot.Width }}" height="{{ $mascot.Height }}" alt="" loading="eager">
+    {{ end }}
+  </div>
+</section>

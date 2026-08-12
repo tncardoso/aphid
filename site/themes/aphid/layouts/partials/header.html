@@ -1,0 +1,14 @@
+<header class="nav">
+  <a class="nav__logo" href="#"><span class="nav__logo-dot"></span>aphid</a>
+  <nav class="nav__menu">
+    {{ range .Site.Menus.main }}
+      {{ $isExternal := strings.HasPrefix .URL "http" }}
+      {{ $isCTA := .Params.cta }}
+      <a
+        class="nav__link{{ if $isCTA }} nav__link--cta{{ end }}"
+        href="{{ .URL }}"
+        {{ if $isExternal }}target="_blank" rel="noopener"{{ end }}
+      >{{ .Name }}</a>
+    {{ end }}
+  </nav>
+</header>

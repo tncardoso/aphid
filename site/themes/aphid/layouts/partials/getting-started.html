@@ -1,0 +1,22 @@
+{{ $gs := .Params.getting_started }}
+<section id="getting-started" class="getting-started" style="background-color:var(--bg-alt); --section-accent:var(--moss);">
+  <h2 class="section-title">{{ $gs.title }}</h2>
+  <p class="section-paragraph">{{ $gs.paragraph }}</p>
+  <div class="terminal terminal--wide">
+    <div class="terminal__bar">
+      <span class="terminal__dot"></span>
+      <span class="terminal__dot"></span>
+      <span class="terminal__dot"></span>
+      <span class="terminal__title">{{ $gs.terminal_title }}</span>
+    </div>
+    <div class="terminal__body">
+      {{ range $gs.steps }}
+        <div class="term-line term-line--command">$ {{ . }}</div>
+      {{ end }}
+    </div>
+  </div>
+  <div class="cta-row">
+    <a class="btn btn--primary" href="{{ $gs.cta_docs_href }}">{{ $gs.cta_docs_label }}</a>
+    <a class="btn btn--secondary" href="{{ $gs.cta_github_href }}" target="_blank" rel="noopener">{{ $gs.cta_github_label }}</a>
+  </div>
+</section>

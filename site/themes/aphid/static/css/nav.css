@@ -1,0 +1,117 @@
+/*
+ * Shared site navigation bar.
+ *
+ * This file is loaded by two documents that share no other CSS: the Hugo
+ * landing page, and every mdbook page under /docs/. Its tokens are declared
+ * on .nav, not on :root, because mdbook declares --bg on .light at the same
+ * specificity — a :root token here would win or lose by source order alone.
+ */
+
+/*
+ * The one token that does live on :root, because the mdbook pages need to read
+ * it from outside .nav to offset their fixed sidebar and sticky menu bar.
+ * Safe there: mdbook defines no --nav-* token, so nothing collides.
+ */
+:root {
+  --nav-height: 80px;
+}
+
+@media (max-width: 880px) {
+  :root {
+    --nav-height: 67px;
+  }
+}
+
+.nav {
+  --nav-bg: rgba(246, 245, 236, 0.86);
+  --nav-ink: #263524;
+  --nav-muted: #6c7566;
+  --nav-line: rgba(38, 53, 36, 0.10);
+  --nav-moss: #61814a;
+  --nav-moss-deep: #43602f;
+  --nav-on-moss: #fbfbf3;
+
+  /*
+   * An explicit height, rather than vertical padding, so the mdbook pages can
+   * offset by a known value. Matches what the padded version computed to
+   * (22 + 35 + 22 + 1px border desktop, 16 + 35 + 16 mobile).
+   */
+  position: sticky;
+  top: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  height: var(--nav-height);
+  padding: 0 32px;
+  box-sizing: border-box;
+  font-family: "Inter", system-ui, sans-serif;
+  background-color: var(--nav-bg);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--nav-line);
+}
+
+.nav__logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.02em;
+  color: var(--nav-ink);
+  text-decoration: none;
+}
+
+.nav__logo-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  background-color: var(--nav-moss);
+  flex-shrink: 0;
+}
+
+.nav__menu {
+  display: flex;
+  align-items: center;
+  gap: 36px;
+  flex-wrap: wrap;
+}
+
+.nav__link {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--nav-muted);
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+.nav__link:hover {
+  color: var(--nav-ink);
+}
+
+.nav__link--cta {
+  padding: 9px 18px;
+  border-radius: 999px;
+  background-color: var(--nav-moss);
+  color: var(--nav-on-moss);
+}
+
+.nav__link--cta:hover {
+  color: var(--nav-on-moss);
+  background-color: var(--nav-moss-deep);
+}
+
+@media (max-width: 880px) {
+  .nav {
+    padding: 0 20px;
+  }
+
+  .nav__menu {
+    gap: 18px;
+  }
+
+  .nav__link:not(.nav__link--cta) {
+    display: none;
+  }
+}

@@ -1,0 +1,134 @@
+/*
+ * Aphid site styling for the book.
+ *
+ * Loaded through `additional-css` in book.toml, so it lands after mdbook's own
+ * variables.css / general.css / chrome.css and can override them. Its job is to
+ * make /docs/ read as the same site as the Hugo landing page: same palette,
+ * same type, and room at the top for the shared nav bar.
+ */
+
+/* Palette -------------------------------------------------------------- */
+
+/*
+ * `html:not(.js)` is matched alongside `.light` so the no-JS render — which
+ * never has a theme class applied — picks these up too.
+ */
+.light,
+html:not(.js) {
+  --bg: #ffffff;
+  --fg: #263524;
+
+  --sidebar-bg: #f6f5ec;
+  --sidebar-fg: #263524;
+  --sidebar-non-existant: #a3aa9d;
+  --sidebar-active: #61814a;
+  --sidebar-spacer: rgba(38, 53, 36, 0.10);
+  --sidebar-header-border-color: rgba(38, 53, 36, 0.10);
+
+  --scrollbar: #a3aa9d;
+
+  --icons: #6c7566;
+  --icons-hover: #263524;
+
+  --links: #43602f;
+  --inline-code-color: #43602f;
+
+  --theme-popup-bg: #ffffff;
+  --theme-popup-border: rgba(38, 53, 36, 0.15);
+  --theme-hover: #f0efe4;
+
+  --quote-bg: #f0efe4;
+  --quote-border: rgba(38, 53, 36, 0.10);
+
+  --table-border-color: rgba(38, 53, 36, 0.10);
+  --table-header-bg: #f0efe4;
+  --table-alternate-bg: #faf9f2;
+
+  --searchbar-border-color: rgba(38, 53, 36, 0.20);
+  --searchbar-bg: #ffffff;
+  --searchbar-fg: #263524;
+  --searchbar-shadow-color: rgba(38, 53, 36, 0.20);
+  --searchresults-header-fg: #6c7566;
+  --searchresults-border-color: rgba(38, 53, 36, 0.10);
+  --searchresults-li-bg: #f6f5ec;
+  --search-mark-bg: #cfe0bd;
+
+  --overlay-bg: rgba(38, 53, 36, 0.25);
+  --footnote-highlight: #61814a;
+}
+
+/* Type ----------------------------------------------------------------- */
+
+:root {
+  --mono-font: "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+html,
+body {
+  font-family: "Inter", system-ui, sans-serif;
+}
+
+/* Room for the nav ----------------------------------------------------- */
+
+/*
+ * The nav is fixed rather than sticky here: mdbook's sidebar is itself
+ * position: fixed and would slide under a sticky bar. Everything anchored to
+ * the viewport top has to shift down by the same amount.
+ *
+ * --nav-height comes from nav.css, which is the single source of truth for it
+ * and varies by breakpoint. Do not redeclare it here.
+ */
+.nav {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+}
+
+#mdbook-body-container {
+  padding-top: var(--nav-height);
+}
+
+.sidebar {
+  top: var(--nav-height);
+}
+
+/* chrome.css sets `top: 0 !important` on the sticky menu bar. */
+#mdbook-menu-bar.sticky,
+#mdbook-menu-bar-hover-placeholder:hover + #mdbook-menu-bar,
+#mdbook-menu-bar:hover,
+html.sidebar-visible #mdbook-menu-bar {
+  top: var(--nav-height) !important;
+}
+
+/* Trim redundant chrome ------------------------------------------------- */
+
+/*
+ * The book is light-only, matching the site, so the theme picker has nothing
+ * to offer. The menu bar's book title is dropped because it would sit
+ * directly under the nav's own "aphid" wordmark.
+ */
+#mdbook-theme-toggle,
+#mdbook-theme-list {
+  display: none;
+}
+
+.menu-title {
+  visibility: hidden;
+}
+
+/* Print ---------------------------------------------------------------- */
+
+/*
+ * print.html renders through this same template, so the nav would otherwise
+ * reserve 80px at the top of the printed book.
+ */
+@media print {
+  .nav {
+    display: none;
+  }
+
+  #mdbook-body-container {
+    padding-top: 0;
+  }
+}

@@ -1,0 +1,70 @@
+- id: aphid
+  accent_var: "--moss"
+  title: "Aphid"
+  heading: "The coding agent"
+  reverse: false
+  description: >
+    The coding agent. It starts in a repository, reads its AGENTS.md and
+    its skills, and does the work you ask for. Give it one prompt, or
+    open the terminal user interface.
+  cli:
+    - "cargo install --path crates/aphid-cli"
+    - "export DEEPSEEK_API_KEY=sk-..."
+    - 'aphid -p "what does this crate do?"'
+  terminal:
+    title: "aphid — zsh"
+    lines:
+      - { type: command, text: 'aphid -p "what does this crate do?"' }
+      - { type: dim,     text: "reading AGENTS.md..." }
+      - { type: dim,     text: "scanning src/ (14 files)..." }
+      - { type: output,  text: "This crate implements the aphid-core" }
+      - { type: output,  text: "arena: flat, append-only conversation" }
+      - { type: output,  text: "storage with single-memcpy delta" }
+      - { type: output,  text: "resolution." }
+      - { type: dim,     text: "done in 1.8s" }
+
+- id: alate
+  accent_var: "--lavender"
+  title: "Alate"
+  heading: "The resident agent"
+  reverse: true
+  description: >
+    An alate is the winged form of an aphid: a resident agent. It has a
+    home directory of its own, a memory that continues between sessions,
+    and a heartbeat that wakes it.
+  cli:
+    - "aphid alate run --name work"
+    - "aphid alate attach --name work"
+  terminal:
+    title: "alate — work"
+    lines:
+      - { type: command, text: "aphid alate run --name work" }
+      - { type: output,  text: '✓ alate "work" started · pid 41213' }
+      - { type: output,  text: "✓ home: ~/.aphid/alates/work" }
+      - { type: output,  text: "✓ heartbeat every 30s" }
+      - { type: command, text: "aphid alate attach --name work" }
+      - { type: dim,     text: "attached to work · uptime 2h14m" }
+      - { type: output,  text: "> _" }
+
+- id: colony
+  accent_var: "--blossom"
+  title: "Colony"
+  heading: "Where agents talk"
+  reverse: false
+  description: >
+    A colony is the place agents speak to each other. It has channels
+    and direct messages, and agents and people share them under their
+    own names. The hub keeps running after every terminal closes.
+  cli:
+    - "aphid colony serve"
+    - "aphid colony attach"
+  terminal:
+    title: "colony — hub"
+    lines:
+      - { type: command, text: "aphid colony serve" }
+      - { type: output,  text: "listening on wss://127.0.0.1:4869" }
+      - { type: dim,     text: "store: colony.sqlite" }
+      - { type: command, text: "aphid colony attach" }
+      - { type: output,  text: "connected as @thiago" }
+      - { type: dim,     text: "#general   #work   #alerts" }
+      - { type: output,  text: "> _" }

@@ -1,0 +1,6 @@
+name = "Aphid"
+license = "MIT"
+licenselink = "https://github.com/tncardoso/aphid/blob/main/LICENSE"
+description = "A clean, minimal landing page theme for Aphid, a coding agent built in Rust."
+homepage = "https://github.com/tncardoso/aphid"
+min_version = "0.164.0"

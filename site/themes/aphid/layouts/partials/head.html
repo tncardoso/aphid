@@ -1,0 +1,26 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ if .IsHome }}{{ .Site.Title }} — {{ .Site.Params.tagline | default "A coding agent, built in Rust" }}{{ else }}{{ .Title }} — {{ .Site.Title }}{{ end }}</title>
+<meta name="description" content="{{ .Description | default .Site.Params.description | default "A coding agent, built in Rust." }}">
+
+<meta property="og:title" content="{{ .Site.Title }}">
+<meta property="og:description" content="{{ .Description | default .Site.Params.description | default "A coding agent, built in Rust." }}">
+<meta property="og:type" content="website">
+<meta property="og:url" content="{{ .Permalink }}">
+{{ with resources.Get "images/banner.png" }}
+  {{ $og := .Fill "1200x630" }}
+  <meta property="og:image" content="{{ $og.Permalink }}">
+{{ end }}
+<meta name="twitter:card" content="summary_large_image">
+
+{{ with resources.Get "images/aphid_badge.png" }}
+  {{ $icon := .Resize "64x64" }}
+  <link rel="icon" href="{{ $icon.RelPermalink }}" type="image/png">
+{{ end }}
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="{{ "css/nav.css" | relURL }}">
+<link rel="stylesheet" href="{{ "css/aphid.css" | relURL }}">

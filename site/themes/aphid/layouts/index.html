@@ -1,0 +1,7 @@
+{{ define "main" }}
+  {{ partial "hero.html" . }}
+  {{ range $i, $p := hugo.Data.products }}
+    {{ partial "product-section.html" (dict "p" $p "index" (add $i 1)) }}
+  {{ end }}
+  {{ partial "getting-started.html" . }}
+{{ end }}

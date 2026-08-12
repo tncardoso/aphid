@@ -1,0 +1,39 @@
+{{ $p := .p }}
+{{ $index := .index }}
+<section
+  id="{{ $p.id }}"
+  class="product"
+  style="{{ printf "--section-accent:var(%s);" $p.accent_var | safeCSS }}"
+>
+  <div class="product__inner{{ if $p.reverse }} product__inner--reverse{{ end }}">
+    <div class="product__text">
+      <p class="product__eyebrow"><span class="product__eyebrow-dot"></span>{{ printf "%02d" $index }} — {{ $p.title }}</p>
+      <h2 class="product__title">{{ $p.heading }}</h2>
+      <p class="product__description">{{ $p.description }}</p>
+      <div class="cli-block">
+        {{ range $p.cli }}
+          <div class="cli-block__line">$ {{ . }}</div>
+        {{ end }}
+      </div>
+    </div>
+    <div class="terminal">
+      <div class="terminal__bar">
+        <span class="terminal__dot"></span>
+        <span class="terminal__dot"></span>
+        <span class="terminal__dot"></span>
+        <span class="terminal__title">{{ $p.terminal.title }}</span>
+      </div>
+      <div class="terminal__body">
+        {{ range $p.terminal.lines }}
+          {{ if eq .type "command" }}
+            <div class="term-line term-line--command">$ {{ .text }}</div>
+          {{ else if eq .type "dim" }}
+            <div class="term-line term-line--dim">{{ .text }}</div>
+          {{ else }}
+            <div class="term-line term-line--output">{{ .text }}</div>
+          {{ end }}
+        {{ end }}
+      </div>
+    </div>
+  </div>
+</section>

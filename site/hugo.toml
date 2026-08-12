@@ -1,0 +1,44 @@
+baseURL = 'https://example.org/'
+locale = 'en-us'
+title = 'Aphid'
+theme = 'aphid'
+
+[params]
+  github_url = "https://github.com/tncardoso/aphid"
+
+[[menu.main]]
+  name = "Home"
+  url = "/"
+  weight = 5
+
+[[menu.main]]
+  name = "Aphid"
+  url = "#aphid"
+  weight = 10
+
+[[menu.main]]
+  name = "Alate"
+  url = "#alate"
+  weight = 20
+
+[[menu.main]]
+  name = "Colony"
+  url = "#colony"
+  weight = 30
+
+[[menu.main]]
+  name = "Docs"
+  url = "/docs/"
+  weight = 35
+
+[[menu.main]]
+  name = "Github"
+  url = "https://github.com/tncardoso/aphid"
+  weight = 40
+
+[[menu.main]]
+  name = "Getting Started"
+  url = "#getting-started"
+  weight = 50
+  [menu.main.params]
+    cta = true

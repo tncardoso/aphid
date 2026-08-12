@@ -4,5 +4,15 @@ language = "en"
 src = "docs"
 title = "Aphid"
 
+[build]
+# The book renders into the Hugo static tree, so it is served at /docs/.
+# Build order: `mdbook build` first, then `hugo` from site/.
+build-dir = "site/static/docs"
+
 [output.html]
 git-repository-url = "https://github.com/tncardoso/aphid"
+theme = "book-theme"
+site-url = "/docs/"
+default-theme = "light"
+preferred-dark-theme = "light"
+additional-css = ["book-theme/aphid.css"]
