@@ -29,6 +29,10 @@
 pub mod config;
 pub mod home;
 pub mod identity;
+#[cfg(feature = "relay")]
+pub mod store;
 
 pub use config::Config;
 pub use home::Home;
+#[cfg(feature = "relay")]
+pub use store::{Saved, Store};
