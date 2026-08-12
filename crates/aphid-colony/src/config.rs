@@ -7,7 +7,7 @@
 //!
 //! [`aphid_alate::config`]: https://docs.rs/aphid-alate
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -141,5 +141,29 @@ impl Config {
                 self.listen
             )
         })
+    }
+
+    /// Where a terminal dials to reach this colony.
+    ///
+    /// Not the same thing as [`Config::address`], and the difference is the
+    /// whole reason this exists. `0.0.0.0` and `::` are ways of saying "every
+    /// interface", which is an instruction to `bind` and not an address
+    /// anything can connect to — so a terminal on this machine dials loopback
+    /// instead.
+    ///
+    /// The address is rebuilt and formatted rather than pasted together from
+    /// strings, because that is what puts the brackets around an IPv6 host.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `listen` is not an address and a port.
+    pub fn url(&self) -> Result<String, String> {
+        let listening = self.address()?;
+        let host = match listening.ip() {
+            IpAddr::V4(address) if address.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(address) if address.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+            address => address,
+        };
+        Ok(format!("ws://{}", SocketAddr::new(host, listening.port())))
     }
 }

@@ -88,6 +88,50 @@ fn a_listen_that_is_not_an_address_is_a_sentence() {
 }
 
 #[test]
+fn the_url_follows_the_listen_address() {
+    let config = Config {
+        listen: "127.0.0.1:9999".to_owned(),
+        ..Config::default()
+    };
+    assert_eq!(config.url().expect("a url"), "ws://127.0.0.1:9999");
+    assert_eq!(
+        Config::default().url().expect("a url"),
+        "ws://127.0.0.1:7777"
+    );
+}
+
+#[test]
+fn a_bind_address_is_not_a_connect_address() {
+    // `0.0.0.0` and `::` say "every interface", which is an instruction to
+    // bind and not somewhere a terminal can dial. It gets loopback instead.
+    let every = Config {
+        listen: "0.0.0.0:7777".to_owned(),
+        ..Config::default()
+    };
+    assert_eq!(every.url().expect("a url"), "ws://127.0.0.1:7777");
+
+    let every_six = Config {
+        listen: "[::]:7777".to_owned(),
+        ..Config::default()
+    };
+    assert_eq!(
+        every_six.url().expect("a url"),
+        "ws://[::1]:7777",
+        "an IPv6 host keeps its brackets"
+    );
+}
+
+#[test]
+fn a_url_from_a_listen_that_is_not_an_address_is_the_same_sentence() {
+    let config = Config {
+        listen: "port seven".to_owned(),
+        ..Config::default()
+    };
+    let error = config.url().expect_err("this is not an address");
+    assert!(error.contains("127.0.0.1:7777"), "{error}");
+}
+
+#[test]
 fn a_key_is_made_once_and_read_back() {
     let temp = Temp::new("config");
     let path = temp.path("relay.key");

@@ -1,9 +1,14 @@
 //! `aphid colony`: the hub agents talk in.
 //!
-//! Four verbs. `run` is the relay with a terminal attached to it, which is what
-//! a person wants; `serve` is the relay alone, for a machine that is only
-//! carrying messages; `list` says which hubs exist; `keys` prints the two
-//! public keys an agent needs to be told about.
+//! Two processes and four verbs, the shape [`crate::alate`] already has.
+//! `serve` is the hub itself, in the foreground; `attach` is a terminal on a
+//! running one; `list` says which hubs exist; `keys` prints the two public keys
+//! an agent needs to be told about.
+//!
+//! The hub and the terminal are **separate processes**, and that is the point
+//! of a hub. It has to outlive any one terminal, and several terminals have to
+//! be able to watch it at once — neither of which is possible when one process
+//! holds both.
 //!
 //! Detaching it from a terminal is the shell's job — `nohup`, a service manager
 //! — and not the hub's, exactly as with an alate.
@@ -18,10 +23,10 @@ use aphid_colony::store::Store;
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
-    /// Run the colony and open a terminal on it
-    Run(Args),
-    /// Run the colony with no terminal
+    /// Run the colony in this terminal
     Serve(Args),
+    /// Open a terminal on a running colony
+    Attach(AttachArgs),
     /// Show the colonies on this machine
     List,
     /// Print this colony's public keys
@@ -35,10 +40,19 @@ pub struct Args {
     pub name: String,
 }
 
+#[derive(Debug, clap::Args)]
+pub struct AttachArgs {
+    #[command(flatten)]
+    pub colony: Args,
+    /// The colony to attach to. The one this home names when absent.
+    #[arg(long, value_name = "URL")]
+    pub relay: Option<String>,
+}
+
 pub async fn run(command: Command) -> ExitCode {
     match command {
-        Command::Run(args) => start(&args.name, true).await,
-        Command::Serve(args) => start(&args.name, false).await,
+        Command::Serve(args) => serve(&args.name).await,
+        Command::Attach(args) => attach(&args.colony.name, args.relay.as_deref()).await,
         Command::List => list(),
         Command::Keys(args) => keys(&args.name),
     }
@@ -51,7 +65,8 @@ fn open(name: &str) -> Result<(Home, Config), String> {
     Ok((home, config))
 }
 
-async fn start(name: &str, terminal: bool) -> ExitCode {
+/// The hub itself. It runs until it is stopped, and nothing it serves ends it.
+async fn serve(name: &str) -> ExitCode {
     let (home, config) = match open(name) {
         Ok(both) => both,
         Err(error) => return fail(&error),
@@ -83,31 +98,53 @@ async fn start(name: &str, terminal: bool) -> ExitCode {
         Err(error) => return fail(&error.to_string()),
     };
 
-    let url = format!("ws://{}", relay.address());
+    println!("colony {name} is listening on ws://{}", relay.address());
+    println!("anything that can reach it may publish and read");
+    println!("attach a terminal with `aphid colony attach --name {name}`");
+    relay.joined().await;
+    ExitCode::SUCCESS
+}
 
-    if !terminal {
-        println!("colony {name} is listening on {url}");
-        println!("anything that can reach it may publish and read");
-        relay.joined().await;
-        return ExitCode::SUCCESS;
-    }
+/// A terminal on a hub that is already running.
+///
+/// It binds nothing and hosts nothing. Several of these can watch one colony at
+/// once, and closing one leaves the colony and the others alone.
+async fn attach(name: &str, relay: Option<&str>) -> ExitCode {
+    let (home, config) = match open(name) {
+        Ok(both) => both,
+        Err(error) => return fail(&error),
+    };
+
+    // `--relay` is what points a terminal at a colony on another machine. With
+    // no flag the home says where its own colony listens, which is how
+    // `aphid alate attach` finds its socket.
+    let url = match relay
+        .map(str::to_owned)
+        .map(Ok)
+        .unwrap_or_else(|| config.url())
+    {
+        Ok(url) => url,
+        Err(error) => return fail(&error),
+    };
 
     let human = match identity::open(&home.human_key()) {
         Ok(keys) => keys,
         Err(error) => return fail(&error.to_string()),
     };
 
-    // The relay is hosted in this process, so the terminal ending ends it and
-    // the relay ending has to end the terminal. `tui::run` owns both.
     match aphid_colony::tui::run(aphid_colony::tui::Options {
         url,
         keys: human,
         name: config.name.clone(),
-        relay: Some(relay),
     })
     .await
     {
         Ok(()) => ExitCode::SUCCESS,
+        // A colony that is not there is the ordinary mistake of starting two
+        // processes in one order, so the refusal names the other one.
+        Err(error) if error.kind() == std::io::ErrorKind::NotConnected => fail(&format!(
+            "{error}.\n       Start it with `aphid colony serve --name {name}`"
+        )),
         Err(error) => fail(&error.to_string()),
     }
 }
@@ -123,15 +160,18 @@ fn list() -> ExitCode {
     };
 
     if names.is_empty() {
-        println!("no colonies yet. `aphid colony run` makes one called {DEFAULT_NAME}");
+        println!("no colonies yet. `aphid colony serve` makes one called {DEFAULT_NAME}");
         return ExitCode::SUCCESS;
     }
 
     for name in names {
-        let listen = Config::load(&root.join(&name).join("colony.json"))
-            .map(|config| config.listen)
+        // The address to dial, and not the one it binds: this line is here to
+        // be read and copied into a `--relay`.
+        let url = Config::load(&root.join(&name).join("colony.json"))
+            .map_err(|error| error.to_string())
+            .and_then(|config| config.url())
             .unwrap_or_else(|_| "?".to_owned());
-        println!("{name:<20} ws://{listen}");
+        println!("{name:<20} {url}");
     }
     ExitCode::SUCCESS
 }
@@ -152,7 +192,10 @@ fn keys(name: &str) -> ExitCode {
             Err(error) => return fail(&error.to_string()),
         }
     }
-    println!("listen ws://{}", config.listen);
+    match config.url() {
+        Ok(url) => println!("at     {url}"),
+        Err(error) => return fail(&error),
+    }
     ExitCode::SUCCESS
 }
 

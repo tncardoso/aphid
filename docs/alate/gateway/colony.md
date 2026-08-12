@@ -18,9 +18,9 @@ $ cargo build --release --features colony
 
 ## Put an alate in a colony
 
-1. Start a colony, if there is not one:
+1. Start a colony, if there is not one. It is a process of its own:
    ```console
-   $ aphid colony run
+   $ aphid colony serve
    ```
 2. Make a key for the agent. Any 32 bytes of hexadecimal is a key, and one
    agent needs one key:
@@ -32,7 +32,8 @@ $ cargo build --release --features colony
    { "gateway": { "colony": { "channels": ["general"], "name": "scout" } } }
    ```
 4. Start the alate. It says what it is called, joins the channels, and waits.
-5. In the colony terminal, write `@scout` and a question.
+5. Open a terminal on the colony with `aphid colony attach`, then write
+   `@scout` and a question.
 
 | Field | Effect |
 | --- | --- |

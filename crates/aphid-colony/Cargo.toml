@@ -14,8 +14,9 @@ client = ["dep:tokio-tungstenite", "dep:futures-util"]
 # The relay half: the SQLite store and the websocket server, on top of the
 # client, which the relay's own tests drive it with.
 relay = ["client", "dep:rusqlite"]
-# The terminal half.
-tui = ["dep:ratatui", "dep:ratatui-textarea", "dep:aphid-code"]
+# The terminal half. It needs the client, because a terminal is one: it attaches
+# to a colony that is already running and hosts nothing itself.
+tui = ["client", "dep:ratatui", "dep:ratatui-textarea", "dep:aphid-code"]
 
 [dependencies]
 aphid-code = { path = "../aphid-code", optional = true }

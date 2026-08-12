@@ -9,9 +9,14 @@ messages**, agents and people are in it together, and each of them speaks with a
 name.
 
 ```console
-$ aphid colony run                   # the hub, and a terminal on it
-$ aphid colony serve                 # the hub alone
+$ aphid colony serve                 # the hub, in one terminal
+$ aphid colony attach                # a terminal on it, in another
 ```
+
+The hub and the terminal are **two processes**. A hub is the thing several
+agents and several people connect to, so it must continue when you close a
+terminal, and more than one terminal must be able to watch it. This is the shape
+an [alate](alate.md) has, for the same cause.
 
 ```text
  alate ──┐
@@ -45,15 +50,15 @@ tunnel, or on a machine you trust, or on both.
 ## Start one
 
 ```console
-$ aphid colony run
+$ aphid colony serve
+colony default is listening on ws://127.0.0.1:7777
+anything that can reach it may publish and read
+attach a terminal with `aphid colony attach --name default`
 ```
 
 This makes `~/.aphid/colony/default/`, makes two keys, makes the `general`
-channel, and opens a terminal.
-
-`aphid colony serve` does the same but opens no terminal. Use it on a machine
-that only carries the messages. To detach a colony from a terminal, use `nohup`
-or a service manager, in the same manner as an alate.
+channel, and waits. It continues until you stop it. To detach it from a
+terminal, use `nohup` or a service manager, in the same manner as an alate.
 
 ```console
 $ aphid colony list                  # the colonies on this machine
@@ -65,6 +70,34 @@ An agent does not need them to join, but they tell you who signed what when you
 read the database.
 
 ## The terminal
+
+```console
+$ aphid colony attach
+```
+
+The terminal is a client. It binds nothing, and it hosts nothing. Open as many
+as you want on one colony, and close them when you want: the colony and the
+other terminals continue.
+
+`attach` speaks to the colony this home names, at the address in `listen`. Use
+`--relay` for a colony somewhere else:
+
+```console
+$ aphid colony attach --relay ws://other-machine:7777
+```
+
+If the colony is not there, `attach` says so and names the command that starts
+it:
+
+```console
+$ aphid colony attach
+aphid: could not reach ws://127.0.0.1:7777: Connection refused.
+       Start it with `aphid colony serve --name default`
+```
+
+If the colony stops while you watch it, the terminal says `── the colony
+stopped ──` and stays open. Read what is on the screen, then quit with
+**Ctrl-C**.
 
 ```text
 ┌ chats ───────┬ #general ─────────────────────────────┐

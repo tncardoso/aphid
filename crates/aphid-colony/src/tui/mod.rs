@@ -10,6 +10,10 @@
 //! There is no repaint timer either. Nothing here streams a word at a time, so
 //! the screen is drawn when something changed and an idle colony costs nothing.
 //!
+//! Nothing here holds a relay. The terminal is a client of one that is already
+//! running, in the same way the alate bridge is, so several terminals can watch
+//! one colony and closing any of them leaves it alone.
+//!
 //! [`Input`]: aphid_code::tui::input::Input
 //! [`spawn_input_thread`]: aphid_code::tui::event::spawn_input_thread
 
@@ -47,15 +51,6 @@ pub struct Options {
     pub keys: Keys,
     /// What to publish as a name, if the configuration named one.
     pub name: Option<String>,
-    /// The relay, when this process is hosting it.
-    ///
-    /// `aphid colony run` is one process with both in it, so the relay ending
-    /// has to end the terminal — and holding it here is also what keeps it
-    /// alive, since dropping a [`Relay`] stops it.
-    ///
-    /// [`Relay`]: crate::relay::Relay
-    #[cfg(feature = "relay")]
-    pub relay: Option<crate::relay::Relay>,
 }
 
 /// Open a terminal and run until it is closed.
@@ -71,10 +66,12 @@ pub async fn run(options: Options) -> std::io::Result<()> {
         ));
     }
 
+    // The client's own error names the colony it could not reach, so this adds
+    // the verb and not the address again.
     let client = Client::connect(&options.url).await.map_err(|error| {
         std::io::Error::new(
             std::io::ErrorKind::NotConnected,
-            format!("could not reach {}: {error}", options.url),
+            format!("could not reach {error}"),
         )
     })?;
 
@@ -93,20 +90,8 @@ pub async fn run(options: Options) -> std::io::Result<()> {
     let mut input = Input::default();
     input.set_prompt(false);
 
-    #[cfg(feature = "relay")]
-    let mut hosted = options.relay;
-
     let (mut terminal, ()) = setup()?;
-    let result = drive(
-        &mut terminal,
-        &mut app,
-        &mut input,
-        &client,
-        &mut keys,
-        #[cfg(feature = "relay")]
-        &mut hosted,
-    )
-    .await;
+    let result = drive(&mut terminal, &mut app, &mut input, &client, &mut keys).await;
     restore(&mut terminal)?;
     result
 }
@@ -117,27 +102,32 @@ async fn drive(
     input: &mut Input,
     client: &Client,
     keys: &mut UnboundedReceiver<UiEvent>,
-    #[cfg(feature = "relay")] hosted: &mut Option<crate::relay::Relay>,
 ) -> std::io::Result<()> {
     terminal.draw(|frame| render::draw(frame, app, input))?;
+
+    // Whether the colony has hung up. A closed connection answers `None` at
+    // once and for ever, so the arm has to be turned off rather than left to
+    // spin. The terminal stays open on what it already has: the person reads
+    // the last of it and leaves when they are ready, instead of the window
+    // going out at the moment it has something to say.
+    let mut gone = false;
 
     loop {
         let mut sending = Vec::new();
 
         tokio::select! {
-            message = client.recv() => match message {
+            message = client.recv(), if !gone => match message {
                 Some(message) => sending = app.apply(&message),
-                // Worth saying rather than vanishing from under the person.
-                None => app.note("── the colony stopped ──"),
+                None => {
+                    gone = true;
+                    app.note("── the colony stopped ──");
+                }
             },
             event = keys.recv() => match event {
                 None => break,
                 Some(UiEvent::Key(key)) => sending = key_pressed(app, input, key),
                 Some(_) => {}
             },
-            () = stopped(
-                #[cfg(feature = "relay")] hosted,
-            ) => break,
         }
 
         for message in sending {
@@ -149,20 +139,6 @@ async fn drive(
         terminal.draw(|frame| render::draw(frame, app, input))?;
     }
     Ok(())
-}
-
-/// Wait for the hosted relay to stop, or for ever when there is none.
-#[cfg(feature = "relay")]
-async fn stopped(hosted: &mut Option<crate::relay::Relay>) {
-    match hosted {
-        Some(relay) => relay.joined().await,
-        None => std::future::pending().await,
-    }
-}
-
-#[cfg(not(feature = "relay"))]
-async fn stopped() {
-    std::future::pending().await
 }
 
 /// Send one thing, and say so in the log if it will not go.
