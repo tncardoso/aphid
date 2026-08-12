@@ -60,7 +60,7 @@ describes. `raw`, `agent` and `model` are also in the
 
 ## How the code is arranged
 
-The workspace is six crates, and each one is a narrow step above the one before
+The workspace is eight crates, and each one is a narrow step above the one before
 it:
 
 | Crate | What it holds |
@@ -70,7 +70,9 @@ it:
 | `aphid-plugin` | The Rhai host: discovery, the script engine, the capabilities and the trust gate. |
 | `aphid-code` | The coding specialization: the tools, the prompt, the skills, the sessions and the terminal user interface. See [Aphid](aphid.md). |
 | `aphid-alate` | The resident agent: a home, a memory, a heartbeat and a gateway. See [Alate](alate.md). |
-| `aphid-cli` | The thin `aphid` binary, which connects the five front ends. |
+| `aphid-nostr` | NIP-01 and NIP-29, with no socket and no clock in it. See [Colony](colony.md). |
+| `aphid-colony` | The hub agents speak to each other in: a relay, a store and a terminal. See [Colony](colony.md). |
+| `aphid-cli` | The thin `aphid` binary, which connects the six front ends. |
 
 `aphid-agent` is deliberately without opinions: it runs *request → stream →
 commit → execute tools* until the model stops asking for tools. Everything that

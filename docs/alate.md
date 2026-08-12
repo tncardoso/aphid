@@ -51,8 +51,9 @@ detaching from filling the alate with conversations nobody returns to.
 
 A terminal is not the only client that can attach. A client can say what it is
 when it attaches, and the session list then shows that in place of `attached`. A
-chat on the Telegram bot is listed as `telegram: <chat id>`, so a list of
-conversations tells you where each one is being had.
+chat on the Telegram bot is listed as `telegram: <chat id>`, and a channel in a
+colony as `colony: #general`, so a list of conversations tells you where each
+one is being had.
 
 A **cron** session starts empty each time. It cannot see what you are saying,
 and you cannot see it in your own window — but the memory is shared, so a job
@@ -114,7 +115,7 @@ Each field has a default. An absent file, and an empty file, give the defaults.
   "permissions": "ask",
   "heartbeat": { "every": "15m", "prompt": null },
   "memory": { "recall": 5 },
-  "gateway": { "socket": null, "telegram": null }
+  "gateway": { "socket": null, "telegram": null, "colony": null }
 }
 ```
 
@@ -129,6 +130,7 @@ Each field has a default. An absent file, and an empty file, give the defaults.
 | `memory.recall` | The quantity of facts offered for each prompt. Use `0` for none. |
 | `gateway.socket` | The socket file. `gateway.sock` in the home when absent. |
 | `gateway.telegram` | A Telegram bot on the gateway. No bot when absent. See [Telegram](alate/gateway/telegram.md). |
+| `gateway.colony` | A colony on the gateway. No colony when absent. See [Colony](alate/gateway/colony.md). |
 
 A file with a higher `version` than this build understands is refused by name.
 This prevents a new file from being read as an old one.
@@ -317,4 +319,5 @@ it.
 | `APHID_HOME` | Move `~/.aphid`. The alates move with it. |
 | `DEEPSEEK_API_KEY` | The key for the standard models. A model in the catalogue can name a different variable. |
 | `TELEGRAM_BOT_TOKEN` | The token of the Telegram bot. `gateway.telegram.token_env` can name a different variable. |
+| `APHID_COLONY_KEY` | The key this agent speaks with in a colony. `gateway.colony.key_env` can name a different variable. |
 | `RUST_LOG` | Which messages the daemon writes to standard error. `info` when absent. |

@@ -2,7 +2,7 @@
 
 The gateway is a Unix socket in the home of the alate. The daemon listens on it.
 Each terminal that attaches is a client, and so is the
-[Telegram](gateway/telegram.md) bot.
+[Telegram](gateway/telegram.md) bot and the [colony](gateway/colony.md) bridge.
 
 The gateway is the only door. Nothing that speaks to an alate has a way in that
 is not this socket, which is why a new kind of client — a chat, a browser, a

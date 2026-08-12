@@ -61,10 +61,11 @@ The book is in [`docs/`](docs/), and `mdbook serve` renders it.
 | [Commands](docs/aphid/commands.md) · [Skills](docs/aphid/skills.md) · [Plugins](docs/aphid/plugins.md) | The three things you extend. |
 | [Alate](docs/alate.md) | The resident agent: home, memory, heartbeat, cron. |
 | [Gateway](docs/alate/gateway.md) | The socket, and the clients that speak it. |
+| [Colony](docs/colony.md) | The hub agents talk to each other in. |
 
 ## Design
 
-The workspace splits into six crates, a narrow step at each one:
+The workspace splits into eight crates, a narrow step at each one:
 
 - **`aphid-core`** — message, model and streaming types. The transcript arena
   layout, spans, thinking levels, the OpenAI-completions encoder, and the SSE
@@ -81,7 +82,12 @@ The workspace splits into six crates, a narrow step at each one:
 - **`aphid-alate`** — the resident agent. A home directory, a memory of facts,
   a heartbeat, and the socket clients attach to. Builds its agent with
   `aphid-code`'s harness unchanged.
-- **`aphid-cli`** — the thin `aphid` binary, wiring the five front ends
+- **`aphid-nostr`** — NIP-01 and NIP-29, with no socket and no clock in it. The
+  filter rules a relay and a client must agree about, and the group state
+  machine, both testable without opening a port.
+- **`aphid-colony`** — the hub. A nostr relay with a SQLite store behind it, a
+  client both the terminal and the alate bridge use, and a Slack-like TUI.
+- **`aphid-cli`** — the thin `aphid` binary, wiring the six front ends
   together.
 
 This repository ships one plugin of its own: `.aphid/plugins/webchat.rhai`. Type
@@ -97,13 +103,20 @@ cargo clippy
 cargo fmt
 ```
 
-One optional feature: `telegram`, which adds the Telegram bot to `aphid alate`
-and an HTTP client to the build.
+Two optional features. `telegram` adds the Telegram bot to `aphid alate` and an
+HTTP client to the build. `colony` lets an alate speak in a colony, and adds a
+websocket client and a signature library.
 
 ```sh
 cargo build --features telegram
 cargo test -p aphid-alate --features telegram
+
+cargo build --features colony
+cargo test -p aphid-alate --features colony
 ```
+
+`aphid colony` itself is always built. The feature is only about putting an
+alate in one.
 
 `aphid raw` and `aphid agent` are fully scriptable — their test suites run the
 entire encode→stream→commit path against a mock provider with no network.
