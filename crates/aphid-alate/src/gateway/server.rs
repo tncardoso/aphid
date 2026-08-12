@@ -141,6 +141,8 @@ impl Server {
 
         tokio::spawn(accept(listener, shared.clone(), events));
 
+        tracing::info!(socket = %socket.display(), "gateway socket bound");
+
         Ok((
             Self {
                 socket: socket.to_path_buf(),
@@ -240,10 +242,13 @@ impl Shared {
             && let Some(file) = log.as_mut()
             && let Ok(line) = serde_json::to_string(&envelope)
         {
-            // A log that cannot be written is not worth ending a session over,
-            // and there is nowhere to report it: the terminal belongs to a
-            // client that may not be attached.
-            let _ = writeln!(file, "{line}");
+            // A log that cannot be written is not worth ending a session over:
+            // the terminal it would be reported to may not be attached. It
+            // still goes to `tracing`, which is read by whoever runs the
+            // daemon rather than whoever is attached to it.
+            if let Err(error) = writeln!(file, "{line}") {
+                tracing::error!(%error, "could not write to alate.log");
+            }
         }
 
         let _ = self.envelopes.send(envelope);

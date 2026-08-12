@@ -76,6 +76,15 @@ struct Alate {
 /// cannot be bound — which usually means this instance is already running — or
 /// the resident session cannot be opened.
 pub async fn run(options: Options) -> Result<(), String> {
+    // Ignored: a test that runs more than one alate in the same process calls
+    // this more than once, and a second `set_global_default` must not panic.
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .try_init();
+
     let Options {
         home,
         config,
@@ -202,6 +211,7 @@ pub async fn run(options: Options) -> Result<(), String> {
         .map(ToString::to_string)
         .chain(crontab_problems)
     {
+        tracing::warn!(problem = %problem, "startup problem");
         alate
             .server
             .send(Envelope::daemon(Frame::Notice { text: problem }));
@@ -214,6 +224,7 @@ pub async fn run(options: Options) -> Result<(), String> {
         "aphid: {name} is awake in {}\naphid: attach with `aphid alate attach --name {name}`",
         alate.home.root().display()
     );
+    tracing::info!(name = %name, home = %alate.home.root().display(), "daemon awake");
 
     // A second client on the same socket, when one is asked for. It is started
     // here because here is where the socket is bound; the loop below neither
@@ -222,6 +233,7 @@ pub async fn run(options: Options) -> Result<(), String> {
     let telegram = telegram_bridge(&config, &socket, &alate.server);
     #[cfg(not(feature = "telegram"))]
     if config.gateway.telegram.is_some() {
+        tracing::warn!("telegram configured but this build has no telegram feature");
         alate.server.send(Envelope::daemon(Frame::Notice {
             text: "gateway.telegram is set, but this build has no Telegram in it; \
                    build with `--features telegram`"
@@ -249,6 +261,7 @@ impl Alate {
     /// Tell everybody a session started.
     fn opened(&self, id: &str) {
         if let Some(session) = self.sessions.get(id) {
+            tracing::info!(session = %id, kind = %session.kind.label(), "session opened");
             self.server.send(Envelope::daemon(Frame::SessionOpened {
                 info: session.info(),
             }));
@@ -261,6 +274,7 @@ impl Alate {
             return;
         };
         session.enqueue(text.clone());
+        tracing::info!(session = %id, channel = %session.kind.label(), "message enqueued");
         self.server.send(Envelope::from(id, Frame::Prompt { text }));
     }
 
@@ -288,6 +302,7 @@ impl Alate {
 
     fn close(&mut self, id: &str) {
         if self.sessions.close(id).is_some() {
+            tracing::info!(session = %id, "session closed");
             self.server
                 .send(Envelope::daemon(Frame::SessionClosed { id: id.to_owned() }));
         }
@@ -366,6 +381,7 @@ async fn drive(alate: &mut Alate, mut events: UnboundedReceiver<Event>) {
         tokio::select! {
             (id, outcome) = alate.sessions.finished() => {
                 if outcome.is_none() {
+                    tracing::error!(session = %id, "session panicked");
                     alate.server.send(Envelope::daemon(Frame::Notice {
                         text: format!("the run in session {id} panicked; the session is closed"),
                     }));
@@ -414,6 +430,7 @@ fn handle(alate: &mut Alate, event: Event) {
             // are not typing into one transcript. It is named after whatever
             // the client said it was, so a listing tells a terminal from a chat.
             let channel = alate.server.channel(connection);
+            tracing::info!(connection, channel = ?channel, "client connected");
             let Some(id) = alate.open(Kind::Attached {
                 connection,
                 channel,
@@ -437,6 +454,7 @@ fn handle(alate: &mut Alate, event: Event) {
             );
         }
         Event::Closed { connection } => {
+            tracing::info!(connection, "client disconnected");
             for id in alate.sessions.owned_by(connection) {
                 alate.close(&id);
             }
@@ -625,6 +643,7 @@ fn telegram_bridge(
     let poll = match wanted.interval() {
         Ok(poll) => poll,
         Err(why) => {
+            tracing::error!(%why, "telegram: bad poll interval");
             notices.send(Frame::Notice {
                 text: format!("telegram: {why}"),
             });
@@ -635,6 +654,7 @@ fn telegram_bridge(
     let token = match std::env::var(&wanted.token_env) {
         Ok(token) if !token.is_empty() => token,
         _ => {
+            tracing::error!(env = %wanted.token_env, "telegram: bot token not set");
             notices.send(Frame::Notice {
                 text: format!(
                     "telegram: {} is not set, and the bot needs it",
@@ -652,6 +672,7 @@ fn telegram_bridge(
     ) {
         Ok(api) => api,
         Err(why) => {
+            tracing::error!(%why, "telegram: could not start api client");
             notices.send(Frame::Notice {
                 text: format!("telegram: {why}"),
             });
@@ -662,6 +683,7 @@ fn telegram_bridge(
     // Said out loud, because a bot that answers every chat with a refusal looks
     // broken and is only unconfigured.
     if wanted.chats.is_empty() {
+        tracing::warn!("telegram: chats allow-list is empty");
         notices.send(Frame::Notice {
             text: "telegram: gateway.telegram.chats is empty, so every chat is refused. \
                    A refused chat is told the id to add."
@@ -669,6 +691,7 @@ fn telegram_bridge(
         });
     }
 
+    tracing::info!("telegram bridge started");
     Some(crate::telegram::spawn(crate::telegram::Bridge {
         socket: socket.to_path_buf(),
         config: wanted.clone(),

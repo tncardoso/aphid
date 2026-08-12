@@ -29,6 +29,7 @@ pub(super) async fn open(chat: i64, shared: Shared) -> std::io::Result<Unbounded
     // Named, so `/sessions` says which chat a conversation belongs to rather
     // than showing several rows that all say the same word.
     let client = Client::connect_as(&shared.socket, Some(&format!("telegram: {chat}"))).await?;
+    tracing::info!(chat, "telegram: chat connected");
     let (sender, requests) = mpsc::unbounded_channel();
     tokio::spawn(serve(
         Chat {
@@ -221,6 +222,7 @@ impl Chat {
         if self.told.as_ref() == Some(&error) {
             return;
         }
+        tracing::error!(chat = self.id, %error, "telegram: turn failed");
         self.say(&format!("error: {error}")).await;
         self.told = Some(error);
     }

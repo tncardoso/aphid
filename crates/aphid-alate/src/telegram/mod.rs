@@ -94,6 +94,7 @@ async fn run(bridge: Bridge) {
     let seconds = match config.interval() {
         Ok(poll) => poll.as_secs(),
         Err(why) => {
+            tracing::error!(%why, "telegram: bad poll interval");
             notices.send(Frame::Notice {
                 text: format!("telegram: {why}"),
             });
@@ -125,6 +126,7 @@ async fn run(bridge: Bridge) {
         let updates = match asked {
             Ok(updates) => {
                 if failures > 0 {
+                    tracing::info!("telegram: reachable again");
                     notices.send(Frame::Notice {
                         text: "telegram: reachable again".to_owned(),
                     });
@@ -137,6 +139,7 @@ async fn run(bridge: Bridge) {
                 // network would otherwise write one line for every wait, and
                 // bury whatever else the log had to say.
                 if failures == 0 {
+                    tracing::warn!(%why, "telegram: getUpdates failed");
                     notices.send(Frame::Notice {
                         text: format!("telegram: {why}"),
                     });
@@ -202,9 +205,16 @@ async fn handle(
 
         match command(text) {
             Command::Help => say(shared, chat, HELP).await,
-            Command::New => to(chat, Request::New, state, shared, notices).await,
-            Command::Cancel => to(chat, Request::Cancel, state, shared, notices).await,
+            Command::New => {
+                tracing::info!(chat, "telegram: /new");
+                to(chat, Request::New, state, shared, notices).await;
+            }
+            Command::Cancel => {
+                tracing::info!(chat, "telegram: /cancel");
+                to(chat, Request::Cancel, state, shared, notices).await;
+            }
             Command::Say(text) => {
+                tracing::info!(chat, "telegram: message");
                 to(chat, Request::Prompt { text }, state, shared, notices).await;
             }
         }
@@ -294,6 +304,7 @@ async fn to(chat: i64, request: Request, state: &mut State, shared: &Shared, not
                 sender
             }
             Err(error) => {
+                tracing::error!(chat, %error, "telegram: chat could not attach");
                 notices.send(Frame::Notice {
                     text: format!("telegram: chat {chat} could not attach: {error}"),
                 });
@@ -311,6 +322,7 @@ async fn refuse(chat: i64, state: &mut State, shared: &Shared) {
     if !state.refused.insert(chat) {
         return;
     }
+    tracing::warn!(chat, "telegram: chat not on allow-list, refused");
     say(
         shared,
         chat,
