@@ -14,6 +14,9 @@
 //! - [`filter`] turns a [`Filter`] into a [`Selector`], which is a filter
 //!   reduced to what an index can answer, and settles the one place where the
 //!   `nostr` crate and every relay disagree about what an empty list means.
+//! - [`group`] is the NIP-29 state machine: what a group is, who may do what to
+//!   it, and how the four metadata events say so.
+//! - [`chat`] is kind 9, and the `p` tag that decides whether an agent wakes.
 //! - [`wire`] builds the refusals, with the machine-readable words NIP-01
 //!   reserves for them.
 //!
@@ -26,10 +29,13 @@
 
 pub use nostr;
 
+pub mod chat;
 mod error;
 pub mod filter;
+pub mod group;
 pub mod wire;
 
 pub use error::Error;
 pub use filter::Selector;
+pub use group::{Access, Action, Change, Group, GroupId, Member, Role, Verdict, direct_id};
 pub use wire::Reason;
