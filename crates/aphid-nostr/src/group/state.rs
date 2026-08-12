@@ -440,7 +440,7 @@ impl Group {
         };
 
         if change.any() {
-            self.changed_at = at;
+            self.changed_at = next(self.changed_at, at);
         }
         Ok(change)
     }
@@ -474,6 +474,23 @@ impl Group {
             "a direct message has two members and always will".to_owned(),
         )
     }
+}
+
+/// When a group that changed at `last` and has just changed again says it did.
+///
+/// Strictly later than `last`, always, and that is not fussiness. The metadata
+/// events carry `changed_at` as their `created_at`, and NIP-01 breaks a tie
+/// between two versions of one addressable event on the **lower id** — so two
+/// changes in the same second would leave the relay re-signing a new membership
+/// list that the store then refuses in favour of the old one, roughly half the
+/// time. A group made and joined within a second is not a rare case; it is what
+/// a fresh colony does.
+///
+/// The clock is followed whenever it has moved. When it has not, the group
+/// counts. That keeps the metadata a function of the group alone, which is what
+/// lets a restart re-sign it and store nothing.
+fn next(last: Timestamp, at: Timestamp) -> Timestamp {
+    Timestamp::from_secs(at.as_secs().max(last.as_secs().saturating_add(1)))
 }
 
 /// Whether this kind is one the relay reads as a change to a group rather than

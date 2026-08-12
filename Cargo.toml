@@ -24,6 +24,9 @@ compact_str = { version = "0.9", features = ["serde"] }
 croner = "3"
 bytes = "1"
 futures-core = "0.3"
+# `StreamExt::split` and `SinkExt::send`, which is all a websocket needs of it.
+# It is already in the tree under tokio-tungstenite.
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 # Default features are `std` alone. NIP-04, NIP-44 and NIP-59 are opt-in there
 # and stay off: a colony is cleartext, and every one of them costs a cipher.
 # `os-rng` is what `Keys::generate` needs.

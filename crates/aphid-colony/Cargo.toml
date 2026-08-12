@@ -7,10 +7,13 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["relay", "tui"]
-# The relay half: the SQLite store and the websocket server. Off in an alate,
-# which wants the client and nothing else.
-relay = ["dep:rusqlite"]
+default = ["client", "relay", "tui"]
+# The client half: a websocket and nothing else. This is what an alate wants,
+# and it is why `default-features = false` is worth writing there.
+client = ["dep:tokio-tungstenite", "dep:futures-util"]
+# The relay half: the SQLite store and the websocket server, on top of the
+# client, which the relay's own tests drive it with.
+relay = ["client", "dep:rusqlite"]
 # The terminal half.
 tui = ["dep:ratatui", "dep:ratatui-textarea", "dep:aphid-code"]
 
@@ -18,6 +21,7 @@ tui = ["dep:ratatui", "dep:ratatui-textarea", "dep:aphid-code"]
 aphid-code = { path = "../aphid-code", optional = true }
 aphid-core = { path = "../aphid-core" }
 aphid-nostr = { path = "../aphid-nostr" }
+futures-util = { workspace = true, optional = true }
 ratatui = { workspace = true, optional = true }
 ratatui-textarea = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
@@ -25,6 +29,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "sync"] }
+tokio-tungstenite = { workspace = true, optional = true }
 
 [lints]
 workspace = true

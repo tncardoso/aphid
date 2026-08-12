@@ -225,6 +225,43 @@ fn a_member_may_always_leave() {
 }
 
 #[test]
+fn two_changes_in_one_second_are_still_two_changes() {
+    // The metadata events carry `changed_at` as their `created_at`, and NIP-01
+    // breaks a tie between two versions of one addressable event on the lower
+    // id. So a second change within the same second must still say a later
+    // time, or the relay re-signs a membership list the store then refuses in
+    // favour of the one before it.
+    let owner = Keys::generate();
+    let first = Keys::generate();
+    let second = Keys::generate();
+    let mut group = Group::create(id("general"), owner.public_key(), at(1_000));
+
+    let join = |keys: &Keys| {
+        EventBuilder::new(Kind::GroupJoinRequest, "")
+            .tags([chat::h(&GroupId::parse("general").expect("an id"))])
+            .custom_created_at(at(1_000))
+            .finalize(keys)
+            .expect("signs")
+    };
+
+    let was = group.changed_at;
+    apply(&mut group, &join(&first)).expect("joins");
+    assert!(
+        group.changed_at > was,
+        "the first change moved the clock on"
+    );
+
+    let was = group.changed_at;
+    apply(&mut group, &join(&second)).expect("joins");
+    assert!(group.changed_at > was, "and so did the second");
+
+    // A change that moves nothing leaves it alone.
+    let was = group.changed_at;
+    apply(&mut group, &join(&first)).expect("joining twice is quiet");
+    assert_eq!(group.changed_at, was);
+}
+
+#[test]
 fn a_direct_id_is_the_same_from_both_sides() {
     let a = Keys::generate().public_key();
     let b = Keys::generate().public_key();

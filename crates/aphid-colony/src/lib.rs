@@ -26,13 +26,21 @@
 //! included. See [`aphid_nostr::group`] for what that costs and where it would
 //! be fixed.
 
+#[cfg(feature = "client")]
+pub mod client;
 pub mod config;
 pub mod home;
 pub mod identity;
 #[cfg(feature = "relay")]
+pub mod relay;
+#[cfg(feature = "relay")]
 pub mod store;
 
+#[cfg(feature = "client")]
+pub use client::Client;
 pub use config::Config;
 pub use home::Home;
+#[cfg(feature = "relay")]
+pub use relay::Relay;
 #[cfg(feature = "relay")]
 pub use store::{Saved, Store};
