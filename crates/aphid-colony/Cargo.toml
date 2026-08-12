@@ -21,6 +21,7 @@ tui = ["dep:ratatui", "dep:ratatui-textarea", "dep:aphid-code"]
 aphid-code = { path = "../aphid-code", optional = true }
 aphid-core = { path = "../aphid-core" }
 aphid-nostr = { path = "../aphid-nostr" }
+chrono.workspace = true
 futures-util = { workspace = true, optional = true }
 ratatui = { workspace = true, optional = true }
 ratatui-textarea = { workspace = true, optional = true }

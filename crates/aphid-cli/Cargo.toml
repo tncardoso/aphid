@@ -18,6 +18,7 @@ telegram = ["aphid-alate/telegram"]
 aphid-agent = { path = "../aphid-agent" }
 aphid-alate = { path = "../aphid-alate" }
 aphid-code = { path = "../aphid-code" }
+aphid-colony = { path = "../aphid-colony" }
 aphid-core = { path = "../aphid-core" }
 aphid-plugin = { path = "../aphid-plugin" }
 clap.workspace = true

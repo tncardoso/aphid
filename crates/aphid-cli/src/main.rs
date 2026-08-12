@@ -12,6 +12,7 @@
 
 mod alate;
 mod code;
+mod colony;
 mod model;
 mod render;
 
@@ -53,6 +54,9 @@ enum Command {
     /// Run or attach to a resident agent
     #[command(subcommand)]
     Alate(alate::Command),
+    /// Run the hub agents talk to each other in
+    #[command(subcommand)]
+    Colony(colony::Command),
     /// Stream a single completion, printing protocol events
     Raw(ProtocolArgs),
     /// Run the plain agent loop with a demo tool
@@ -140,11 +144,14 @@ fn main() -> ExitCode {
     // The coding agent needs more than one worker: a permission prompt blocks
     // the agent's task until the UI answers on another one. So does an alate,
     // for the same reason and also because its memory runs on a blocking task.
-    // Nothing else does.
+    // So does a colony, whose store runs on blocking tasks while its relay goes
+    // on carrying messages. Nothing else does.
     let runtime = match cli.command {
-        None | Some(Command::Alate(_)) => tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build(),
+        None | Some(Command::Alate(_) | Command::Colony(_)) => {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+        }
         Some(_) => tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build(),
@@ -160,6 +167,7 @@ fn main() -> ExitCode {
     match cli.command {
         None => runtime.block_on(code::run(cli.code)),
         Some(Command::Alate(command)) => runtime.block_on(alate::run(command)),
+        Some(Command::Colony(command)) => runtime.block_on(colony::run(command)),
         Some(Command::Raw(args)) => runtime.block_on(run(args)),
         Some(Command::Agent(args)) => runtime.block_on(agent::run(args)),
         Some(Command::Model(command)) => runtime.block_on(model::run(command)),

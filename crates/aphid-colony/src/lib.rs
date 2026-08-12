@@ -35,6 +35,8 @@ pub mod identity;
 pub mod relay;
 #[cfg(feature = "relay")]
 pub mod store;
+#[cfg(feature = "tui")]
+pub mod tui;
 
 #[cfg(feature = "client")]
 pub use client::Client;
