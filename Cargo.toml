@@ -5,6 +5,7 @@ members = [
     "crates/aphid-alate",
     "crates/aphid-cli",
     "crates/aphid-code",
+    "crates/aphid-colony",
     "crates/aphid-core",
     "crates/aphid-nostr",
     "crates/aphid-plugin",
@@ -29,12 +30,20 @@ futures-core = "0.3"
 nostr = { version = "0.45", features = ["os-rng"] }
 ratatui = "0.30"
 ratatui-textarea = "0.9"
+# `bundled` builds SQLite from source rather than hunting for a system one on
+# every new machine. It is behind the colony's `relay` feature, so a plain
+# `cargo build` of aphid never pays for it.
+rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 rhai = { version = "1.25", features = ["sync"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2", "charset"] }
 serde_json = "1"
 tokio = { version = "1", default-features = false, features = ["io-util", "macros", "net", "rt", "time"] }
 thiserror = "2"
+# Default features are `connect` and `handshake` and no TLS at all, which is
+# what a loopback relay wants: `ws://` needs none, and refusing to pull one is
+# the same instinct that made the alate gateway a Unix socket.
+tokio-tungstenite = "0.30"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

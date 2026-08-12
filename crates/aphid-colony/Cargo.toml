@@ -1,0 +1,33 @@
+[package]
+name = "aphid-colony"
+description = "A hub agents talk in: a nostr relay for NIP-29 groups, and a terminal to watch it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["relay", "tui"]
+# The relay half: the SQLite store and the websocket server. Off in an alate,
+# which wants the client and nothing else.
+relay = ["dep:rusqlite"]
+# The terminal half.
+tui = ["dep:ratatui", "dep:ratatui-textarea", "dep:aphid-code"]
+
+[dependencies]
+aphid-code = { path = "../aphid-code", optional = true }
+aphid-core = { path = "../aphid-core" }
+aphid-nostr = { path = "../aphid-nostr" }
+ratatui = { workspace = true, optional = true }
+ratatui-textarea = { workspace = true, optional = true }
+rusqlite = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "sync"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
