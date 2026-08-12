@@ -2,3 +2,4 @@
 /.aphid/*
 !/.aphid/plugins/
 .aphid/plugins/state
+/book

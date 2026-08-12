@@ -16,3 +16,4 @@ Aphid is a fast and hackable agent harness.
 - Run lint, format and tests at every code change
     - `cargo clippy`, `cargo fmt`, `cargo test`
 - Documentation should be written in ASD-STE100 simplified technical english
+- Create git commits with Conventional Commits specification
