@@ -16,7 +16,12 @@ pub struct Temp {
 impl Temp {
     pub fn new(label: &str) -> Self {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
+        // `/tmp` and not `std::env::temp_dir()`: on macOS `$TMPDIR` is a long
+        // per-process path under `/private/var/folders/...`, which alone can
+        // exceed the socket path a Unix domain socket allows. `/tmp` is short
+        // on every platform this crate runs on, which is Unix-only already —
+        // it binds a `UnixListener`.
+        let root = PathBuf::from("/tmp").join(format!(
             "aphid-alate-{label}-{}-{}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
