@@ -9,7 +9,11 @@
  * far from where it ought to be, it picks itself up and swings to a new hold
  * ahead of the body. The walk cycle is a side effect of that rule.
  *
- * Step 1: simulation + wireframe debug render. No final art yet.
+ * Rendering is pixel art: the simulated skeleton is drawn at full precision
+ * into a small offscreen buffer, then blitted back up with nearest-neighbor
+ * scaling, so a fully continuous, smoothly rotating body still reads as
+ * chunky and hand-placed like the mascot art it's based on. Press 'd' (or
+ * load with ?aphid=debug) for a wireframe overlay of the underlying physics.
  */
 (function () {
   'use strict';
@@ -128,9 +132,24 @@
     // leg never detaches from its foothold.
     footTetherLimit: 0.92,
 
+    // --- antennae ---
+    // Purely cosmetic — no constraint, no gait interaction. Drawn as a bowed
+    // curve from the head with a slow idle sway so the head doesn't read as
+    // static even at a full stop.
+    antennaLength: 34,
+    antennaSpread: 15,
+    antennaSway: 5, // px of extra spread added by the idle sine
+    antennaSwayPeriod: 1400, // ms per sway cycle
+
     // --- render ---
-    debug: true,
-    footDotRad: 2.5
+    debug: false,
+    footDotRad: 2.5,
+    // World px per art "pixel". The creature is rendered at full precision
+    // into a low-res offscreen buffer and blitted back up with nearest-
+    // neighbor scaling, which is what gives it the same chunky, hard-edged
+    // look as the reference mascot art regardless of the smooth curves and
+    // continuous rotation driving it underneath.
+    pixelUnit: 4
   };
 
   // Bail out before touching anything if the environment says no.
@@ -686,6 +705,19 @@
     lavender: '#9d8fc9'
   };
 
+  // Sampled directly off site/themes/aphid/assets/images/aphid-mascot.png so
+  // the crawler reads as the same creature, not just a same-colored one. Not
+  // theme tokens: the mascot art doesn't move with --moss et al., so neither
+  // does this.
+  var ART = {
+    body: '#7ba337',
+    bodyShadow: '#5d7d25',
+    bodyHighlight: '#94b860',
+    leg: '#848825',
+    legDark: '#616416',
+    eye: '#100c03'
+  };
+
   function readThemeColors() {
     var cs = getComputedStyle(document.documentElement);
     var map = { ink: '--ink', moss: '--moss', blossom: '--blossom', lavender: '--lavender' };
@@ -700,8 +732,173 @@
     ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
   }
 
+  // Both antennae are purely cosmetic (see CONFIG) and share one shape: a
+  // bowed curve off the head that tapers back in toward the tip, plus a slow
+  // sideways sway so the head has some life in it even at a full stop.
+  function antennaPoints(side, now) {
+    var fwd = v(Math.cos(bodyAngle), Math.sin(bodyAngle));
+    var right = perp(fwd);
+    var head = body.head;
+    var sway = Math.sin(now / CONFIG.antennaSwayPeriod + side * 1.3) * CONFIG.antennaSway;
+    var spread = CONFIG.antennaSpread + sway;
+
+    var base = v(
+      head.pos.x + right.x * side * head.rad * 0.5 - fwd.x * head.rad * 0.2,
+      head.pos.y + right.y * side * head.rad * 0.5 - fwd.y * head.rad * 0.2
+    );
+    var ctrl = v(
+      base.x + fwd.x * CONFIG.antennaLength * 0.5 + right.x * side * spread,
+      base.y + fwd.y * CONFIG.antennaLength * 0.5 + right.y * side * spread
+    );
+    var tip = v(
+      base.x + fwd.x * CONFIG.antennaLength + right.x * side * spread * 0.4,
+      base.y + fwd.y * CONFIG.antennaLength + right.y * side * spread * 0.4
+    );
+    return { base: base, ctrl: ctrl, tip: tip };
+  }
+
+  function drawAntennaeArt(c, now) {
+    c.strokeStyle = ART.leg;
+    c.lineWidth = 3;
+    [-1, 1].forEach(function (side) {
+      var a = antennaPoints(side, now);
+      c.beginPath();
+      c.moveTo(a.base.x, a.base.y);
+      c.quadraticCurveTo(a.ctrl.x, a.ctrl.y, a.tip.x, a.tip.y);
+      c.stroke();
+      c.fillStyle = ART.legDark;
+      circle(c, a.tip, 2);
+      c.fill();
+    });
+  }
+
+  function drawLegsArt(c) {
+    for (var i = 0; i < legs.length; i++) {
+      var leg = legs[i];
+      var foot = clampedFoot(leg);
+      var knee = solveIK(leg.hip, foot, CONFIG.femur, CONFIG.tibia, leg.side * CONFIG.kneeBend);
+
+      c.strokeStyle = ART.leg;
+      c.lineWidth = 5;
+      c.beginPath();
+      c.moveTo(leg.hip.x, leg.hip.y);
+      c.lineTo(knee.x, knee.y);
+      c.stroke();
+
+      c.strokeStyle = ART.legDark;
+      c.lineWidth = 3.5;
+      c.beginPath();
+      c.moveTo(knee.x, knee.y);
+      c.lineTo(foot.x, foot.y);
+      c.stroke();
+
+      c.fillStyle = ART.legDark;
+      circle(c, foot, CONFIG.footDotRad + 1);
+      c.fill();
+    }
+  }
+
+  // Three overlapping circles filled as one path, which is what gives the
+  // body one continuous blobby silhouette instead of three visible discs.
+  // Shadow and highlight are the same union offset and resized, not a
+  // gradient — a gradient survives the pixelation pass as a blur, a flat
+  // offset shape survives it as a hard-edged band like the reference art.
+  function drawBodyArt(c) {
+    var chunks = body.chunks;
+    var shadow = 3;
+
+    c.fillStyle = ART.bodyShadow;
+    c.beginPath();
+    for (var i = 0; i < chunks.length; i++) {
+      var s = chunks[i];
+      c.moveTo(s.pos.x + shadow + s.rad, s.pos.y + shadow);
+      c.arc(s.pos.x + shadow, s.pos.y + shadow, s.rad, 0, Math.PI * 2);
+    }
+    c.fill();
+
+    c.fillStyle = ART.body;
+    c.beginPath();
+    for (var j = 0; j < chunks.length; j++) {
+      var b = chunks[j];
+      c.moveTo(b.pos.x + b.rad, b.pos.y);
+      c.arc(b.pos.x, b.pos.y, b.rad, 0, Math.PI * 2);
+    }
+    c.fill();
+
+    c.fillStyle = ART.bodyHighlight;
+    c.globalAlpha = 0.55;
+    circle(c, v(body.torso.pos.x - shadow, body.torso.pos.y - shadow * 1.5), body.torso.rad * 0.5);
+    c.fill();
+    c.globalAlpha = 1;
+  }
+
+  function drawEyesArt(c) {
+    var fwd = v(Math.cos(bodyAngle), Math.sin(bodyAngle));
+    var right = perp(fwd);
+    var head = body.head;
+    [-1, 1].forEach(function (side) {
+      var p = v(
+        head.pos.x + fwd.x * head.rad * 0.35 + right.x * side * head.rad * 0.55,
+        head.pos.y + fwd.y * head.rad * 0.35 + right.y * side * head.rad * 0.55
+      );
+      c.fillStyle = ART.eye;
+      circle(c, p, 1.6);
+      c.fill();
+    });
+  }
+
+  // Bounding box (world px) covering everything the art pass draws, with
+  // enough margin for the antennae's full reach. Recomputed every frame since
+  // the skeleton is constantly moving — cheap, it's a handful of points.
+  function artBounds() {
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    function grow(p, r) {
+      if (p.x - r < minX) minX = p.x - r;
+      if (p.x + r > maxX) maxX = p.x + r;
+      if (p.y - r < minY) minY = p.y - r;
+      if (p.y + r > maxY) maxY = p.y + r;
+    }
+    for (var i = 0; i < body.chunks.length; i++) grow(body.chunks[i].pos, body.chunks[i].rad);
+    for (var j = 0; j < legs.length; j++) {
+      grow(legs[j].hip, 3);
+      grow(clampedFoot(legs[j]), 4);
+    }
+    var margin = CONFIG.antennaLength + CONFIG.antennaSpread + 6;
+    return { minX: minX - margin, minY: minY - margin, maxX: maxX + margin, maxY: maxY + margin };
+  }
+
+  var artBuf = document.createElement('canvas');
+  var artCtx = artBuf.getContext('2d');
+
+  function drawArt(ctx, now) {
+    var b = artBounds();
+    var unit = CONFIG.pixelUnit;
+    var bw = Math.max(1, Math.ceil((b.maxX - b.minX) / unit));
+    var bh = Math.max(1, Math.ceil((b.maxY - b.minY) / unit));
+    if (artBuf.width !== bw) artBuf.width = bw;
+    if (artBuf.height !== bh) artBuf.height = bh;
+
+    artCtx.clearRect(0, 0, bw, bh);
+    artCtx.save();
+    artCtx.scale(1 / unit, 1 / unit);
+    artCtx.translate(-b.minX, -b.minY);
+    artCtx.lineJoin = 'round';
+    artCtx.lineCap = 'round';
+
+    drawAntennaeArt(artCtx, now);
+    drawLegsArt(artCtx);
+    drawBodyArt(artCtx);
+    drawEyesArt(artCtx);
+
+    artCtx.restore();
+
+    // Nearest-neighbor blit: this is what turns the smooth shapes above into
+    // hard pixel blocks.
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(artBuf, 0, 0, bw, bh, b.minX, b.minY, bw * unit, bh * unit);
+  }
+
   function drawDebug(ctx, fps) {
-    ctx.clearRect(0, 0, viewW, viewH);
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
 
@@ -859,7 +1056,6 @@
         var tag = t && t.tagName;
         if (tag === 'INPUT' || tag === 'TEXTAREA' || (t && t.isContentEditable)) return;
         CONFIG.debug = !CONFIG.debug;
-        if (!CONFIG.debug) ctx.clearRect(0, 0, viewW, viewH);
       }
     });
 
@@ -898,6 +1094,8 @@
         steps++;
       }
 
+      ctx.clearRect(0, 0, viewW, viewH);
+      drawArt(ctx, now);
       if (CONFIG.debug) drawDebug(ctx, fps);
       requestAnimationFrame(frame);
     }
