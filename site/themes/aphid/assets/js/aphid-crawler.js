@@ -23,7 +23,7 @@
     // --- body chunks: head, torso, abdomen ---
     chunks: [
       { name: 'head', rad: 9, mass: 0.6 },
-      { name: 'torso', rad: 13, mass: 1.0 },
+      { name: 'torso', rad: 18, mass: 1.0 },
       { name: 'abdomen', rad: 7, mass: 0.5 }
     ],
     restHeadTorso: 22,
@@ -80,7 +80,7 @@
     // Angle off straight-out-to-the-side, mirrored per side. Negative rakes a
     // leg forward, positive trails it back. Kept shallow so the legs open out
     // sideways instead of reaching past the front of the body.
-    splayDeg: [-34, 0, 34],
+    splayDeg: [-14, 20, 54],
     hipOffset: 7,
     reach: 24, // distance from hip to the resting foot position
     stepThreshold: 9, // stretch from the rest position that asks for a step
