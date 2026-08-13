@@ -1,0 +1,18 @@
+{{- /*
+  One href from the front matter, made ready for the baseURL of the site.
+
+  relURL adds the path of the baseURL to a relative address, and leaves an
+  address that starts with "/" as it is, so the first "/" comes off before the
+  call. The site is at the root of its domain today, and this keeps the links
+  correct if it moves under a path. An address of another site, and an anchor
+  on this page, are already what they must be.
+
+  The menu of the header does not come through here: Hugo adds the path to a
+  menu URL itself.
+*/ -}}
+{{- $url := . -}}
+{{- if or (strings.HasPrefix $url "http") (strings.HasPrefix $url "#") -}}
+{{- $url -}}
+{{- else -}}
+{{- relURL (strings.TrimPrefix "/" $url) -}}
+{{- end -}}

@@ -3,8 +3,14 @@ name = "aphid-alate"
 description = "A resident aphid agent: a home directory, a memory, a heartbeat and a gateway"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+include = ["/src", "/tests", "/Cargo.toml"]
 
 [features]
 # The Telegram bridge. Off by default: it pulls in a TLS stack, and it is of no
@@ -15,14 +21,16 @@ telegram = ["dep:reqwest"]
 colony = ["dep:aphid-colony", "dep:aphid-nostr"]
 
 [dependencies]
-aphid-agent = { path = "../aphid-agent" }
-aphid-code = { path = "../aphid-code" }
+aphid-agent.workspace = true
+aphid-code.workspace = true
 # `default-features = false` is what keeps rusqlite and ratatui out of an
-# alate: the bridge wants the client half of a colony and nothing else.
-aphid-colony = { path = "../aphid-colony", default-features = false, features = ["client"], optional = true }
-aphid-core = { path = "../aphid-core" }
-aphid-nostr = { path = "../aphid-nostr", optional = true }
-aphid-plugin = { path = "../aphid-plugin" }
+# alate: the bridge wants the client half of a colony and nothing else. Cargo
+# refuses to turn the default features off on an inherited dependency, so this
+# one names its version and its path here.
+aphid-colony = { version = "0.1.0", path = "../aphid-colony", default-features = false, features = ["client"], optional = true }
+aphid-core.workspace = true
+aphid-nostr = { workspace = true, optional = true }
+aphid-plugin.workspace = true
 chrono.workspace = true
 compact_str.workspace = true
 croner.workspace = true

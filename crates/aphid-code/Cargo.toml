@@ -3,13 +3,19 @@ name = "aphid-code"
 description = "A coding harness for the aphid agent: tools, project context, sessions and a terminal UI"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+include = ["/src", "/tests", "/Cargo.toml"]
 
 [dependencies]
-aphid-agent = { path = "../aphid-agent" }
-aphid-core = { path = "../aphid-core" }
-aphid-plugin = { path = "../aphid-plugin" }
+aphid-agent.workspace = true
+aphid-core.workspace = true
+aphid-plugin.workspace = true
 chrono.workspace = true
 compact_str.workspace = true
 ratatui.workspace = true

@@ -13,7 +13,23 @@ it for the first time.
 - A system with Unix sockets, if you want the resident agent. `aphid alate` does
   not work on Windows. The coding agent does.
 
-## Build and install
+## Install
+
+The installer gets the binary of the last release and puts it in
+`~/.local/bin`. It is the fastest way, because it compiles nothing:
+
+```console
+$ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/tncardoso/aphid/releases/latest/download/aphid-ai-installer.sh | sh
+```
+
+The releases hold binaries for Linux and macOS. On other systems, and on a
+different processor, cargo compiles it from the registry:
+
+```console
+$ cargo install aphid-ai
+```
+
+## Build from the source
 
 ```console
 $ git clone https://github.com/tncardoso/aphid

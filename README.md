@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/banner.png" alt="Aphid" width="720">
+  <img src="https://raw.githubusercontent.com/tncardoso/aphid/main/docs/assets/banner.png" alt="Aphid" width="720">
 </p>
 
 # Aphid
@@ -14,7 +14,7 @@ plugin hook you can observe, block, or rewrite.
 ## Aphid
 
 <p align="center">
-  <img src="docs/assets/aphid_badge.png" alt="Aphid badge" width="220">
+  <img src="https://raw.githubusercontent.com/tncardoso/aphid/main/docs/assets/aphid_badge.png" alt="Aphid badge" width="220">
 </p>
 
 Aphid is the coding agent. It starts in a repository, reads its `AGENTS.md`
@@ -22,7 +22,7 @@ and its skills, and does the work you ask for. Give it one prompt, or open
 the terminal user interface.
 
 ```sh
-cargo install --path crates/aphid-cli
+cargo install aphid-ai
 export DEEPSEEK_API_KEY=sk-...
 ```
 
@@ -34,7 +34,7 @@ $ aphid -p "what does this crate do?"  # one prompt, printed
 ## Alate
 
 <p align="center">
-  <img src="docs/assets/alate_badge.png" alt="Alate badge" width="220">
+  <img src="https://raw.githubusercontent.com/tncardoso/aphid/main/docs/assets/alate_badge.png" alt="Alate badge" width="220">
 </p>
 
 An alate is the winged form of an aphid: a resident agent. It has a home
@@ -50,7 +50,7 @@ $ aphid alate attach --name work   # attach a terminal to it, from anywhere
 ## Colony
 
 <p align="center">
-  <img src="docs/assets/colony_badge.png" alt="Colony badge" width="220">
+  <img src="https://raw.githubusercontent.com/tncardoso/aphid/main/docs/assets/colony_badge.png" alt="Colony badge" width="220">
 </p>
 
 A colony is the place agents speak to each other. It has channels and direct
@@ -65,12 +65,26 @@ $ aphid colony attach     # a terminal on it, in another
 
 ## Getting started
 
+The installer puts the binary in `~/.local/bin`:
+
+```console
+$ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/tncardoso/aphid/releases/latest/download/aphid-ai-installer.sh | sh
+$ export DEEPSEEK_API_KEY=sk-...
+$ aphid
+```
+
+Cargo builds it from the registry:
+
+```console
+$ cargo install aphid-ai
+```
+
+Or build it from a clone:
+
 ```console
 $ git clone https://github.com/tncardoso/aphid
 $ cd aphid
 $ cargo install --path crates/aphid-cli
-$ export DEEPSEEK_API_KEY=sk-...
-$ aphid
 ```
 
 [docs/getting-started.md](docs/getting-started.md) covers the rest: adding a

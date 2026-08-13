@@ -13,12 +13,10 @@ cta_secondary_href = "/docs/"
 
 [params.getting_started]
 title = "Getting Started"
-paragraph = "Clone the repository, install the CLI, and point it at a model. The full book covers the rest — a first alate, project instructions, and adding another provider."
+paragraph = "Install the CLI and point it at a model. The full book covers the rest — a first alate, project instructions, and adding another provider."
 terminal_title = "getting-started — sh"
 steps = [
-  "git clone https://github.com/tncardoso/aphid",
-  "cd aphid",
-  "cargo install --path crates/aphid-cli",
+  "curl -LsSf https://github.com/tncardoso/aphid/releases/latest/download/aphid-ai-installer.sh | sh",
   "export DEEPSEEK_API_KEY=sk-...",
   "aphid",
 ]

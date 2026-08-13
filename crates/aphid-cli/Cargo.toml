@@ -1,10 +1,18 @@
 [package]
-name = "aphid-cli"
-description = "Example driver that streams a DeepSeek completion and prints the events"
+# The name `aphid` on crates.io belongs to another crate. The binary that this
+# package installs is `aphid` still.
+name = "aphid-ai"
+description = "A fast and hackable agent harness: the aphid coding agent, the alate daemon and the colony hub"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+include = ["/src", "/Cargo.toml"]
 
 [[bin]]
 name = "aphid"
@@ -16,12 +24,12 @@ telegram = ["aphid-alate/telegram"]
 colony = ["aphid-alate/colony"]
 
 [dependencies]
-aphid-agent = { path = "../aphid-agent" }
-aphid-alate = { path = "../aphid-alate" }
-aphid-code = { path = "../aphid-code" }
-aphid-colony = { path = "../aphid-colony" }
-aphid-core = { path = "../aphid-core" }
-aphid-plugin = { path = "../aphid-plugin" }
+aphid-agent.workspace = true
+aphid-alate.workspace = true
+aphid-code.workspace = true
+aphid-colony.workspace = true
+aphid-core.workspace = true
+aphid-plugin.workspace = true
 clap.workspace = true
 futures-core.workspace = true
 serde_json.workspace = true

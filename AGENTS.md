@@ -19,3 +19,18 @@ Aphid is a fast and hackable agent harness.
 - Documentation should be written in ASD-STE100 simplified technical english
 - Keep documentation up to date with changes
 - Create git commits with Conventional Commits specification
+- Record each change a user sees in `CHANGELOG.md`, under `## [Unreleased]`
+    - Put the line in an `### Added`, `### Changed`, `### Fixed`,
+      `### Deprecated`, `### Removed` or `### Security` subsection
+    - The release notes are that text, so write for a user of aphid and not
+      for a reader of the code
+    - Do not write a version heading or a date. A release does that
+    - A change that only touches the build, the tests or the internals needs
+      no line
+
+## Releasing
+
+A tag starts the release: the CI builds the binaries, makes the GitHub release
+from the changelog, and sends the crates to crates.io. The steps are in
+`docs/releasing.md`. Do not edit `.github/workflows/release.yml`, because
+`dist generate` writes it from `dist-workspace.toml`.

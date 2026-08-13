@@ -119,6 +119,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "aphid-ai"
+version = "0.1.0"
+dependencies = [
+ "aphid-agent",
+ "aphid-alate",
+ "aphid-code",
+ "aphid-colony",
+ "aphid-core",
+ "aphid-plugin",
+ "clap",
+ "futures-core",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "aphid-alate"
 version = "0.1.0"
 dependencies = [
@@ -140,22 +156,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "aphid-cli"
-version = "0.1.0"
-dependencies = [
- "aphid-agent",
- "aphid-alate",
- "aphid-code",
- "aphid-colony",
- "aphid-core",
- "aphid-plugin",
- "clap",
- "futures-core",
- "serde_json",
- "tokio",
 ]
 
 [[package]]

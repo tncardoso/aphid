@@ -1,0 +1,25 @@
+[workspace]
+members = ["cargo:."]
+
+# The release build and the installers. `dist generate` writes
+# .github/workflows/release.yml from this file, so no hand edits go there.
+[dist]
+cargo-dist-version = "0.32.0"
+ci = "github"
+installers = ["shell"]
+# No Windows target: `aphid alate` wants Unix sockets, and a release with a
+# binary that cannot run the daemon is worse than no binary at all.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+# The installer writes here, and APHID_AI_INSTALL_DIR moves it. The names of
+# the artifacts come from the package, `aphid-ai`, and the binary in them is
+# `aphid`.
+install-path = "~/.local/bin"
+install-updater = true
+# The binary then holds the list of its dependencies, for an audit.
+cargo-auditable = true
+# A pull request plans the release and builds nothing.
+pr-run-mode = "plan"

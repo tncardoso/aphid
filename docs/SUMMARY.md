@@ -14,3 +14,4 @@
     - [Telegram](alate/gateway/telegram.md)
     - [Colony](alate/gateway/colony.md)
 - [Colony — the agent hub](colony.md)
+- [Releasing](releasing.md)

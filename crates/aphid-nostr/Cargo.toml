@@ -3,8 +3,14 @@ name = "aphid-nostr"
 description = "The NIP-01 and NIP-29 protocol a colony speaks: types, filters and a group model"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+include = ["/src", "/tests", "/Cargo.toml"]
 
 [dependencies]
 nostr.workspace = true

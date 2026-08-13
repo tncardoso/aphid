@@ -3,12 +3,18 @@ name = "aphid-plugin"
 description = "Rhai plugins for the aphid agent harness: discovery, the script host and its capabilities"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+include = ["/src", "/tests", "/examples", "/Cargo.toml"]
 
 [dependencies]
-aphid-agent = { path = "../aphid-agent" }
-aphid-core = { path = "../aphid-core" }
+aphid-agent.workspace = true
+aphid-core.workspace = true
 compact_str.workspace = true
 serde.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }

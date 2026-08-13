@@ -8,7 +8,7 @@
     its skills, and does the work you ask for. Give it one prompt, or
     open the terminal user interface.
   cli:
-    - "cargo install --path crates/aphid-cli"
+    - "cargo install aphid-ai"
     - "export DEEPSEEK_API_KEY=sk-..."
     - 'aphid -p "what does this crate do?"'
   terminal:

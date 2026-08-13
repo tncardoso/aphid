@@ -84,6 +84,9 @@
         containing block for this fixed-position bar and drag it along.
         Mirrors site/themes/aphid/layouts/partials/header.html; the hrefs
         differ because that one renders same-page anchors on the landing page.
+        They start at the root of the site, which is where baseURL in
+        site/hugo.toml puts it. A move to a path under a domain changes these,
+        site-url in book.toml, and that baseURL together.
     --}}
     <header class="nav">
         <a class="nav__logo" href="/"><span class="nav__logo-dot"></span>aphid</a>

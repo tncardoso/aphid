@@ -1,0 +1,61 @@
+name: Site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "site/**"
+      - "book-theme/**"
+      - "book.toml"
+      - "justfile"
+      - ".github/workflows/pages.yml"
+  # A site that must go out without a change to it starts from here.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time, and no cancel: a half-deployed site is worse than a
+# late one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: "0.5.4"
+
+      # The theme uses js.Build, image processing and fingerprinting, so the
+      # extended build is the only one that renders it.
+      - uses: peaceiris/actions-hugo@v3
+        with:
+          hugo-version: "0.164.0"
+          extended: true
+
+      - uses: extractions/setup-just@v3
+
+      # The same recipe that builds the site on a laptop: the book first, then
+      # Hugo over it.
+      - name: Build
+        run: just site
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/public
+
+      - uses: actions/deploy-pages@v4
+        id: deployment

@@ -3,8 +3,16 @@ name = "aphid-core"
 description = "Message, model and streaming types for the aphid agent harness"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+# A list of what goes in, and not of what stays out: a new file in the
+# directory then does not reach crates.io by accident.
+include = ["/src", "/tests", "/Cargo.toml"]
 
 [dependencies]
 bytes.workspace = true

@@ -3,8 +3,14 @@ name = "aphid-colony"
 description = "A hub agents talk in: a nostr relay for NIP-29 groups, and a terminal to watch it"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+include = ["/src", "/tests", "/Cargo.toml"]
 
 [features]
 default = ["client", "relay", "tui"]
@@ -19,9 +25,9 @@ relay = ["client", "dep:rusqlite", "dep:tracing", "dep:tracing-subscriber"]
 tui = ["client", "dep:ratatui", "dep:ratatui-textarea", "dep:aphid-code"]
 
 [dependencies]
-aphid-code = { path = "../aphid-code", optional = true }
-aphid-core = { path = "../aphid-core" }
-aphid-nostr = { path = "../aphid-nostr" }
+aphid-code = { workspace = true, optional = true }
+aphid-core.workspace = true
+aphid-nostr.workspace = true
 chrono.workspace = true
 futures-util = { workspace = true, optional = true }
 ratatui = { workspace = true, optional = true }

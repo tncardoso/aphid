@@ -3,11 +3,17 @@ name = "aphid-agent"
 description = "Agent loop, tool execution and the plugin API for the aphid agent harness"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+include = ["/src", "/tests", "/examples", "/Cargo.toml"]
 
 [dependencies]
-aphid-core = { path = "../aphid-core" }
+aphid-core.workspace = true
 compact_str.workspace = true
 futures-core.workspace = true
 serde.workspace = true
