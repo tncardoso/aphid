@@ -81,7 +81,7 @@
     // leg forward, positive trails it back. Kept shallow so the legs open out
     // sideways instead of reaching past the front of the body.
     splayDeg: [-14, 20, 54],
-    hipOffset: 7,
+    hipOffset: 4, // small margin past the body outline (see spineRadius)
     reach: 24, // distance from hip to the resting foot position
     stepThreshold: 9, // stretch from the rest position that asks for a step
     // Past this a leg steps even if the gait rules say no. The gap between this
@@ -116,7 +116,11 @@
     femur: 25,
     tibia: 23,
     kneeBend: -1, // which way the knee folds; flip to mirror the joint
-    footAnchorLimit: 0.92, // fraction of the leg span a new foothold may sit at
+    // Kept meaningfully below footTetherLimit: a foothold landed right at the
+    // tether boundary has zero slack before the next tick's hip movement makes
+    // it critical again, so the leg immediately re-steps and never rests —
+    // seen as legs shaking instead of walking.
+    footAnchorLimit: 0.8, // fraction of the leg span a new foothold may sit at
     // Tether: a planted foot this far from its own hip is at the edge of what
     // the bones can span, so the leg steps immediately no matter what the gait
     // rules say. This is keyed off the hip rather than the rest position
@@ -232,7 +236,7 @@
         ch.vel.x *= CONFIG.restBraking;
         ch.vel.y *= CONFIG.restBraking;
       }
-      return;
+      return false;
     }
 
     // Accelerate every chunk, not just the head. Steering the head alone means
@@ -248,6 +252,7 @@
         c.vel.y *= CONFIG.maxSpeed / speed;
       }
     }
+    return true;
   }
 
   function solveConnections() {
@@ -310,12 +315,20 @@
   // direction becomes a turn rather than the creature sliding off sideways.
   function alignToHeading() {
     var torso = body.torso;
+    var head = body.head;
     var aheadX = torso.pos.x + heading.x * CONFIG.restHeadTorso;
     var aheadY = torso.pos.y + heading.y * CONFIG.restHeadTorso;
-    var behindX = torso.pos.x - heading.x * CONFIG.restTorsoAbdomen;
-    var behindY = torso.pos.y - heading.y * CONFIG.restTorsoAbdomen;
 
-    addTo(body.head.vel, v(aheadX - body.head.pos.x, aheadY - body.head.pos.y), CONFIG.alignGain);
+    // The tail extends the head->torso segment's own direction rather than
+    // pointing along the same global `heading` as the head. That segment
+    // already lags the head through a distance constraint, so continuing it
+    // is what makes the spine bow through a turn — the curve travels down
+    // the body instead of every chunk snapping to face the same way at once.
+    var spineDir = norm(sub(torso.pos, head.pos));
+    var behindX = torso.pos.x + spineDir.x * CONFIG.restTorsoAbdomen;
+    var behindY = torso.pos.y + spineDir.y * CONFIG.restTorsoAbdomen;
+
+    addTo(head.vel, v(aheadX - head.pos.x, aheadY - head.pos.y), CONFIG.alignGain);
     addTo(body.abdomen.vel,
       v(behindX - body.abdomen.pos.x, behindY - body.abdomen.pos.y), CONFIG.alignGain);
   }
@@ -357,9 +370,14 @@
       return;
     }
 
-    steerBody();
-    updateHeading();
-    alignToHeading();
+    // Skip heading/alignment while merely braking in the dead zone: with no
+    // real seek or flee force behind it, `heading` has nothing to track but
+    // constraint-solver whip noise, and the align spring chasing that noisy
+    // heading is what was seen as the body spinning in place near the cursor.
+    if (steerBody()) {
+      updateHeading();
+      alignToHeading();
+    }
 
     for (var i = 0; i < body.chunks.length; i++) {
       var c = body.chunks[i];
@@ -419,15 +437,27 @@
     return t < 0.5 ? lerpV(h, m, t * 2) : lerpV(m, a, (t - 0.5) * 2);
   }
 
+  // Body outline radius at the same spine point, so the hip can be anchored to
+  // the surface of the body rather than to the (differently-scaled) spine.
+  function spineRadius(t) {
+    var h = body.head.rad, m = body.torso.rad, a = body.abdomen.rad;
+    return t < 0.5 ? lerp(h, m, t * 2) : lerp(m, a, (t - 0.5) * 2);
+  }
+
   function updateLegAnchors() {
     var fwd = v(Math.cos(bodyAngle), Math.sin(bodyAngle));
     var right = perp(fwd);
     for (var i = 0; i < legs.length; i++) {
       var leg = legs[i];
       var base = spinePoint(CONFIG.attachT[leg.pair]);
+      // Root the leg at the body outline, not at a fixed distance from the
+      // spine: `hipOffset` is a small margin past the radius rather than the
+      // whole offset, so hips track the head/torso/abdomen taper instead of
+      // sitting inside the torso once it grows past that fixed distance.
+      var hipDist = spineRadius(CONFIG.attachT[leg.pair]) + CONFIG.hipOffset;
       set(leg.hip,
-        base.x + right.x * leg.side * CONFIG.hipOffset,
-        base.y + right.y * leg.side * CONFIG.hipOffset);
+        base.x + right.x * leg.side * hipDist,
+        base.y + right.y * leg.side * hipDist);
 
       // Straight out to the side is splay 0; negative angles rake the leg
       // forward, positive ones trail it back. Front pairs reaching forward and
