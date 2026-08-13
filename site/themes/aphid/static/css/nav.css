@@ -102,6 +102,29 @@
   background-color: var(--nav-moss-deep);
 }
 
+/*
+ * mdbook's chrome.css sets `a:visited { color: var(--links) }` on every
+ * /docs/ page (specificity 0,1,1), which beats the two rules above once a
+ * link has been visited. Restate the colors here with matching or higher
+ * specificity so the nav looks the same on /docs/ as it does on the Hugo
+ * pages, which carry no such a:visited rule.
+ */
+.nav__link:visited {
+  color: var(--nav-muted);
+}
+
+.nav__link:visited:hover {
+  color: var(--nav-ink);
+}
+
+.nav__link--cta:visited {
+  color: var(--nav-on-moss);
+}
+
+.nav__link--cta:visited:hover {
+  color: var(--nav-on-moss);
+}
+
 @media (max-width: 880px) {
   .nav {
     padding: 0 20px;
