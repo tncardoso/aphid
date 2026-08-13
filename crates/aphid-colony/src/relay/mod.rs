@@ -167,6 +167,17 @@ impl Relay {
     /// Fails when the address cannot be bound, when the log cannot be read, or
     /// when the relay cannot sign for its own groups.
     pub async fn bind(options: Options) -> Result<Self, Error> {
+        // Ignored: a test that binds more than one relay in the same process
+        // calls this more than once, and a second `set_global_default` must not
+        // panic.
+        let _ = tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "info".into()),
+            )
+            .try_init();
+
         let Options {
             address,
             store,
@@ -189,6 +200,7 @@ impl Relay {
             .await
             .map_err(|source| Error::Listen { address, source })?;
         let address = listener.local_addr().unwrap_or(address);
+        tracing::info!(%address, "colony listening");
 
         let (fanout, _) = broadcast::channel(BROADCAST);
         let shared = Arc::new(Shared {
@@ -256,9 +268,11 @@ async fn accept(listener: TcpListener, shared: Arc<Shared>) {
         };
         let shared = Arc::clone(&shared);
         tokio::spawn(async move {
-            shared.connections.fetch_add(1, Ordering::Relaxed);
+            let connections = shared.connections.fetch_add(1, Ordering::Relaxed) + 1;
+            tracing::info!(connections, "client connected");
             session::serve(stream, Arc::clone(&shared)).await;
-            shared.connections.fetch_sub(1, Ordering::Relaxed);
+            let connections = shared.connections.fetch_sub(1, Ordering::Relaxed) - 1;
+            tracing::info!(connections, "client disconnected");
         });
     }
 }

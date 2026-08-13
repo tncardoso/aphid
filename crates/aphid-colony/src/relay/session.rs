@@ -241,6 +241,7 @@ async fn publish(event: Event, shared: &Arc<Shared>, writer: &mut Writer) -> Res
     // and this is one indexed lookup.
     match known(shared, id).await {
         Err(why) => {
+            tracing::error!(%why, "colony: could not check for a duplicate");
             return say(writer, wire::refused(id, Reason::Error, &why)).await;
         }
         Ok(true) => {
@@ -256,6 +257,9 @@ async fn publish(event: Event, shared: &Arc<Shared>, writer: &mut Writer) -> Res
     // The lock is held for the ruling alone. Storing happens after it is
     // dropped, so a slow disk never blocks another connection's group rules.
     let ruling = shared.authority().judge(&event);
+    if let Ruling::Refuse(Reason::Error, why) = &ruling {
+        tracing::error!(%why, "colony: the authority could not rule");
+    }
     let also = match &ruling {
         Ruling::Accept { also } => also.clone(),
         Ruling::Ignore(..) | Ruling::Refuse(..) => Vec::new(),
@@ -271,7 +275,10 @@ async fn publish(event: Event, shared: &Arc<Shared>, writer: &mut Writer) -> Res
                     shared.publish(event);
                 }
             }
-            Err(why) => return say(writer, wire::refused(id, Reason::Error, &why)).await,
+            Err(why) => {
+                tracing::error!(%why, "colony: could not store an accepted event");
+                return say(writer, wire::refused(id, Reason::Error, &why)).await;
+            }
         }
     }
 
@@ -335,6 +342,7 @@ async fn subscribe(
     let stored = match query(shared, selectors).await {
         Ok(stored) => stored,
         Err(why) => {
+            tracing::error!(%why, "colony: could not answer a subscription's stored phase");
             subscriptions.remove(&id);
             return say(writer, wire::closed(&id, Reason::Error, &why)).await;
         }
@@ -369,8 +377,14 @@ async fn count(
 
     match counted {
         Ok(Ok(count)) => say(writer, RelayMessage::count(id.clone(), count)).await,
-        Ok(Err(why)) => say(writer, wire::closed(id, Reason::Error, &why.to_string())).await,
-        Err(_) => say(writer, wire::closed(id, Reason::Error, "the store gave up")).await,
+        Ok(Err(why)) => {
+            tracing::error!(%why, "colony: could not count");
+            say(writer, wire::closed(id, Reason::Error, &why.to_string())).await
+        }
+        Err(_) => {
+            tracing::error!("colony: the store gave up counting");
+            say(writer, wire::closed(id, Reason::Error, "the store gave up")).await
+        }
     }
 }
 

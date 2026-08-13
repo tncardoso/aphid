@@ -13,7 +13,7 @@ default = ["client", "relay", "tui"]
 client = ["dep:tokio-tungstenite", "dep:futures-util"]
 # The relay half: the SQLite store and the websocket server, on top of the
 # client, which the relay's own tests drive it with.
-relay = ["client", "dep:rusqlite"]
+relay = ["client", "dep:rusqlite", "dep:tracing", "dep:tracing-subscriber"]
 # The terminal half. It needs the client, because a terminal is one: it attaches
 # to a colony that is already running and hosts nothing itself.
 tui = ["client", "dep:ratatui", "dep:ratatui-textarea", "dep:aphid-code"]
@@ -32,6 +32,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "sync"] }
 tokio-tungstenite = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
 
 [lints]
 workspace = true
