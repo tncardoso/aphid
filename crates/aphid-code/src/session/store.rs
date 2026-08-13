@@ -150,7 +150,7 @@ pub fn list(dir: &Path) -> Vec<Summary> {
         })
         .collect();
 
-    summaries.sort_by(|a, b| b.header.started.cmp(&a.header.started));
+    summaries.sort_by_key(|summary| std::cmp::Reverse(summary.header.started));
     summaries
 }
 

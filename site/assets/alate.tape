@@ -57,7 +57,7 @@
 #   ScrollUp[@<time>] [number]      Scroll terminal viewport up by rows
 #   ScrollDown[@<time>] [number]    Scroll terminal viewport down by rows
 
-Output aphid.gif
+Output alate.gif
 
 Require aphid
 
@@ -66,7 +66,10 @@ Set FontSize 22
 Set Width 1200
 Set Height 800
 
-Type "aphid" Sleep 500ms Enter
+Type "aphid alate run --name default &> /dev/null  &" Enter
+
+Type "aphid alate attach --name default" Sleep 500ms Enter
 Type "say who you are with a poem" Enter
 
 Sleep 12s
+

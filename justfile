@@ -1,5 +1,14 @@
-gifs:
-    cd site/assets && vhs aphid.tape
+# Build vhs gifs for the landing page
+gifs: gif-aphid gif-alate gif-colony
+
+gif-aphid: (_gif "aphid")
+
+gif-alate: (_gif "alate")
+
+gif-colony: (_gif "colony")
+
+_gif name:
+    cd site/assets && vhs {{name}}.tape
 
 # Build the full site: the book first, then Hugo.
 #

@@ -362,6 +362,7 @@ impl Blueprint {
     /// Fails when the session file cannot be opened.
     pub fn open(&self, kind: Kind) -> Result<Session, String> {
         let mut options = HarnessOptions::new(self.workspace.clone());
+        options.system = Some(crate::prompts::SYSTEM.to_owned());
         options.cwd = self.workspace.root().to_path_buf();
         options.model = self.model.clone();
         options.thinking = self

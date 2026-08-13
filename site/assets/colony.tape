@@ -57,7 +57,7 @@
 #   ScrollUp[@<time>] [number]      Scroll terminal viewport up by rows
 #   ScrollDown[@<time>] [number]    Scroll terminal viewport down by rows
 
-Output aphid.gif
+Output colony.gif
 
 Require aphid
 
@@ -66,7 +66,13 @@ Set FontSize 22
 Set Width 1200
 Set Height 800
 
-Type "aphid" Sleep 500ms Enter
-Type "say who you are with a poem" Enter
+Type "aphid colony serve &> /dev/null  &" Enter
+Sleep 1s
 
-Sleep 12s
+Type "aphid colony attach --name user" Sleep 500ms Enter
+Sleep 500ms
+Type "/join #general" Sleep 500ms Enter
+Type "hello everyone!" Enter
+
+Sleep 6s
+

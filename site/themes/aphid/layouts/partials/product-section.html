@@ -7,7 +7,7 @@
 >
   <div class="product__inner{{ if $p.reverse }} product__inner--reverse{{ end }}">
     <div class="product__text">
-      <p class="product__eyebrow"><span class="product__eyebrow-dot"></span>{{ printf "%02d" $index }} — {{ $p.title }}</p>
+      <p class="product__eyebrow"><span class="product__eyebrow-dot"></span>{{ printf "%02d" $index }} - {{ $p.title }}</p>
       <h2 class="product__title">{{ $p.heading }}</h2>
       <p class="product__description">{{ $p.description }}</p>
       <div class="cli-block">
@@ -23,15 +23,9 @@
         <span class="terminal__dot"></span>
         <span class="terminal__title">{{ $p.terminal.title }}</span>
       </div>
-      <div class="terminal__body">
-        {{ range $p.terminal.lines }}
-          {{ if eq .type "command" }}
-            <div class="term-line term-line--command">$ {{ .text }}</div>
-          {{ else if eq .type "dim" }}
-            <div class="term-line term-line--dim">{{ .text }}</div>
-          {{ else }}
-            <div class="term-line term-line--output">{{ .text }}</div>
-          {{ end }}
+      <div class="terminal__body terminal__body--media">
+        {{ with resources.Get (printf "%s.gif" $p.id) }}
+          <img class="terminal__media" src="{{ .RelPermalink }}" width="{{ .Width }}" height="{{ .Height }}" alt="{{ $p.title }} terminal recording" loading="lazy">
         {{ end }}
       </div>
     </div>

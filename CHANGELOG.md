@@ -1,11 +1,5 @@
 # Changelog
 
-All notable changes to Aphid are in this file.
-
-The format is based on [Keep a Changelog][kac], and this project uses
-[Semantic Versioning][semver]. Nothing is released yet: the first release moves
-this `Unreleased` section under its version. Refer to [Releasing][releasing].
-
 ## [Unreleased]
 
 ### Added

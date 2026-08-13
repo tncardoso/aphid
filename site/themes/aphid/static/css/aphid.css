@@ -251,6 +251,13 @@ a {
   margin: 0 auto;
 }
 
+.terminal--full {
+  width: 900px;
+  max-width: 100%;
+  flex: none;
+  margin: 0 auto;
+}
+
 .terminal__bar {
   display: flex;
   align-items: center;
@@ -282,6 +289,18 @@ a {
   padding: 22px 24px 26px;
   gap: 3px;
   overflow-x: auto;
+  text-align: left;
+}
+
+.terminal__body--media {
+  padding: 0;
+  gap: 0;
+}
+
+.terminal__media {
+  display: block;
+  width: 100%;
+  height: auto;
 }
 
 .term-line {

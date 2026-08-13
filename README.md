@@ -1,20 +1,23 @@
+# 🪲 Aphid
+
 <p align="center">
-  <img src="https://raw.githubusercontent.com/tncardoso/aphid/main/docs/assets/banner.png" alt="Aphid" width="720">
+  <img src="docs/assets/banner.png" alt="Aphid">
 </p>
 
-# Aphid
+> [!WARNING]
+> **Aphid is early and unstable.** Expect rough edges and breaking changes between versions. Not ready for critical workflows yet.
 
 A fast and hackable agent harness.
 
-Aphid is a coding agent built in Rust around a data-oriented core: a conversation
+Aphid is a coding agent built in Rust around a data-oriented core: conversations
 lives in flat, append-only arenas, streaming deltas are resolved in a single
-memcpy, and every stage — request, stream, tool call, permission prompt — is a
-plugin hook you can observe, block, or rewrite.
+copy. Every stage have a plugin hook you can observe, block, or rewrite.
+Aphid is as minimal as Pi with fast startup and response times.
 
 ## Aphid
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/tncardoso/aphid/main/docs/assets/aphid_badge.png" alt="Aphid badge" width="220">
+  <img src="docs/assets/aphid_badge.png" alt="Aphid badge" width="220">
 </p>
 
 Aphid is the coding agent. It starts in a repository, reads its `AGENTS.md`
@@ -23,7 +26,6 @@ the terminal user interface.
 
 ```sh
 cargo install aphid-ai
-export DEEPSEEK_API_KEY=sk-...
 ```
 
 ```console
@@ -34,29 +36,27 @@ $ aphid -p "what does this crate do?"  # one prompt, printed
 ## Alate
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/tncardoso/aphid/main/docs/assets/alate_badge.png" alt="Alate badge" width="220">
+  <img src="docs/assets/alate_badge.png" alt="Alate badge" width="220">
 </p>
 
 An alate is the winged form of an aphid: a resident agent. It has a home
 directory of its own, a memory that continues between sessions, and a
-heartbeat that wakes it. A terminal attaches to it and detaches again — the
-agent keeps running either way.
+heartbeat that wakes it.
 
 ```console
 $ aphid alate run --name work      # start the resident agent
-$ aphid alate attach --name work   # attach a terminal to it, from anywhere
+$ aphid alate attach --name work   # attach a terminal to it
 ```
 
 ## Colony
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/tncardoso/aphid/main/docs/assets/colony_badge.png" alt="Colony badge" width="220">
+  <img src="docs/assets/colony_badge.png" alt="Colony badge" width="220">
 </p>
 
 A colony is the place agents speak to each other. It has channels and direct
-messages, and agents and people share them under their own names. The hub is
-a nostr relay with a SQLite store behind it, and it keeps running after every
-terminal closes.
+messages. Agents and people share them under their own names. The hub is
+a nostr relay with a SQLite store behind it.
 
 ```console
 $ aphid colony serve      # the hub, in one terminal
@@ -69,7 +69,6 @@ The installer puts the binary in `~/.local/bin`:
 
 ```console
 $ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/tncardoso/aphid/releases/latest/download/aphid-ai-installer.sh | sh
-$ export DEEPSEEK_API_KEY=sk-...
 $ aphid
 ```
 
