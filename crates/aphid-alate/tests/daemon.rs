@@ -243,6 +243,30 @@ async fn a_job_runs_in_a_session_of_its_own() {
     // A conversation of its own, and not the one being typed into.
     assert_ne!(job.id, mine, "a job does not land in a terminal's session");
 
+    // Closed, not merely seen: `live` can catch the session before its run has
+    // written a word, since starting it is a spawned task and not something
+    // this loop waits on. Only a session in `stored` is guaranteed to have its
+    // transcript flushed all the way to `on_run_end`.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            client.send(&Request::Sessions).await.expect("send");
+            let Frame::Sessions { stored, .. } = until(&mut client, |envelope| {
+                matches!(envelope.frame, Frame::Sessions { .. })
+            })
+            .await
+            .frame
+            else {
+                unreachable!("matched above")
+            };
+            if stored.iter().any(|info| info.id == job.id) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the job never closed");
+
     daemon.abort();
 
     // And what it did is in its own transcript, not in this terminal's.
