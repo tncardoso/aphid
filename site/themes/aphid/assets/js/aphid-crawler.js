@@ -1052,21 +1052,25 @@
     var canvas = document.createElement('canvas');
     canvas.id = 'aphid-canvas';
     canvas.setAttribute('aria-hidden', 'true');
+    // Absolute, not fixed: the canvas lives in the page, not the viewport, so
+    // it scrolls out with everything else instead of hovering in place. Every
+    // position in the simulation is a page coordinate as a result — the
+    // aphid's own position, the feet, and (see the pointermove/scroll
+    // handlers below) the cursor it's chasing.
     canvas.style.cssText =
-      'position:fixed;top:0;left:0;pointer-events:none;z-index:9999;';
+      'position:absolute;top:0;left:0;pointer-events:none;z-index:9999;';
     document.body.appendChild(canvas);
     var ctx = canvas.getContext('2d');
 
     function resize() {
       var dpr = window.devicePixelRatio || 1;
-      // documentElement.clientWidth, not innerWidth: it excludes the scrollbar,
-      // so it matches both the fixed containing block and the range of
-      // pointer clientX. Sizing from innerWidth instead stretches the scene by
-      // the scrollbar width and walks the aphid off the cursor near the right
-      // edge.
-      var docEl = document.documentElement;
-      viewW = docEl.clientWidth || window.innerWidth;
-      viewH = docEl.clientHeight || window.innerHeight;
+      // Full document size, not the viewport: a fixed-size canvas would clip
+      // or letterbox as soon as the page is taller than one screen. Take the
+      // max of body/documentElement scrollHeight — no single property is
+      // reliable for full-page height across browsers.
+      var body_ = document.body, docEl = document.documentElement;
+      viewW = Math.max(body_.scrollWidth, docEl.scrollWidth, docEl.clientWidth) || window.innerWidth;
+      viewH = Math.max(body_.scrollHeight, docEl.scrollHeight, docEl.clientHeight) || window.innerHeight;
       canvas.style.width = viewW + 'px';
       canvas.style.height = viewH + 'px';
       canvas.width = Math.round(viewW * dpr);
@@ -1075,20 +1079,44 @@
     }
     resize();
 
-    set(rawCursor, viewW * 0.5, viewH * 0.5);
+    // Spawn near the middle of whatever's on screen right now, in page
+    // coordinates — not the document center, which on a long page could be
+    // far below the fold.
+    var startX = window.scrollX + window.innerWidth * 0.5;
+    var startY = window.scrollY + window.innerHeight * 0.5;
+    set(rawCursor, startX, startY);
     cursor = copy(rawCursor);
-    body = createBody(viewW * 0.5, viewH * 0.5 + CONFIG.standoff);
+    body = createBody(startX, startY + CONFIG.standoff);
     legs = createLegs();
     plantAllFeet();
 
-    window.addEventListener('resize', resize);
-    window.addEventListener('pointermove', function (e) {
-      set(rawCursor, e.clientX, e.clientY);
+    // clientX/Y are viewport-relative and don't change when the page scrolls
+    // under a stationary mouse, so they're cached here and re-applied (with
+    // the fresh scroll offset) on scroll too — otherwise scrolling wouldn't
+    // move the aphid's target at all, since no pointermove fires on its own.
+    var lastClientX = null, lastClientY = null;
+
+    function updateCursorFromClient() {
+      if (lastClientX === null) return;
+      set(rawCursor, lastClientX + window.scrollX, lastClientY + window.scrollY);
       if (!haveCursor) {
         haveCursor = true;
         cursor = copy(rawCursor);
       }
+    }
+
+    window.addEventListener('resize', resize);
+    // Document height can grow after DOMContentLoaded — images below the
+    // fold finishing their layout being the common case — which would
+    // otherwise leave the canvas too short for the aphid to reach that part
+    // of the page until the next window resize.
+    window.addEventListener('load', resize);
+    window.addEventListener('pointermove', function (e) {
+      lastClientX = e.clientX;
+      lastClientY = e.clientY;
+      updateCursorFromClient();
     }, { passive: true });
+    window.addEventListener('scroll', updateCursorFromClient, { passive: true });
 
     window.addEventListener('keydown', function (e) {
       if (e.key === 'd' && !e.metaKey && !e.ctrlKey && !e.altKey) {
