@@ -85,7 +85,7 @@
     // leg forward, positive trails it back. Kept shallow so the legs open out
     // sideways instead of reaching past the front of the body.
     splayDeg: [-14, 20, 54],
-    hipOffset: 4, // small margin past the body outline (see spineRadius)
+    hipOffset: -3, // tucked slightly inside the body outline (see spineRadius)
     reach: 24, // distance from hip to the resting foot position
     stepThreshold: 9, // stretch from the rest position that asks for a step
     // Past this a leg steps even if the gait rules say no. The gap between this
@@ -149,7 +149,7 @@
     // neighbor scaling, which is what gives it the same chunky, hard-edged
     // look as the reference mascot art regardless of the smooth curves and
     // continuous rotation driving it underneath.
-    pixelUnit: 4
+    pixelUnit: 2
   };
 
   // Bail out before touching anything if the environment says no.
@@ -469,10 +469,11 @@
     for (var i = 0; i < legs.length; i++) {
       var leg = legs[i];
       var base = spinePoint(CONFIG.attachT[leg.pair]);
-      // Root the leg at the body outline, not at a fixed distance from the
-      // spine: `hipOffset` is a small margin past the radius rather than the
-      // whole offset, so hips track the head/torso/abdomen taper instead of
-      // sitting inside the torso once it grows past that fixed distance.
+      // Root the leg near the body outline, not at a fixed distance from the
+      // spine, so hips track the head/torso/abdomen taper instead of sitting
+      // inside the torso once it grows past a fixed distance. `hipOffset` is
+      // negative to tuck the socket slightly under the outline rather than
+      // right on it, so the body reads as covering the leg root.
       var hipDist = spineRadius(CONFIG.attachT[leg.pair]) + CONFIG.hipOffset;
       set(leg.hip,
         base.x + right.x * leg.side * hipDist,
@@ -867,35 +868,74 @@
     return { minX: minX - margin, minY: minY - margin, maxX: maxX + margin, maxY: maxY + margin };
   }
 
-  var artBuf = document.createElement('canvas');
-  var artCtx = artBuf.getContext('2d');
+  // Two buffers: `hiBuf` holds a normal, fully anti-aliased render of the
+  // creature at 1 world-px per buffer-px; `loBuf` is the actual pixel-art
+  // grid, one cell per `pixelUnit` world px. Going straight from vector
+  // shapes to a small canvas still anti-aliases every curved or diagonal
+  // edge *at that low resolution*, so neighboring cells end up as partial
+  // color blends instead of solid blocks — it looks pixelated but reads as
+  // soft. Point-sampling one pixel of `hiBuf` per `loBuf` cell (instead of
+  // letting the browser box-filter the shrink) throws that blending away:
+  // every cell becomes a single flat color, which is what a nearest-neighbor
+  // upscale needs in order to look like hard pixel art rather than a blurred
+  // photo blown up.
+  var hiBuf = document.createElement('canvas');
+  var hiCtx = hiBuf.getContext('2d', { willReadFrequently: true });
+  var loBuf = document.createElement('canvas');
+  var loCtx = loBuf.getContext('2d');
 
   function drawArt(ctx, now) {
     var b = artBounds();
     var unit = CONFIG.pixelUnit;
-    var bw = Math.max(1, Math.ceil((b.maxX - b.minX) / unit));
-    var bh = Math.max(1, Math.ceil((b.maxY - b.minY) / unit));
-    if (artBuf.width !== bw) artBuf.width = bw;
-    if (artBuf.height !== bh) artBuf.height = bh;
+    // Snap the buffer's world origin to the pixel-art grid. The skeleton
+    // position is continuous, so without this the grid lands at a different
+    // sub-pixel phase every frame, and the whole creature shimmers instead
+    // of holding still on its own pixels.
+    var gx = Math.floor(b.minX / unit) * unit;
+    var gy = Math.floor(b.minY / unit) * unit;
+    var bw = Math.max(1, Math.ceil((b.maxX - gx) / unit));
+    var bh = Math.max(1, Math.ceil((b.maxY - gy) / unit));
+    var hw = bw * unit, hh = bh * unit;
 
-    artCtx.clearRect(0, 0, bw, bh);
-    artCtx.save();
-    artCtx.scale(1 / unit, 1 / unit);
-    artCtx.translate(-b.minX, -b.minY);
-    artCtx.lineJoin = 'round';
-    artCtx.lineCap = 'round';
+    if (hiBuf.width !== hw) hiBuf.width = hw;
+    if (hiBuf.height !== hh) hiBuf.height = hh;
 
-    drawAntennaeArt(artCtx, now);
-    drawLegsArt(artCtx);
-    drawBodyArt(artCtx);
-    drawEyesArt(artCtx);
+    hiCtx.clearRect(0, 0, hw, hh);
+    hiCtx.save();
+    hiCtx.translate(-gx, -gy);
+    hiCtx.lineJoin = 'round';
+    hiCtx.lineCap = 'round';
 
-    artCtx.restore();
+    drawAntennaeArt(hiCtx, now);
+    drawLegsArt(hiCtx);
+    drawBodyArt(hiCtx);
+    drawEyesArt(hiCtx);
 
-    // Nearest-neighbor blit: this is what turns the smooth shapes above into
-    // hard pixel blocks.
+    hiCtx.restore();
+
+    if (loBuf.width !== bw) loBuf.width = bw;
+    if (loBuf.height !== bh) loBuf.height = bh;
+
+    var src = hiCtx.getImageData(0, 0, hw, hh).data;
+    var out = loCtx.createImageData(bw, bh);
+    var half = unit >> 1;
+    for (var y = 0; y < bh; y++) {
+      for (var x = 0; x < bw; x++) {
+        var si = ((y * unit + half) * hw + (x * unit + half)) * 4;
+        var di = (y * bw + x) * 4;
+        out.data[di] = src[si];
+        out.data[di + 1] = src[si + 1];
+        out.data[di + 2] = src[si + 2];
+        out.data[di + 3] = src[si + 3];
+      }
+    }
+    loCtx.putImageData(out, 0, 0);
+
+    // Nearest-neighbor blit at an integer scale, origin snapped to the grid
+    // above: this is what turns the now-solid-color cells into hard pixel
+    // blocks on screen instead of a scaled-up blur.
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(artBuf, 0, 0, bw, bh, b.minX, b.minY, bw * unit, bh * unit);
+    ctx.drawImage(loBuf, 0, 0, bw, bh, gx, gy, hw, hh);
   }
 
   function drawDebug(ctx, fps) {
