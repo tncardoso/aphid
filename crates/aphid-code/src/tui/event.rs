@@ -70,6 +70,10 @@ pub enum UiEvent {
     /// Text a plugin sent to the model, which is queued as a typed line is.
     Prompt(String),
     Key(KeyEvent),
+    /// A block of text the terminal delivered in one piece, under bracketed
+    /// paste. Its newlines are text, not the Enters they would be if the same
+    /// characters had been typed.
+    Paste(String),
     Resize,
 }
 
@@ -275,6 +279,11 @@ pub fn spawn_input_thread(events: UnboundedSender<UiEvent>) {
             match event::read() {
                 Ok(event::Event::Key(key)) => {
                     if events.send(UiEvent::Key(key)).is_err() {
+                        return;
+                    }
+                }
+                Ok(event::Event::Paste(text)) => {
+                    if events.send(UiEvent::Paste(text)).is_err() {
                         return;
                     }
                 }

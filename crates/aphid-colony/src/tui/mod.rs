@@ -27,7 +27,9 @@ use std::io::Stdout;
 use aphid_code::tui::event::{UiEvent, spawn_input_thread};
 use aphid_code::tui::input::{Action, Input};
 use aphid_nostr::nostr::key::Keys;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{
+    DisableBracketedPaste, EnableBracketedPaste, KeyCode, KeyEvent, KeyModifiers,
+};
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -126,6 +128,7 @@ async fn drive(
             event = keys.recv() => match event {
                 None => break,
                 Some(UiEvent::Key(key)) => sending = key_pressed(app, input, key),
+                Some(UiEvent::Paste(text)) => input.paste(&text),
                 Some(_) => {}
             },
         }
@@ -223,10 +226,15 @@ fn setup() -> std::io::Result<(Screen, ())> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     stdout.execute(EnterAlternateScreen)?;
+    // So a pasted block lands in the input box whole, rather than as one
+    // submitted line per newline. Not every console has the mode; the ones
+    // that refuse it behave as they always did.
+    let _ = stdout.execute(EnableBracketedPaste);
     Ok((ratatui::Terminal::new(CrosstermBackend::new(stdout))?, ()))
 }
 
 fn restore(terminal: &mut Screen) -> std::io::Result<()> {
+    let _ = terminal.backend_mut().execute(DisableBracketedPaste);
     disable_raw_mode()?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
     terminal.backend_mut().execute(cursor::Show)?;

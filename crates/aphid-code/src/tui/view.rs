@@ -525,12 +525,25 @@ pub fn truncate_chars(text: &str, width: usize) -> String {
 
 /// Hard-wrap to `width` columns, breaking at whitespace when there is any.
 ///
+/// A newline in the text is a line the writer asked for, so each one starts a
+/// new row instead of being reflowed away as ordinary whitespace — a message
+/// typed or pasted over several lines reads the way it was written.
+///
 /// The pane wraps its own text rather than letting a `Paragraph` do it, because
 /// scrolling needs an exact line count and ratatui will not report one without
 /// an unstable feature.
 #[must_use]
 pub fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        lines.extend(wrap_paragraph(paragraph, width));
+    }
+    lines
+}
+
+/// One newline-free run of text, hard-wrapped to `width`.
+fn wrap_paragraph(text: &str, width: usize) -> Vec<String> {
     if text.is_empty() {
         return vec![String::new()];
     }
@@ -617,6 +630,32 @@ mod tests {
     #[test]
     fn empty_text_still_produces_a_line() {
         assert_eq!(wrap("", 10), vec![String::new()]);
+    }
+
+    #[test]
+    fn a_newline_starts_a_new_line() {
+        assert_eq!(
+            wrap("one\ntwo", 10),
+            vec!["one".to_owned(), "two".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_blank_line_stays_blank() {
+        assert_eq!(
+            wrap("one\n\ntwo", 10),
+            vec!["one".to_owned(), String::new(), "two".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_multiline_message_keeps_its_shape() {
+        let mut view = View::default();
+        view.push_user("one\ntwo".to_owned());
+        let rendered: Vec<String> = view.lines(40).iter().map(ToString::to_string).collect();
+
+        assert_eq!(rendered.first().map(String::as_str), Some("> one"));
+        assert_eq!(rendered.get(1).map(String::as_str), Some("  two"));
     }
 
     #[test]

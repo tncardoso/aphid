@@ -28,6 +28,15 @@ Type `/help` to see the list in the terminal.
 | `Ctrl-P` | Change to the next model. |
 | `Ctrl-T` | Show the reasoning. |
 | `PageUp`, `PageDown` | Scroll. |
+| `Enter` | Send the message. |
+| `Shift-Enter` | Make a new line in the same message. |
+| `Up`, `Down` | Move through the messages you sent before. |
+
+Text that you paste goes into the editor as it is, on as many lines as it has.
+A paste does not send the message: press `Enter` when the message is complete.
+
+`Up` on the first line shows the message you sent before. `Down` comes back to
+what you were writing, which is kept while you look.
 
 `/model` with no name opens a list of the catalogue. `/model <name>` accepts the
 same three forms as `--model`: the full identifier, the last part of it, or a

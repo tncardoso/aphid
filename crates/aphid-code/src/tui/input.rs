@@ -110,6 +110,17 @@ impl Input {
         self.set_text("");
     }
 
+    /// Drop pasted text into the buffer at the cursor.
+    ///
+    /// A paste is not typing: its newlines are part of the text, not a series
+    /// of submits, so it lands whole and waits for Enter like anything else.
+    /// Terminals disagree about how they end a line, and the textarea only
+    /// knows `\n` and `\r\n`, so a lone `\r` is normalised here.
+    pub fn paste(&mut self, text: &str) {
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.textarea.insert_str(text);
+    }
+
     fn set_text(&mut self, text: &str) {
         self.textarea.clear();
         self.textarea.insert_str(text);
@@ -173,7 +184,12 @@ impl Input {
         if self.history.is_empty() {
             return;
         }
-        if self.browsing == self.history.len() && delta < 0 {
+        if self.browsing == self.history.len() {
+            // Down on the live line has nothing to recall: leave the draft be,
+            // rather than "restoring" the empty parked line over it.
+            if delta > 0 {
+                return;
+            }
             self.parked = Some(self.text());
         }
 
@@ -339,6 +355,56 @@ mod tests {
         assert_eq!(input.text(), "second");
         input.handle(key(KeyCode::Down));
         assert_eq!(input.text(), "draft", "the parked line comes back");
+    }
+
+    #[test]
+    fn down_on_the_live_line_keeps_the_draft() {
+        let mut input = Input::default();
+        typed(&mut input, "first");
+        input.handle(key(KeyCode::Enter));
+
+        typed(&mut input, "draft");
+        input.handle(key(KeyCode::Down));
+        assert_eq!(input.text(), "draft", "there is nothing below the draft");
+    }
+
+    #[test]
+    fn the_draft_survives_more_than_one_round_trip() {
+        let mut input = Input::default();
+        typed(&mut input, "first");
+        input.handle(key(KeyCode::Enter));
+
+        typed(&mut input, "draft");
+        for _ in 0..2 {
+            input.handle(key(KeyCode::Up));
+            assert_eq!(input.text(), "first");
+            input.handle(key(KeyCode::Down));
+            assert_eq!(input.text(), "draft", "the parked line comes back again");
+            // One Down too many, the way anybody checks they are at the bottom.
+            input.handle(key(KeyCode::Down));
+            assert_eq!(input.text(), "draft");
+        }
+    }
+
+    #[test]
+    fn a_pasted_block_waits_for_enter() {
+        let mut input = Input::default();
+        input.paste("one\ntwo\nthree");
+        assert_eq!(input.line_count(), 3);
+        assert_eq!(input.text(), "one\ntwo\nthree");
+        assert_eq!(
+            input.handle(key(KeyCode::Enter)),
+            Action::Submit("one\ntwo\nthree".into()),
+            "the whole block goes as one prompt"
+        );
+    }
+
+    #[test]
+    fn a_paste_lands_at_the_cursor_with_line_endings_normalised() {
+        let mut input = Input::default();
+        typed(&mut input, "see: ");
+        input.paste("one\r\ntwo\rthree");
+        assert_eq!(input.text(), "see: one\ntwo\nthree");
     }
 
     #[test]

@@ -7,6 +7,15 @@
 - Skills are read from `.agents/skills` as well as `.aphid/skills`, in the
   workspace and in your home directory. Thus one skill directory can serve aphid
   and the other agents together. A name in `.aphid/skills` still wins.
+- Pasting into the terminal input brings the text in whole, newlines and all,
+  and a paste does not send the message: press `Enter` when it is complete.
+- A message keeps the line breaks it was written with, in the input and in the
+  chat.
+
+### Fixed
+
+- In the terminal input, `Down` on the line you are writing no longer wipes the
+  draft, and the draft survives a trip `Up` and back `Down`.
 
 ## [0.1.0] - 2026-08-13
 

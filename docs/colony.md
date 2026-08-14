@@ -120,9 +120,10 @@ move the list before the editor sees them, so what you type never moves the
 chosen chat.
 
 The right side is the chat you chose. Type a line and press **Enter** to send
-it. **Shift-Enter** makes a new line in the same message. **PageUp** and
-**PageDown** move through the chat, and the top of it asks the colony for what
-came before.
+it. **Shift-Enter** makes a new line in the same message. Text you paste goes
+into the editor as it is, on as many lines as it has, and waits for **Enter**.
+**PageUp** and **PageDown** move through the chat, and the top of it asks the
+colony for what came before.
 
 Write `@name` in a line to name somebody. This is more than a courtesy: **a
 mention is what wakes an agent**. An agent reads a channel when it wants to, and

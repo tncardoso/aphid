@@ -11,8 +11,8 @@ use aphid_core::{Model, ThinkingLevel, Transcript};
 use aphid_plugin::{Action as PluginAction, ScriptBackend, SessionInfo};
 use compact_str::CompactString;
 use ratatui::crossterm::event::{
-    KeyCode, KeyEvent, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, EnableBracketedPaste, KeyCode, KeyEvent, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -239,7 +239,7 @@ impl App {
                     reply,
                 }));
             }
-            UiEvent::Key(_) | UiEvent::Resize => {}
+            UiEvent::Key(_) | UiEvent::Paste(_) | UiEvent::Resize => {}
         }
         true
     }
@@ -743,6 +743,14 @@ async fn drive(
                         dirty = true;
                         handle_key(app, key, idle.as_mut());
                     }
+                    UiEvent::Paste(text) => {
+                        dirty = true;
+                        // A modal is answered with single keys; a paste into
+                        // one would mean nothing.
+                        if app.modal.is_none() {
+                            app.input.paste(&text);
+                        }
+                    }
                     UiEvent::Resize => dirty = true,
                     other => {
                         dirty = app.apply(other);
@@ -941,6 +949,11 @@ fn setup() -> std::io::Result<(Screen, bool)> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     stdout.execute(EnterAlternateScreen)?;
+    // Pasted text then arrives whole, instead of as the keys it looks like —
+    // one Enter per line, each of which would submit. The legacy Windows
+    // console has no such mode and says so; a session there is no worse off
+    // than before, so the refusal is not worth failing the start-up over.
+    let _ = stdout.execute(EnableBracketedPaste);
 
     let kitty = supports_keyboard_enhancement().unwrap_or(false);
     if kitty {
@@ -959,6 +972,7 @@ fn restore(terminal: &mut Screen, kitty: bool) -> std::io::Result<()> {
             .backend_mut()
             .execute(PopKeyboardEnhancementFlags)?;
     }
+    let _ = terminal.backend_mut().execute(DisableBracketedPaste);
     disable_raw_mode()?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
     terminal.backend_mut().execute(cursor::Show)?;
