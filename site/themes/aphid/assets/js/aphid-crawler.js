@@ -149,7 +149,19 @@
     // neighbor scaling, which is what gives it the same chunky, hard-edged
     // look as the reference mascot art regardless of the smooth curves and
     // continuous rotation driving it underneath.
-    pixelUnit: 2
+    pixelUnit: 2,
+
+    // --- splat (death) ---
+    hitMargin: 4, // px of grace around a body chunk for a click to count
+    splatFadeMs: 300, // ms the aphid art (and later the splat) takes to fade out
+    splatLingerMs: 1800, // ms the splat stays fully visible before fading
+    splatDrag: 0.9, // per-tick velocity damping for the flying droplets
+    splatDroplets: 16,
+    splatSpeedMin: 1, // px/tick
+    splatSpeedMax: 4,
+    splatSizeMin: 1, // art px
+    splatSizeMax: 3,
+    splatDecalBlobs: 6
   };
 
   // Bail out before touching anything if the environment says no.
@@ -202,6 +214,10 @@
   var resting = false;
   var restTicks = 0;
   var viewW = 0, viewH = 0;
+  var dead = false;
+  var deadT = 0; // ms since the death sequence started
+  var splat = null;
+  var artAlpha = 1; // creature art opacity, fades to 0 after death
 
   function createBody(cx, cy) {
     var chunks = CONFIG.chunks.map(function (spec, i) {
@@ -697,6 +713,95 @@
     return v(leg.hip.x + n.x, leg.hip.y + n.y);
   }
 
+  // ---------------------------------------------------------------- splat
+
+  // The click lands on the aphid if it is within a small margin of any body
+  // chunk. Legs and antennae are not targets.
+  function hitTest(px, py) {
+    for (var i = 0; i < body.chunks.length; i++) {
+      var c = body.chunks[i];
+      if (dist(v(px, py), c.pos) <= c.rad + CONFIG.hitMargin) return true;
+    }
+    return false;
+  }
+
+  // Green blood: a central decal of overlapping blobs in the aphid's own art
+  // greens, plus droplets that fly outward with drag and settle.
+  function spawnSplat(x, y) {
+    var shades = [ART.body, ART.bodyShadow, ART.bodyHighlight];
+    var blobs = [];
+    for (var i = 0; i < CONFIG.splatDecalBlobs; i++) {
+      blobs.push({
+        p: v(x + (Math.random() - 0.5) * 24, y + (Math.random() - 0.5) * 24),
+        r: 3 + Math.random() * 7,
+        color: shades[i % shades.length]
+      });
+    }
+    var droplets = [];
+    for (var d = 0; d < CONFIG.splatDroplets; d++) {
+      var ang = Math.random() * Math.PI * 2;
+      var speed = CONFIG.splatSpeedMin +
+        Math.random() * (CONFIG.splatSpeedMax - CONFIG.splatSpeedMin);
+      droplets.push({
+        p: v(x, y),
+        vel: v(Math.cos(ang) * speed, Math.sin(ang) * speed),
+        r: CONFIG.splatSizeMin +
+          Math.random() * (CONFIG.splatSizeMax - CONFIG.splatSizeMin),
+        color: shades[Math.floor(Math.random() * shades.length)],
+        // Each droplet starts its fade a little after its neighbours, so the
+        // burst winks out piece by piece instead of as one shape. The fade
+        // window shrinks to match, so every droplet still reaches alpha 0 at
+        // the same moment the splat disappears.
+        fadeOffset: Math.random() * CONFIG.splatFadeMs * 0.8
+      });
+    }
+    splat = { x: x, y: y, blobs: blobs, droplets: droplets };
+  }
+
+  function updateSplat(dt) {
+    deadT += dt;
+    artAlpha = Math.max(0, 1 - deadT / CONFIG.splatFadeMs);
+    if (!splat) return;
+    for (var i = 0; i < splat.droplets.length; i++) {
+      var d = splat.droplets[i];
+      d.p.x += d.vel.x;
+      d.p.y += d.vel.y;
+      d.vel.x *= CONFIG.splatDrag;
+      d.vel.y *= CONFIG.splatDrag;
+    }
+    // The whole splat is gone once the fade-out completes; nothing left to
+    // draw or move.
+    if (deadT >= CONFIG.splatLingerMs + CONFIG.splatFadeMs) splat = null;
+  }
+
+  // The decal holds at full alpha through the linger period, then fades; each
+  // droplet fades on its own offset so the burst doesn't blink out as one
+  // shape.
+  function drawSplat(c) {
+    if (!splat) return;
+    var a = 1;
+    if (deadT >= CONFIG.splatLingerMs) {
+      a = Math.max(0, 1 - (deadT - CONFIG.splatLingerMs) / CONFIG.splatFadeMs);
+    }
+    c.save();
+    for (var i = 0; i < splat.blobs.length; i++) {
+      var b = splat.blobs[i];
+      c.globalAlpha = a;
+      c.fillStyle = b.color;
+      circle(c, b.p, b.r);
+      c.fill();
+    }
+    for (var j = 0; j < splat.droplets.length; j++) {
+      var dr = splat.droplets[j];
+      var t = Math.max(0, deadT - CONFIG.splatLingerMs - dr.fadeOffset);
+      c.globalAlpha = a * Math.max(0, 1 - t / (CONFIG.splatFadeMs - dr.fadeOffset));
+      c.fillStyle = dr.color;
+      circle(c, dr.p, dr.r);
+      c.fill();
+    }
+    c.restore();
+  }
+
   // --------------------------------------------------------------- render
 
   var COLORS = {
@@ -827,10 +932,11 @@
     c.fill();
 
     c.fillStyle = ART.bodyHighlight;
-    c.globalAlpha = 0.55;
+    var prevAlpha = c.globalAlpha;
+    c.globalAlpha = prevAlpha * 0.55;
     circle(c, v(body.torso.pos.x - shadow, body.torso.pos.y - shadow * 1.5), body.torso.rad * 0.5);
     c.fill();
-    c.globalAlpha = 1;
+    c.globalAlpha = prevAlpha;
   }
 
   function drawEyesArt(c) {
@@ -863,6 +969,15 @@
     for (var j = 0; j < legs.length; j++) {
       grow(legs[j].hip, 3);
       grow(clampedFoot(legs[j]), 4);
+    }
+    if (splat) {
+      // Droplets decelerate geometrically, so the farthest any of them can
+      // travel from the burst point is speed / (1 - drag); the decal blobs
+      // stay within a dozen px of it. Cover both, plus the largest blob
+      // radius, so the low-res buffer never clips the splat.
+      var reach = CONFIG.splatSpeedMax / (1 - CONFIG.splatDrag) +
+        CONFIG.splatSizeMax + 24;
+      grow(splat, reach);
     }
     var margin = CONFIG.antennaLength + CONFIG.antennaSpread + 6;
     return { minX: minX - margin, minY: minY - margin, maxX: maxX + margin, maxY: maxY + margin };
@@ -906,10 +1021,17 @@
     hiCtx.lineJoin = 'round';
     hiCtx.lineCap = 'round';
 
-    drawAntennaeArt(hiCtx, now);
-    drawLegsArt(hiCtx);
-    drawBodyArt(hiCtx);
-    drawEyesArt(hiCtx);
+    // The splat sits on the ground under the creature, so it is drawn first
+    // and the fading body reveals it.
+    drawSplat(hiCtx);
+    if (artAlpha > 0) {
+      hiCtx.globalAlpha = artAlpha;
+      drawAntennaeArt(hiCtx, now);
+      drawLegsArt(hiCtx);
+      drawBodyArt(hiCtx);
+      drawEyesArt(hiCtx);
+      hiCtx.globalAlpha = 1;
+    }
 
     hiCtx.restore();
 
@@ -1116,6 +1238,21 @@
       lastClientY = e.clientY;
       updateCursorFromClient();
     }, { passive: true });
+    // Click-to-splat. The canvas has pointer-events:none, so the event lands
+    // on whatever is underneath — hence the interactive-element check: a click
+    // on a link or button that happens to sit under the aphid must still work.
+    window.addEventListener('pointerdown', function (e) {
+      if (e.button !== 0 || dead) return;
+      var t = e.target;
+      if (t && t.closest && t.closest('a, button, input, textarea, select')) return;
+      var px = e.clientX + window.scrollX;
+      var py = e.clientY + window.scrollY;
+      if (hitTest(px, py)) {
+        dead = true;
+        deadT = 0;
+        spawnSplat(px, py);
+      }
+    }, { passive: true });
     window.addEventListener('scroll', updateCursorFromClient, { passive: true });
 
     window.addEventListener('keydown', function (e) {
@@ -1156,8 +1293,13 @@
       accumulator += elapsed;
       var steps = 0;
       while (accumulator >= stepMs && steps < CONFIG.maxSubSteps) {
-        stepPhysics(stepSec);
-        updateLegs(stepSec);
+        if (dead) {
+          // The body is frozen; only the death sequence advances.
+          updateSplat(stepMs);
+        } else {
+          stepPhysics(stepSec);
+          updateLegs(stepSec);
+        }
         accumulator -= stepMs;
         steps++;
       }

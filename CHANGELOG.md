@@ -11,6 +11,8 @@
   and a paste does not send the message: press `Enter` when it is complete.
 - A message keeps the line breaks it was written with, in the input and in the
   chat.
+- The aphid mascot on the site splats into green droplets when you click on it,
+  then the splat fades away.
 
 ### Fixed
 
