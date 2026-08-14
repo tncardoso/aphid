@@ -1,10 +1,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{ if .IsHome }}{{ .Site.Title }} — {{ .Site.Params.tagline | default "A coding agent, built in Rust" }}{{ else }}{{ .Title }} — {{ .Site.Title }}{{ end }}</title>
-<meta name="description" content="{{ .Description | default .Site.Params.description | default "A coding agent, built in Rust." }}">
+<title>{{ if .IsHome }}{{ .Site.Title }} — {{ .Site.Params.tagline | default "fast and hackable agent harness" }}{{ else }}{{ .Title }} — {{ .Site.Title }}{{ end }}</title>
+<meta name="description" content="{{ .Description | default .Site.Params.description | default "Aphid is a fast and hackable agent harness." }}">
 
 <meta property="og:title" content="{{ .Site.Title }}">
-<meta property="og:description" content="{{ .Description | default .Site.Params.description | default "A coding agent, built in Rust." }}">
+<meta property="og:description" content="{{ .Description | default .Site.Params.description | default "Aphid is a fast and hackable agent harness." }}">
 <meta property="og:type" content="website">
 <meta property="og:url" content="{{ .Permalink }}">
 {{ with resources.Get "images/banner.png" }}

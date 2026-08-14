@@ -34,14 +34,17 @@ jobs:
         with:
           key: default
 
+      - name: Fetch dependencies
+        run: cargo fetch --locked
+
       - name: Format
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --offline -- -D warnings
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --offline
 
   # The optional features of an alate, `telegram` and `colony`, are off by
   # default. One platform is enough to keep them compiling.
@@ -59,8 +62,11 @@ jobs:
         with:
           key: all-features
 
+      - name: Fetch dependencies
+        run: cargo fetch --locked
+
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --offline -- -D warnings
 
       - name: Test
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --all-features --offline
