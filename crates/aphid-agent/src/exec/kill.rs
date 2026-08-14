@@ -7,6 +7,13 @@ use tokio::process::Child;
 /// How long a command has to finish after being asked politely.
 const GRACE: Duration = Duration::from_millis(500);
 
+/// How long the `kill` helper itself has to launch and report back.
+///
+/// A busy machine can make even a trivial fork+exec slow; without a bound here
+/// that slowness leaks straight into how long a stop takes, unrelated to
+/// whether the signal was even delivered.
+const SIGNAL_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// Stop the command's whole process group: term, then kill.
 ///
 /// Killing the child alone would only reach the shell, leaving whatever it
@@ -49,13 +56,16 @@ pub(crate) async fn terminate(child: &mut Child, _pid: Option<u32>) {
 /// Send one signal to a whole group. `false` when the helper could not run.
 #[cfg(unix)]
 async fn signal(group: u32, signal: &str) -> bool {
-    tokio::process::Command::new("kill")
+    let status = tokio::process::Command::new("kill")
         .arg(signal)
         .arg(format!("-{group}"))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-        .await
-        .is_ok()
+        .status();
+
+    matches!(
+        tokio::time::timeout(SIGNAL_TIMEOUT, status).await,
+        Ok(Ok(_))
+    )
 }

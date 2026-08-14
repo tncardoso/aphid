@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Stopping a command no longer waits on the `kill` helper forever: the helper
+  has its own time budget, so a busy machine cannot stretch a stop past it.
+
 ### Added
 
 - Aphid, the coding agent: a terminal user interface, tools, project context
