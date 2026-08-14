@@ -7,13 +7,6 @@ use tokio::process::Child;
 /// How long a command has to finish after being asked politely.
 const GRACE: Duration = Duration::from_millis(500);
 
-/// How long the `kill` helper itself has to launch and report back.
-///
-/// A busy machine can make even a trivial fork+exec slow; without a bound here
-/// that slowness leaks straight into how long a stop takes, unrelated to
-/// whether the signal was even delivered.
-const SIGNAL_TIMEOUT: Duration = Duration::from_millis(500);
-
 /// Stop the command's whole process group: term, then kill.
 ///
 /// Killing the child alone would only reach the shell, leaving whatever it
@@ -21,9 +14,11 @@ const SIGNAL_TIMEOUT: Duration = Duration::from_millis(500);
 /// child leads its own group (see `process_group` in `lib.rs`), so its pid is
 /// also the group id, and a negative pid signals the group.
 ///
-/// The signal goes out through `kill` rather than through `libc`, which keeps
-/// this crate free of a C dependency and of unsafe code. One short-lived helper
-/// process per stop is a fair price.
+/// The signal goes out through `libc::kill` directly rather than by spawning
+/// the `kill` binary. A helper process adds a fork+exec to every stop, and on
+/// a loaded CI runner that fork can queue behind everything else for longer
+/// than the grace period, so the group never actually got the signal in time
+/// — the direct syscall has nothing left to queue behind.
 #[cfg(unix)]
 pub(crate) async fn terminate(child: &mut Child, pid: Option<u32>) {
     let Some(group) = pid else {
@@ -32,7 +27,7 @@ pub(crate) async fn terminate(child: &mut Child, pid: Option<u32>) {
         return;
     };
 
-    if !signal(group, "-TERM").await {
+    if !signal(group, libc::SIGTERM) {
         let _ = child.kill().await;
         return;
     }
@@ -42,7 +37,7 @@ pub(crate) async fn terminate(child: &mut Child, pid: Option<u32>) {
         () = tokio::time::sleep(GRACE) => {}
     }
 
-    if !signal(group, "-KILL").await {
+    if !signal(group, libc::SIGKILL) {
         let _ = child.kill().await;
     }
 }
@@ -53,19 +48,13 @@ pub(crate) async fn terminate(child: &mut Child, _pid: Option<u32>) {
     let _ = child.kill().await;
 }
 
-/// Send one signal to a whole group. `false` when the helper could not run.
+/// Send one signal to a whole group. `false` on an error that a fallback
+/// `child.kill()` might still recover from; a group that is already gone
+/// counts as delivered, not as failure.
 #[cfg(unix)]
-async fn signal(group: u32, signal: &str) -> bool {
-    let status = tokio::process::Command::new("kill")
-        .arg(signal)
-        .arg(format!("-{group}"))
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-
-    matches!(
-        tokio::time::timeout(SIGNAL_TIMEOUT, status).await,
-        Ok(Ok(_))
-    )
+fn signal(group: u32, signal: libc::c_int) -> bool {
+    // SAFETY: `kill(2)` only reads its arguments and reports through errno; a
+    // negative pid addresses the whole process group rather than one process.
+    let result = unsafe { libc::kill(-(group as libc::pid_t), signal) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }

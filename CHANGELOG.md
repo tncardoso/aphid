@@ -4,8 +4,9 @@
 
 ### Fixed
 
-- Stopping a command no longer waits on the `kill` helper forever: the helper
-  has its own time budget, so a busy machine cannot stretch a stop past it.
+- Stopping a command sends the signal straight through the syscall instead of
+  spawning the `kill` binary, so a busy machine can no longer stretch a stop
+  past the grace period behind a queued fork+exec.
 
 ### Added
 
