@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- Skills are read from `.agents/skills` as well as `.aphid/skills`, in the
+  workspace and in your home directory. Thus one skill directory can serve aphid
+  and the other agents together. A name in `.aphid/skills` still wins.
+
 ## [0.1.0] - 2026-08-13
 
 ### Fixed

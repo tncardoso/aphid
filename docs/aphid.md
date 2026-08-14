@@ -357,8 +357,10 @@ To correct a model by hand, refer to [The file](core.md#the-file).
 | `<workspace>/AGENTS.md` | Instructions for one workspace. |
 | `<workspace>/.aphid/sessions/` | The saved sessions. |
 | `<workspace>/.aphid/skills/` | The skills of this workspace. |
+| `<workspace>/.agents/skills/` | The skills of this workspace that the other agents read too. |
 | `<workspace>/.aphid/plugins/` | The plugins of this workspace. |
 | `~/.aphid/skills/` | Your skills, for each workspace. |
+| `~/.agents/skills/` | Your skills that the other agents read too. |
 | `~/.aphid/plugins/` | Your plugins, for each workspace. |
 | `~/.aphid/trust.json` | The workspaces whose plugins you agreed to. |
 | `~/.aphid/alate/<name>/` | One resident agent. See [Alate](alate.md). |

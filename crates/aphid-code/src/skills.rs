@@ -5,12 +5,17 @@
 //! progressive disclosure, which keeps a dozen skills from costing a dozen
 //! skills' worth of context on every request.
 //!
-//! Layout, searched in the workspace and then under `~/.aphid`:
+//! Layouts, searched in the workspace and then under the home directory:
 //!
 //! ```text
 //! .aphid/skills/<name>/SKILL.md
 //! .aphid/skills/<name>.md
+//! .agents/skills/<name>/SKILL.md
+//! .agents/skills/<name>.md
 //! ```
+//!
+//! `.agents` is the directory the other agents read, next to the `AGENTS.md`
+//! they already share, so one skill can serve them all.
 
 use std::path::{Path, PathBuf};
 
@@ -42,12 +47,18 @@ pub struct Diagnostic {
 /// parameter rather than an environment lookup so this is testable without
 /// mutating process-wide state.
 ///
-/// Project skills come first and shadow a global skill of the same name.
+/// Project skills come first and shadow a global skill of the same name. At
+/// each level `.aphid` comes before `.agents`, so a name that resolves today
+/// keeps resolving to the same file.
 #[must_use]
 pub fn discover(workspace: &Workspace, home: Option<&Path>) -> (Vec<Skill>, Vec<Diagnostic>) {
-    let mut roots = vec![(workspace.root().join(".aphid").join("skills"), true)];
+    let mut roots = vec![
+        (workspace.root().join(".aphid").join("skills"), true),
+        (workspace.root().join(".agents").join("skills"), true),
+    ];
     if let Some(home) = home {
         roots.push((home.join(".aphid").join("skills"), false));
+        roots.push((home.join(".agents").join("skills"), false));
     }
 
     let mut skills: Vec<Skill> = Vec::new();

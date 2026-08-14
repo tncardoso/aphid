@@ -13,19 +13,27 @@ particular kind of test.
 
 ## Where skills go
 
-Aphid looks in the workspace first, and then in your home directory. Two layouts
-are correct:
+Aphid looks in the workspace first, and then in your home directory. At each of
+the two, it reads `.aphid/skills` and then `.agents/skills`:
 
 ```
 .aphid/skills/<name>/SKILL.md
 .aphid/skills/<name>.md
+.agents/skills/<name>/SKILL.md
+.agents/skills/<name>.md
 ```
 
-Use the directory when the skill has files of its own — a script, a template, an
-example. The model can read them, because you give it the path.
+`.agents` is the directory that the other agents read, next to the `AGENTS.md`
+that they already share. Put a skill there when the same instructions must serve
+aphid and the other agents together. Put a skill in `.aphid` when it is only for
+aphid.
+
+Use the directory layout when the skill has files of its own — a script, a
+template, an example. The model can read them, because you give it the path.
 
 A skill in the workspace hides a skill in your home directory with the same
-name. Thus a project can replace a skill that you carry everywhere.
+name. Thus a project can replace a skill that you carry everywhere. At the same
+level, a skill in `.aphid` hides a skill in `.agents` with the same name.
 
 ## Writing one
 
@@ -75,6 +83,6 @@ continues.
 
 ## In a resident agent
 
-An alate reads the skills in `<home>/.aphid/skills`, in the same manner. The
-home of the alate is its workspace, so this is the workspace layout and not a
-special one. Refer to [Alate](../alate.md).
+An alate reads the skills in `<home>/.aphid/skills` and `<home>/.agents/skills`,
+in the same manner. The home of the alate is its workspace, so these are the
+workspace layouts and not special ones. Refer to [Alate](../alate.md).

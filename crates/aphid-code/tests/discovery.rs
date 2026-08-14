@@ -165,3 +165,74 @@ fn no_skills_directory_is_not_a_problem() {
     assert!(skills.is_empty());
     assert!(diagnostics.is_empty());
 }
+
+#[test]
+fn skills_load_from_the_agents_directory() {
+    let temp = Temp::new();
+    temp.write(
+        ".agents/skills/release/SKILL.md",
+        "---\ndescription: How to cut a release\n---\n# Release\n",
+    );
+    let workspace = Workspace::new(&temp.root);
+
+    let (skills, diagnostics) = skills::discover(&workspace, None);
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0].name, "release");
+    assert!(skills[0].path.ends_with(".agents/skills/release/SKILL.md"));
+    // `.agents` is in the workspace, so it is a project skill like any other.
+    assert!(skills[0].project);
+}
+
+#[test]
+fn both_project_roots_are_read_together() {
+    let temp = Temp::new();
+    temp.write(".aphid/skills/release.md", "---\ndescription: aphid\n---\n");
+    temp.write(".agents/skills/notes.md", "---\ndescription: agents\n---\n");
+    let workspace = Workspace::new(&temp.root);
+
+    let (skills, diagnostics) = skills::discover(&workspace, None);
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let names: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
+    assert_eq!(names, vec!["notes", "release"]);
+    assert!(skills.iter().all(|skill| skill.project));
+}
+
+#[test]
+fn the_aphid_root_wins_a_name_collision() {
+    let temp = Temp::new();
+    temp.write(
+        ".aphid/skills/release.md",
+        "---\ndescription: aphid version\n---\n",
+    );
+    temp.write(
+        ".agents/skills/release.md",
+        "---\ndescription: agents version\n---\n",
+    );
+    let workspace = Workspace::new(&temp.root);
+
+    let (skills, _) = skills::discover(&workspace, None);
+
+    // `.aphid` is searched first, so a name that resolves today keeps resolving
+    // to the same file.
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0].description, "aphid version");
+}
+
+#[test]
+fn a_global_agents_skill_is_found() {
+    let temp = Temp::new();
+    temp.write(
+        "home/.agents/skills/notes.md",
+        "---\ndescription: only global\n---\n",
+    );
+    let workspace = Workspace::new(&temp.root);
+
+    let (skills, _) = skills::discover(&workspace, Some(&temp.root.join("home")));
+
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0].name, "notes");
+    assert!(!skills[0].project);
+}

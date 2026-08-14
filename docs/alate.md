@@ -92,8 +92,8 @@ The home is also the workspace of the agent. Two results follow:
 
 - `read`, `write` and `edit` can touch only this directory. To let the agent
   work somewhere different, set `workspace` in `alate.json`.
-- `AGENTS.md`, `.aphid/skills` and `.aphid/plugins` are found in the usual way,
-  because they are in the usual place.
+- `AGENTS.md`, `.aphid/skills`, `.agents/skills` and `.aphid/plugins` are found
+  in the usual way, because they are in the usual place.
 
 The `bash` tool is not limited to the home. This is true of the coding agent
 also.
@@ -281,8 +281,8 @@ A plugin that calls `prompt` puts words to the agent in the same queue that a
 terminal uses. A plugin with an `on_tick` hook runs four times each second. See
 [Plugins](aphid/plugins.md).
 
-Skills in `<home>/.aphid/skills` work as they do in the coding agent. See
-[Skills](aphid/skills.md).
+Skills in `<home>/.aphid/skills` and `<home>/.agents/skills` work as they do in
+the coding agent. See [Skills](aphid/skills.md).
 
 ## Logs
 

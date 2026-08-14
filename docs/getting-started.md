@@ -149,11 +149,13 @@ heartbeat and the crontab.
 | `~/.aphid/models.json` | Your models. |
 | `~/.aphid/AGENTS.md` | Instructions for each workspace. |
 | `~/.aphid/skills/` | Your skills, for each workspace. |
+| `~/.agents/skills/` | Your skills that the other agents read too. |
 | `~/.aphid/plugins/` | Your plugins, for each workspace. |
 | `~/.aphid/alate/<name>/` | One resident agent. |
 | `<workspace>/AGENTS.md` | Instructions for one workspace. |
 | `<workspace>/.aphid/sessions/` | The saved sessions. |
 | `<workspace>/.aphid/skills/` | The skills of this workspace. |
+| `<workspace>/.agents/skills/` | The skills of this workspace that the other agents read too. |
 | `<workspace>/.aphid/plugins/` | The plugins of this workspace. |
 
 `APHID_HOME` replaces `~/.aphid`. Use it to keep a separate configuration.
