@@ -14,6 +14,11 @@
 - The aphid mascot on the site splats into green droplets when you click on it,
   then the splat fades away.
 
+### Changed
+
+- The mouse wheel now scrolls the transcript instead of the input box in the
+  terminal UI.
+
 ### Fixed
 
 - In the terminal input, `Down` on the line you are writing no longer wipes the

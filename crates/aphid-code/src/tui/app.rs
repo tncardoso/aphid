@@ -11,8 +11,9 @@ use aphid_core::{Model, ThinkingLevel, Transcript};
 use aphid_plugin::{Action as PluginAction, ScriptBackend, SessionInfo};
 use compact_str::CompactString;
 use ratatui::crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, KeyCode, KeyEvent, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, KeyCode,
+    KeyEvent, KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -52,6 +53,10 @@ const TICK: Duration = Duration::from_millis(250);
 /// How often the process list is redrawn while it is open. It counts in
 /// seconds, so this is as often as it can possibly need.
 const PS_REFRESH: Duration = Duration::from_millis(250);
+
+/// How many transcript lines one mouse wheel step moves. Smaller than the
+/// keyboard page step because a wheel sends many events in quick succession.
+const MOUSE_SCROLL_LINES: usize = 3;
 
 type Screen = Terminal<CrosstermBackend<Stdout>>;
 
@@ -238,6 +243,19 @@ impl App {
                     risk,
                     reply,
                 }));
+            }
+            UiEvent::Mouse(mouse) => {
+                if self.modal.is_none() {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            self.view.scroll = self.view.scroll.saturating_add(MOUSE_SCROLL_LINES);
+                        }
+                        MouseEventKind::ScrollDown => {
+                            self.view.scroll = self.view.scroll.saturating_sub(MOUSE_SCROLL_LINES);
+                        }
+                        _ => {}
+                    }
+                }
             }
             UiEvent::Key(_) | UiEvent::Paste(_) | UiEvent::Resize => {}
         }
@@ -548,7 +566,8 @@ const HELP: &str = "\
   Ctrl-C      quits
   Ctrl-P      cycles model
   Ctrl-T      shows reasoning
-  PageUp/Dn   scroll";
+  PageUp/Dn   scroll transcript
+  Mouse wheel scroll transcript";
 
 fn parse_thinking(raw: &str) -> Result<Option<ThinkingLevel>, String> {
     Ok(match raw {
@@ -942,6 +961,7 @@ fn setup() -> std::io::Result<(Screen, bool)> {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
+        let _ = std::io::stdout().execute(DisableMouseCapture);
         let _ = std::io::stdout().execute(LeaveAlternateScreen);
         previous(info);
     }));
@@ -954,6 +974,9 @@ fn setup() -> std::io::Result<(Screen, bool)> {
     // console has no such mode and says so; a session there is no worse off
     // than before, so the refusal is not worth failing the start-up over.
     let _ = stdout.execute(EnableBracketedPaste);
+    // Mouse reporting is also best-effort: a terminal that cannot report the
+    // wheel still works, it just keeps keyboard-only scrolling.
+    let _ = stdout.execute(EnableMouseCapture);
 
     let kitty = supports_keyboard_enhancement().unwrap_or(false);
     if kitty {
@@ -972,6 +995,7 @@ fn restore(terminal: &mut Screen, kitty: bool) -> std::io::Result<()> {
             .backend_mut()
             .execute(PopKeyboardEnhancementFlags)?;
     }
+    let _ = terminal.backend_mut().execute(DisableMouseCapture);
     let _ = terminal.backend_mut().execute(DisableBracketedPaste);
     disable_raw_mode()?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
@@ -999,7 +1023,7 @@ mod tests {
     use super::*;
     use aphid_agent::testing::{Turn, scripted};
     use aphid_core::{Role, providers::deepseek};
-    use ratatui::crossterm::event::KeyModifiers;
+    use ratatui::crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
 
     fn agent_with(turns: Vec<Turn>) -> Agent {
         let (backend, _script) = scripted(turns);
@@ -1029,6 +1053,15 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             agent.as_mut(),
         );
+    }
+
+    fn mouse(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }
     }
 
     #[tokio::test]
@@ -1199,6 +1232,49 @@ mod tests {
             "{:?}",
             tools[0]
         );
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_the_transcript() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+
+        app.apply(UiEvent::Mouse(mouse(MouseEventKind::ScrollUp)));
+        assert_eq!(app.view.scroll, MOUSE_SCROLL_LINES);
+
+        app.apply(UiEvent::Mouse(mouse(MouseEventKind::ScrollDown)));
+        assert_eq!(app.view.scroll, 0);
+    }
+
+    #[test]
+    fn mouse_wheel_down_saturates_at_the_newest_message() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+
+        app.apply(UiEvent::Mouse(mouse(MouseEventKind::ScrollDown)));
+        app.apply(UiEvent::Mouse(mouse(MouseEventKind::ScrollDown)));
+        assert_eq!(app.view.scroll, 0);
+    }
+
+    #[test]
+    fn non_wheel_mouse_events_do_not_scroll() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+
+        app.apply(UiEvent::Mouse(mouse(MouseEventKind::Moved)));
+        assert_eq!(app.view.scroll, 0);
+    }
+
+    #[test]
+    fn mouse_wheel_does_not_change_the_input() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+        app.input.paste("draft");
+
+        app.apply(UiEvent::Mouse(mouse(MouseEventKind::ScrollUp)));
+        app.apply(UiEvent::Mouse(mouse(MouseEventKind::ScrollDown)));
+
+        assert_eq!(app.input.text(), "draft");
     }
 
     #[tokio::test]

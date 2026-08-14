@@ -12,7 +12,7 @@ use aphid_agent::{
     TurnSummary,
 };
 use aphid_core::{BlockKind, ContentRef, Event, Json, StopReason, Usage};
-use ratatui::crossterm::event::{self, KeyEvent};
+use ratatui::crossterm::event::{self, KeyEvent, MouseEvent};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::plugins::permissions::{Confirmer, Decision, Risk};
@@ -74,6 +74,8 @@ pub enum UiEvent {
     /// paste. Its newlines are text, not the Enters they would be if the same
     /// characters had been typed.
     Paste(String),
+    /// A mouse wheel event. Other mouse events are not forwarded.
+    Mouse(MouseEvent),
     Resize,
 }
 
@@ -284,6 +286,16 @@ pub fn spawn_input_thread(events: UnboundedSender<UiEvent>) {
                 }
                 Ok(event::Event::Paste(text)) => {
                     if events.send(UiEvent::Paste(text)).is_err() {
+                        return;
+                    }
+                }
+                Ok(event::Event::Mouse(mouse))
+                    if matches!(
+                        mouse.kind,
+                        event::MouseEventKind::ScrollUp | event::MouseEventKind::ScrollDown
+                    ) =>
+                {
+                    if events.send(UiEvent::Mouse(mouse)).is_err() {
                         return;
                     }
                 }
