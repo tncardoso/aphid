@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-13
+
 ### Fixed
 
 - Stopping a command sends the signal straight through the syscall instead of
@@ -29,4 +31,5 @@
 [kac]: https://keepachangelog.com/en/1.1.0/
 [semver]: https://semver.org/spec/v2.0.0.html
 [releasing]: https://aphid.embornal.com/docs/releasing.html
-[Unreleased]: https://github.com/tncardoso/aphid/commits/main
+[Unreleased]: https://github.com/tncardoso/aphid/compare/v0.1.0...main
+[0.1.0]: https://github.com/tncardoso/aphid/releases/tag/v0.1.0
