@@ -121,7 +121,7 @@ Each field has a default. An absent file, and an empty file, give the defaults.
 
 | Field | Effect |
 | --- | --- |
-| `model` | The model, by the name `aphid model list` shows. The first model of the catalogue when absent. |
+| `model` | The model, by the name `aphid model list` shows. The first configured model when absent. An alate with no configured model fails and says to run `aphid models add`. |
 | `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`. |
 | `workspace` | Where the agent works. The home when absent. |
 | `permissions` | `ask`, `allow` or `deny`. See [Permissions](#permissions). |

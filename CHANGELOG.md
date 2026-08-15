@@ -13,11 +13,15 @@
   chat.
 - The aphid mascot on the site splats into green droplets when you click on it,
   then the splat fades away.
+- When the coding agent starts with no configured models, it prints how to add
+  one with `aphid models add`.
 
 ### Changed
 
 - The mouse wheel now scrolls the transcript instead of the input box in the
   terminal UI.
+- The coding agent reads its model catalogue only from `~/.aphid/models.json`;
+  it no longer supplies built-in DeepSeek models.
 
 ### Fixed
 

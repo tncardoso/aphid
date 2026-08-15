@@ -50,15 +50,15 @@ pub struct HarnessOptions {
 }
 
 impl HarnessOptions {
-    /// Defaults for a workspace: the catalog's first model, medium thinking,
-    /// project context on.
+    /// Defaults for a workspace: medium thinking and project context on. The
+    /// caller supplies the model; the coding agent has no default model.
     #[must_use]
-    pub fn new(workspace: Workspace) -> Self {
+    pub fn new(workspace: Workspace, model: Model) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| workspace.root().to_path_buf());
         Self {
             workspace,
             cwd,
-            model: Catalog::new().default_model(),
+            model,
             thinking: Some(ThinkingLevel::Medium),
             system: None,
             append_system: None,

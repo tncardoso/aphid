@@ -6,10 +6,15 @@
 //! survive a restart, and a terminal UI.
 //!
 //! ```no_run
-//! use aphid_code::{Workspace, harness::{self, HarnessOptions}};
+//! use aphid_code::{Catalog, Workspace, harness::{self, HarnessOptions}};
 //!
 //! # async fn run() {
-//! let mut options = HarnessOptions::new(Workspace::discover());
+//! let catalog = Catalog::new();
+//! let Some(model) = catalog.default_model() else {
+//!     eprintln!("no models configured. Add one with `aphid models add <provider/model>`.");
+//!     return;
+//! };
+//! let mut options = HarnessOptions::new(Workspace::discover(), model);
 //! options.api_key = std::env::var("DEEPSEEK_API_KEY").ok().map(Into::into);
 //!
 //! let mut harness = harness::build(options);

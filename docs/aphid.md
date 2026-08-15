@@ -128,11 +128,11 @@ $ aphid --model deepseek-v4-pro -p "hello"   # the full identifier
 $ aphid --model pro -p "hello"               # the last part
 ```
 
-If you give no `--model`, aphid uses the first model in the catalogue.
+If you give no `--model`, aphid uses the first model in the catalogue. If the
+catalogue is empty, aphid prints how to add a model and exits.
 
-`--models` prints the catalogue. The catalogue contains the models that aphid
-supplies and the models in `~/.aphid/models.json`. To add a model, refer to
-[`model`](#model).
+`--models` prints the catalogue. The catalogue is the models in
+`~/.aphid/models.json`. To add a model, refer to [`model`](#model).
 
 ### Set the quantity of reasoning
 
@@ -280,7 +280,7 @@ aphid model remove <NAME>
 ```
 
 `<NAME>` accepts the same three forms as `--model`. This command removes a model
-from `~/.aphid/models.json` only. It cannot remove a model that aphid supplies.
+from `~/.aphid/models.json`.
 
 ```console
 $ aphid model remove glm-5
@@ -290,11 +290,10 @@ removed glm-5 from /home/you/.aphid/models.json
 ### `model list`
 
 ```
-aphid model list [--all]
+aphid model list
 ```
 
-This command prints the models in `~/.aphid/models.json`. `--all` prints the
-models that aphid supplies also, and gives the source of each model.
+This command prints the models in `~/.aphid/models.json`.
 
 ### `model search`
 
@@ -368,7 +367,7 @@ To correct a model by hand, refer to [The file](core.md#the-file).
 | Variable | Effect |
 | --- | --- |
 | `APHID_HOME` | Replaces `~/.aphid`. Use it to keep a separate configuration. |
-| `DEEPSEEK_API_KEY` | The key for the models that aphid supplies. |
+| `DEEPSEEK_API_KEY` | The key for the built-in models that `raw` and `agent` use. |
 
 `APHID_HOME` moves the model catalogue, the trust file and the alates. It does
 not move `AGENTS.md`, the skills or the plugins of your home directory: those

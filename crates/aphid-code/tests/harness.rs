@@ -7,7 +7,23 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use aphid_agent::testing::{Turn, scripted};
 use aphid_code::harness::{self, HarnessOptions};
 use aphid_code::{Catalog, Workspace};
-use aphid_core::Role;
+use aphid_core::catalog::ModelEntry;
+use aphid_core::{Model, Role};
+
+/// A minimal config entry, the shape a user would actually type.
+fn model_entry(id: &str) -> ModelEntry {
+    serde_json::from_value(serde_json::json!({
+        "id": id,
+        "base_url": "http://localhost:8080/v1",
+        "context_window": 32768,
+        "max_tokens": 4096,
+    }))
+    .expect("a valid entry")
+}
+
+fn test_model(id: &str) -> Model {
+    Model::try_from(&model_entry(id)).expect("a valid model")
+}
 
 struct Temp {
     root: PathBuf,
@@ -38,7 +54,7 @@ impl Temp {
     }
 
     fn options(&self) -> HarnessOptions {
-        let mut options = HarnessOptions::new(Workspace::new(&self.root));
+        let mut options = HarnessOptions::new(Workspace::new(&self.root), test_model("test-model"));
         options.cwd = self.root.clone();
         options
     }
@@ -184,7 +200,10 @@ async fn switching_model_mid_session_keeps_the_conversation() {
     let temp = Temp::new();
     let (backend, script) = scripted([Turn::text("first"), Turn::text("second")]);
 
-    let catalog = Catalog::new();
+    let catalog = Catalog::from_parts(&[
+        model_entry("deepseek-v4-flash"),
+        model_entry("deepseek-v4-pro"),
+    ]);
     let mut options = temp.options();
     options.stream_fn = Some(backend);
     options.model = catalog.resolve("flash").expect("flash");

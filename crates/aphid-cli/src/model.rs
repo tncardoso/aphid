@@ -66,11 +66,7 @@ pub struct RemoveArgs {
 }
 
 #[derive(Debug, clap::Args)]
-pub struct ListArgs {
-    /// Show the built-in models too
-    #[arg(long)]
-    pub all: bool,
-}
+pub struct ListArgs {}
 
 #[derive(Debug, clap::Args)]
 pub struct SearchArgs {
@@ -270,21 +266,13 @@ fn remove(args: &RemoveArgs) -> ExitCode {
         }
     };
 
-    // Resolve against the configured models alone, using the same rules
-    // `--model` uses, so `aphid model remove pro` works.
-    let configured = Catalog::from_parts(Vec::new(), config.models());
+    // Resolve against the configured models, using the same rules `--model`
+    // uses, so `aphid model remove pro` works.
+    let configured = Catalog::from_parts(config.models());
     let id = match configured.resolve(&args.name) {
         Ok(model) => model.id.to_string(),
         Err(error) => {
-            if Catalog::new().resolve(&args.name).is_ok() {
-                eprintln!(
-                    "aphid: `{}` is a built-in model, not one of yours, so there is nothing to \
-                     remove",
-                    args.name
-                );
-            } else {
-                eprintln!("aphid: {error}");
-            }
+            eprintln!("aphid: {error}");
             return ExitCode::from(USAGE_ERROR);
         }
     };
@@ -302,7 +290,7 @@ fn remove(args: &RemoveArgs) -> ExitCode {
 // list
 // ---------------------------------------------------------------------------
 
-fn list(args: &ListArgs) -> ExitCode {
+fn list(_args: &ListArgs) -> ExitCode {
     let Some(path) = catalog::config_path() else {
         eprintln!("aphid: no home directory, so there is no catalog to read");
         return ExitCode::FAILURE;
@@ -315,22 +303,9 @@ fn list(args: &ListArgs) -> ExitCode {
         }
     };
 
-    if args.all {
-        let catalog = Catalog::new();
-        for model in catalog.models() {
-            let origin = if config.find(model.id.as_str()).is_some() {
-                "config"
-            } else {
-                "built-in"
-            };
-            row(&model.id, &model.provider.to_string(), model, origin);
-        }
-        return ExitCode::SUCCESS;
-    }
-
     if config.models().is_empty() {
         println!("no models in {}", path.display());
-        println!("Add one with `aphid model add <provider/model>`.");
+        println!("Add one with `aphid models add <provider/model>`.");
         return ExitCode::SUCCESS;
     }
     for entry in config.models() {

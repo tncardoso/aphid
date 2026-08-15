@@ -14,6 +14,10 @@ use aphid_core::providers::deepseek;
 
 use crate::Think;
 
+/// Shown when the coding agent starts with no configured models.
+const NO_MODELS_MESSAGE: &str =
+    "no models configured. Add one with `aphid models add <provider/model>`.";
+
 /// The coding agent's options.
 ///
 /// Flattened into the top-level command, so `aphid <prompt>` needs no
@@ -97,6 +101,9 @@ pub async fn run(args: Args) -> ExitCode {
     }
 
     if args.list_models {
+        if catalog.models().is_empty() {
+            println!("{NO_MODELS_MESSAGE}");
+        }
         for model in catalog.models() {
             println!(
                 "{:<24} {} ctx · ${:.2}/${:.2} per M tokens",
@@ -122,17 +129,6 @@ pub async fn run(args: Args) -> ExitCode {
         }
         return ExitCode::SUCCESS;
     }
-
-    let model = match &args.model {
-        Some(name) => match catalog.resolve(name) {
-            Ok(model) => model,
-            Err(error) => {
-                eprintln!("aphid: --model {name}: {error}");
-                return ExitCode::from(2);
-            }
-        },
-        None => catalog.default_model(),
-    };
 
     let found = collect_plugins(&workspace, args.no_plugins, &args.plugins);
 
@@ -160,6 +156,24 @@ pub async fn run(args: Args) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    if catalog.models().is_empty() {
+        eprintln!("aphid: {NO_MODELS_MESSAGE}");
+        return ExitCode::FAILURE;
+    }
+
+    let model = match &args.model {
+        Some(name) => match catalog.resolve(name) {
+            Ok(model) => model,
+            Err(error) => {
+                eprintln!("aphid: --model {name}: {error}");
+                return ExitCode::from(2);
+            }
+        },
+        None => catalog
+            .default_model()
+            .expect("the empty catalog check ran above"),
+    };
+
     let plugin_files = gate(
         &workspace,
         found,
@@ -178,8 +192,7 @@ pub async fn run(args: Args) -> ExitCode {
 
     let prompt = args.prompt();
 
-    let mut options = HarnessOptions::new(workspace.clone());
-    options.model = model;
+    let mut options = HarnessOptions::new(workspace.clone(), model);
     // Left at the harness default (medium) unless the user named a level.
     if let Some(think) = args.think {
         options.thinking = think.level();
@@ -400,4 +413,15 @@ fn resolve_resume(
             .ok_or_else(|| format!("no session for {} yet", cwd.display()))?,
     };
     Ok(Some(found.path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_no_models_message_names_the_models_subcommand() {
+        assert!(NO_MODELS_MESSAGE.contains("aphid models add"));
+        assert!(NO_MODELS_MESSAGE.contains("<provider/model>"));
+    }
 }

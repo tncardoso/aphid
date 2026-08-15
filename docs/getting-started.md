@@ -7,9 +7,9 @@ it for the first time.
 
 - A Rust toolchain of the 2024 edition or later. Aphid is built with
   `rustc` 1.94.
-- An API key for a model. The models that aphid supplies are DeepSeek models,
-  and they read `DEEPSEEK_API_KEY`. To use a different provider, refer to
-  [Add a model](#add-a-model).
+- An API key for a model. The coding agent has no models until you add one
+  with `aphid models add <provider/model>`. The command records which
+  environment variable holds the key. Refer to [Add a model](#add-a-model).
 - A system with Unix sockets, if you want the resident agent. `aphid alate` does
   not work on Windows. The coding agent does.
 
@@ -93,10 +93,9 @@ Aphid records each session, and it records the headless runs also. `aphid
 
 ## Add a model
 
-The catalogue is the models that aphid supplies, and then your own models in
-`~/.aphid/models.json`. The descriptions come from
-[models.dev](https://models.dev), so you do not write out a context window and a
-price by hand.
+The catalogue is the models in `~/.aphid/models.json`. The descriptions come
+from [models.dev](https://models.dev), so you do not write out a context
+window and a price by hand.
 
 ```console
 $ aphid model search glm --limit 3

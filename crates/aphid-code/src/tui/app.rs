@@ -793,8 +793,7 @@ async fn drive(
         }
 
         // Anything typed while the agent was busy goes now that it is free.
-        if let Some(started) = take_pending(&mut idle, app) {
-            running = Some(started);
+        if start_pending(&mut idle, app, &mut running) {
             dirty = true;
         }
     }
@@ -807,21 +806,21 @@ async fn drive(
     Ok(())
 }
 
-/// Hand the idle agent its queued prompt, if there is both.
-///
-/// Written as a guard plus two takes rather than as a tuple pattern: building
-/// `(idle.take(), app.queued.take())` moves both out *before* the match, so a
-/// failed pattern drops the agent instead of putting it back.
-fn take_pending(idle: &mut Option<Agent>, app: &mut App) -> Option<Running> {
-    if idle.is_none() || app.queued.is_empty() {
-        return None;
+/// Start the next queued prompt when there is both an idle agent and no run in
+/// flight. The explicit `running` guard is what keeps the queue serial: taking
+/// the idle agent while a run was still finishing would leave two runs alive.
+fn start_pending(idle: &mut Option<Agent>, app: &mut App, running: &mut Option<Running>) -> bool {
+    if running.is_some() || idle.is_none() || app.queued.is_empty() {
+        return false;
     }
+
     let agent = idle.take().expect("just checked");
     let prompt = app.queued.pop_front().expect("just checked");
 
     app.status.queued = !app.queued.is_empty();
     app.status.running = true;
-    Some(start(agent, prompt))
+    *running = Some(start(agent, prompt));
+    true
 }
 
 fn start(mut agent: Agent, prompt: String) -> Running {
@@ -1073,10 +1072,17 @@ mod tests {
         type_line(&mut app, &mut idle, "hello");
         assert_eq!(app.queued(), Some("hello"), "the line should be queued");
 
-        let running = take_pending(&mut idle, &mut app).expect("a run should start");
+        let mut running = None;
+        assert!(
+            start_pending(&mut idle, &mut app, &mut running),
+            "a run should start"
+        );
         assert!(idle.is_none(), "the agent moved into the run");
 
-        let (agent, outcome) = running.await.expect("the run should not panic");
+        let (agent, outcome) = running
+            .expect("just started")
+            .await
+            .expect("the run should not panic");
         assert_eq!(outcome.turns, 1);
 
         // system, user, assistant
@@ -1092,14 +1098,18 @@ mod tests {
         let mut app = app_for(&agent);
         let mut idle = Some(agent);
 
+        let mut running = None;
         for _ in 0..5 {
-            assert!(take_pending(&mut idle, &mut app).is_none());
+            assert!(!start_pending(&mut idle, &mut app, &mut running));
             assert!(idle.is_some(), "the agent must survive an idle tick");
         }
 
         type_line(&mut app, &mut idle, "still there?");
-        let running = take_pending(&mut idle, &mut app).expect("a run should still start");
-        let (agent, outcome) = running.await.expect("no panic");
+        assert!(
+            start_pending(&mut idle, &mut app, &mut running),
+            "a run should still start"
+        );
+        let (agent, outcome) = running.expect("just started").await.expect("no panic");
         assert_eq!(outcome.turns, 1);
         assert_eq!(agent.transcript().len(), 3);
     }
@@ -1111,21 +1121,29 @@ mod tests {
         let mut idle = Some(agent);
 
         type_line(&mut app, &mut idle, "one");
-        let running = take_pending(&mut idle, &mut app).expect("first run");
+        let mut running = None;
+        assert!(
+            start_pending(&mut idle, &mut app, &mut running),
+            "first run"
+        );
 
         // Typed while the agent is away: no agent to hand it to yet.
         app.status.running = true;
         type_line(&mut app, &mut idle, "two");
         assert_eq!(app.queued(), Some("two"));
         assert!(app.status.queued, "the status line should say so");
-        assert!(take_pending(&mut idle, &mut app).is_none());
+        assert!(!start_pending(&mut idle, &mut app, &mut running));
 
-        let (agent, _) = running.await.expect("no panic");
+        let (agent, _) = running.expect("first run").await.expect("no panic");
         idle = Some(agent);
 
-        let running = take_pending(&mut idle, &mut app).expect("the queued line goes now");
+        let mut running = None;
+        assert!(
+            start_pending(&mut idle, &mut app, &mut running),
+            "the queued line goes now"
+        );
         assert!(!app.status.queued);
-        let (agent, _) = running.await.expect("no panic");
+        let (agent, _) = running.expect("just started").await.expect("no panic");
 
         // system, user, assistant, user, assistant
         assert_eq!(agent.transcript().len(), 5);
@@ -1161,8 +1179,12 @@ mod tests {
         app.status.running = false;
         for expected in ["typed", "from a plugin", "and another"] {
             assert_eq!(app.queued(), Some(expected));
-            let running = take_pending(&mut idle, &mut app).expect("a run should start");
-            let (agent, _) = running.await.expect("no panic");
+            let mut running = None;
+            assert!(
+                start_pending(&mut idle, &mut app, &mut running),
+                "a run should start"
+            );
+            let (agent, _) = running.expect("just started").await.expect("no panic");
             idle = Some(agent);
         }
         assert_eq!(app.queued(), None, "the queue is drained in order");
@@ -1286,7 +1308,8 @@ mod tests {
         type_line(&mut app, &mut idle, "/tools");
 
         assert!(app.queued().is_none(), "a command is not a prompt");
-        assert!(take_pending(&mut idle, &mut app).is_none());
+        let mut running = None;
+        assert!(!start_pending(&mut idle, &mut app, &mut running));
         assert!(idle.is_some());
     }
 

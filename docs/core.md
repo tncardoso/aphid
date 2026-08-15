@@ -91,16 +91,16 @@ it, and `thinking` in `alate.json` sets it for a resident agent.
 
 ## The catalogue
 
-The catalogue is the models that aphid supplies, and then the models in
-`~/.aphid/models.json`. A model in the file with the same identifier as one that
-aphid supplies replaces it. Thus aphid works with no configuration at all.
+The coding agent catalogue is the models in `~/.aphid/models.json`. It ships no
+default models, so a fresh install has an empty catalogue until you add one.
 
-Aphid supplies `deepseek-v4-flash` and `deepseek-v4-pro`, and both read
-`DEEPSEEK_API_KEY`.
-
-`aphid model add` writes this file for you, from the description on
+`aphid models add` writes this file for you, from the description on
 [models.dev](https://models.dev). Refer to [`model`](aphid.md#model) for the
-commands.
+commands. When the coding agent starts with no models, it prints how to add
+one and exits.
+
+The `raw` and `agent` front ends still use the built-in DeepSeek models. They
+do not read `~/.aphid/models.json`.
 
 ### models.dev
 
@@ -152,8 +152,9 @@ in the file, aphid sends the name of the level.
 "thinking_levels": { "off": "disabled", "minimal": "low", "max": "max", "xhigh": false }
 ```
 
-If aphid cannot read the file, it prints the problem and continues with the
-models that it supplies. A mistake in this file cannot prevent a start.
+If aphid cannot read the file, it prints the problem and continues with an
+empty catalogue. The coding agent then exits with the no-models message. A
+mistake in this file cannot make aphid use a model you did not configure.
 
 ## Looking at the protocol
 

@@ -94,7 +94,9 @@ pub async fn run(options: Options) -> Result<(), String> {
     let catalog = Catalog::new();
     let model = match &config.model {
         Some(name) => catalog.resolve(name).map_err(|error| error.to_string())?,
-        None => catalog.default_model(),
+        None => catalog.default_model().ok_or_else(|| {
+            "no models configured. Add one with `aphid models add <provider/model>`.".to_owned()
+        })?,
     };
 
     // A scripted backend reaches no provider, so it needs no key. Demanding one

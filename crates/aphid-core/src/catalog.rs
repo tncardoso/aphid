@@ -1,9 +1,9 @@
 //! The user's model catalog: `~/.aphid/models.json`.
 //!
-//! [`providers`](crate::providers) writes model metadata out as constants, which
-//! is right for the handful aphid ships. This is the other half: a file the user
-//! owns, so a model aphid has never heard of can be described once and then
-//! selected like any built-in.
+//! [`providers`](crate::providers) writes model metadata out as constants for
+//! the `raw` and `agent` front ends. This is the other half: a file the user
+//! owns, so the coding agent can use a model aphid has never heard of once the
+//! user describes it here.
 //!
 //! The on-disk shape is deliberately *not* [`Model`] with `derive(Serialize)`.
 //! `Model` is a runtime layout — `ThinkingLevelMap` is an array indexed by level,
