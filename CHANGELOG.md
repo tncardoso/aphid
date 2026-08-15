@@ -4,6 +4,8 @@
 
 ### Added
 
+- The todo plugin gains a `todo_clear` tool that removes every pending and
+  done task from the list.
 - The `write` tool reports the file size it is about to write and the bytes
   written, as it runs, so a write to a large or slow file is no longer a silent
   card.
@@ -23,6 +25,9 @@
   then the splat fades away.
 - When the coding agent starts with no configured models, it prints how to add
   one with `aphid models add`.
+- Rhai plugins can register interactive side panels in the terminal UI. A panel
+  can show text, lists, inputs and buttons, and receives focus with `F6` or a
+  click.
 
 ### Changed
 

@@ -10,12 +10,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use aphid_agent::Interest;
-use rhai::{AST, Dynamic, Engine, FnPtr, FuncArgs, Scope};
+use rhai::{AST, Dynamic, Engine, FnPtr, FuncArgs, Map, Scope};
 
 use crate::caps::{Capabilities, Sink};
 use crate::command::{Action, CommandSpec, Registry as Commands};
 use crate::discover::PluginFile;
 use crate::store::Store;
+use crate::surface::{Registry as Surfaces, SurfaceSpec};
 use crate::tool::{Registry, ScriptTool, ToolSpec};
 use crate::worker::Worker;
 
@@ -64,6 +65,7 @@ pub struct ScriptPlugin {
     store: Arc<Store>,
     tools: Vec<ToolSpec>,
     commands: Vec<CommandSpec>,
+    surfaces: Vec<SurfaceSpec>,
 }
 
 impl ScriptPlugin {
@@ -97,6 +99,8 @@ impl ScriptPlugin {
         crate::caps::register_tools(&mut engine, &registry);
         let commands: Commands = Arc::new(std::sync::Mutex::new(Vec::new()));
         crate::caps::register_commands(&mut engine, &commands);
+        let surfaces: Surfaces = Arc::new(std::sync::Mutex::new(Vec::new()));
+        crate::caps::register_surfaces(&mut engine, &surfaces);
 
         let ast = engine
             .compile(&text)
@@ -116,6 +120,10 @@ impl ScriptPlugin {
             .lock()
             .map(|specs| specs.clone())
             .unwrap_or_default();
+        let surfaces = surfaces
+            .lock()
+            .map(|specs| specs.clone())
+            .unwrap_or_default();
 
         Ok(Self {
             name: file.name.clone(),
@@ -131,6 +139,7 @@ impl ScriptPlugin {
             store,
             tools,
             commands,
+            surfaces,
         })
     }
 
@@ -194,6 +203,24 @@ impl ScriptPlugin {
         &self.commands
     }
 
+    /// The surfaces this plugin registered.
+    #[must_use]
+    pub fn surfaces(&self) -> &[SurfaceSpec] {
+        &self.surfaces
+    }
+
+    /// The in-memory state this plugin holds, as a copy.
+    #[must_use]
+    pub fn state(&self) -> Map {
+        self.store.get()
+    }
+
+    /// The current state version, used to invalidate cached renders.
+    #[must_use]
+    pub fn state_version(&self) -> u64 {
+        self.store.version()
+    }
+
     /// Run one of this plugin's commands.
     ///
     /// A failure is reported and yields nothing to do, because a command the
@@ -225,6 +252,11 @@ impl ScriptPlugin {
     pub fn call_fn(&self, body: &FnPtr, args: impl FuncArgs) -> Result<Dynamic, String> {
         body.call::<Dynamic>(&self.engine, &self.ast, args)
             .map_err(|error| error.to_string())
+    }
+
+    /// Report something to this plugin's sink.
+    pub(crate) fn report(&self, text: &str) {
+        self.sink.notify(&self.name, text);
     }
 
     /// Write this plugin's state back, if it changed.

@@ -1,8 +1,8 @@
 # Plugins
 
 A plugin is one file of [Rhai](https://rhai.rs) code. It can look at a run, stop
-a tool, change a prompt, add a tool, and add a command. You do not compile
-aphid again to add one.
+a tool, change a prompt, add a tool, add a command, and add an interactive
+terminal surface. You do not compile aphid again to add one.
 
 A plugin can also be written in Rust, and compiled in. Refer to
 [Plugins in Rust](#plugins-in-rust).
@@ -219,10 +219,11 @@ lines continues correctly.
 The workspace file wins. The settings are read-only: a plugin cannot change what
 you wrote.
 
-`state()` returns what the plugin remembers, and `save_state(map)` keeps it.
-Aphid writes the state to `.aphid/plugins/state/<name>.json` at the end of each
-run and at the end of the session. A plugin that does not call `save_state` does
-not write a file.
+`state()` returns what the plugin remembers. `state(map)` replaces the
+in-memory state and does not write a file. `save_state(map)` replaces the
+in-memory state and marks it for writing. Aphid writes saved state to
+`.aphid/plugins/state/<name>.json` at the end of each run and at the end of the
+session. A plugin that does not call `save_state` does not write a file.
 
 ```rhai
 fn on_session_start(session) {
@@ -232,6 +233,9 @@ fn on_session_start(session) {
     notify("session number " + s.runs);
 }
 ```
+
+Use `state(map)` for memory-only data, such as an open panel or the selected
+row in a list. That data lives for the session and is never written to disk.
 
 ## Tools
 
@@ -267,6 +271,62 @@ running it at the same time as other tools.
 
 A plugin adds a slash command with `register_command`, at the top level of the
 file. Refer to [Commands](commands.md#commands-from-plugins).
+
+## Surfaces and widgets
+
+A plugin adds an interactive terminal surface with `register_surface`. A surface
+is a named region that the plugin fills with a declarative widget tree. The
+first cut renders side panels on the right and the left of the transcript.
+
+```rhai
+register_surface(#{
+    name: "todos",
+    placement: #{ kind: "side", side: "right" },
+    render: |s| {
+        if !s.open { return (); }
+        #{ type: "list", items: s.items, selected: s.selected }
+    },
+    on_event: |event| {
+        if event.kind == "key" && event.code == "down" {
+            let s = state();
+            s.selected = (s.selected + 1) % s.items.len();
+            state(s);
+            return "consume";
+        }
+    }
+});
+```
+
+`render` receives the plugin state. Return `()` to close the surface, or a
+widget tree to open it. The first cut knows these widgets:
+
+| Type | Fields |
+| --- | --- |
+| `rows` | `children` |
+| `cols` | `children` |
+| `text` | `text` |
+| `list` | `id`, `items`, `selected` |
+| `input` | `id`, `text`, `placeholder` |
+| `button` | `id`, `label` |
+| `spacer` | none |
+
+`id` is for the widgets a click can hit. The event callback receives `target`
+with that id for mouse events.
+
+In the terminal UI, `F6` gives focus to an open panel. `Esc` returns focus to
+the input box. Clicking a panel also focuses it. While a panel has focus, its
+`on_event` callback receives the keys, mouse events and pastes. `F6`, `Esc` and
+`Ctrl-C` stay with the app and are not sent to a plugin.
+
+`on_event` receives a map. A key event has `kind`, `code` and `modifiers`. A
+mouse event has `kind`, `button`, `row`, `column` and `target`. A paste has
+`kind` and `text`.
+
+The callback returns `"consume"` to handle the event, `"release_focus"` to
+return focus to the input box, or `notice("text")` to show a notice. It may also
+call `state(map)`, `save_state(map)`, `notify` and `prompt` directly.
+
+Render and event callbacks run on the UI thread. Keep them short, like `on_tick`.
 
 ## When a plugin fails
 
@@ -347,6 +407,7 @@ The `crates/aphid-plugin/examples/plugins` directory holds plugins that work:
 | `budget.rhai` | Stops a run that asks for too many tools |
 | `wordcount.rhai` | Adds a `wordcount` tool |
 | `review.rhai` | Adds a `/review` command |
+| `panel.rhai` | Adds an interactive right-hand side panel |
 
 ## The web chat
 

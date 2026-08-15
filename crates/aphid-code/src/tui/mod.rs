@@ -18,6 +18,7 @@ pub mod input;
 pub mod logo;
 pub mod modal;
 pub mod status;
+pub mod surface;
 pub mod view;
 
 pub use app::{App, run};

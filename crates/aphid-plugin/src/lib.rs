@@ -54,8 +54,10 @@ mod discover;
 mod host;
 mod script;
 mod store;
+mod surface;
 mod tool;
 pub mod trust;
+mod widget;
 mod worker;
 
 pub use backend::ScriptBackend;
@@ -68,5 +70,9 @@ pub use discover::{DIR_NAME, Diagnostic, ENTRY_FILE, EXTENSION, PluginFile, disc
 pub use host::{PluginHost, silent_sink};
 pub use script::ScriptPlugin;
 pub use store::Store;
+pub use surface::{
+    Placement, RegisteredSurface, Side, SurfaceAction, SurfaceEvent, SurfaceRender, SurfaceSpec,
+};
 pub use tool::{ScriptTool, ToolSpec};
+pub use widget::Widget;
 pub use worker::Worker;

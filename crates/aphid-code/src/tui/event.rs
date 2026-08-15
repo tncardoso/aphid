@@ -74,7 +74,7 @@ pub enum UiEvent {
     /// paste. Its newlines are text, not the Enters they would be if the same
     /// characters had been typed.
     Paste(String),
-    /// A mouse wheel event. Other mouse events are not forwarded.
+    /// A mouse button, drag or wheel event. The app decides who it belongs to.
     Mouse(MouseEvent),
     Resize,
 }
@@ -292,7 +292,11 @@ pub fn spawn_input_thread(events: UnboundedSender<UiEvent>) {
                 Ok(event::Event::Mouse(mouse))
                     if matches!(
                         mouse.kind,
-                        event::MouseEventKind::ScrollUp | event::MouseEventKind::ScrollDown
+                        event::MouseEventKind::Down(_)
+                            | event::MouseEventKind::Up(_)
+                            | event::MouseEventKind::Drag(_)
+                            | event::MouseEventKind::ScrollUp
+                            | event::MouseEventKind::ScrollDown
                     ) =>
                 {
                     if events.send(UiEvent::Mouse(mouse)).is_err() {

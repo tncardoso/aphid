@@ -8,12 +8,15 @@ use std::time::{Duration, Instant};
 
 use aphid_agent::{Agent, AgentHandle, RunOutcome, exec};
 use aphid_core::{Model, ThinkingLevel, Transcript};
-use aphid_plugin::{Action as PluginAction, ScriptBackend, SessionInfo};
+use aphid_plugin::{
+    Action as PluginAction, Placement, ScriptBackend, SessionInfo, Side, SurfaceAction,
+    SurfaceEvent,
+};
 use compact_str::CompactString;
 use ratatui::crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, KeyCode,
-    KeyEvent, KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    KeyEvent, KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -39,6 +42,7 @@ use crate::tui::event::{UiConfirmer, UiEvent, UiPlugin, UiSink, spawn_input_thre
 use crate::tui::input::{Action, Input};
 use crate::tui::modal::{Confirm, Modal};
 use crate::tui::status::Status;
+use crate::tui::surface::SurfaceLayer;
 use crate::tui::view::{View, one_line};
 
 /// How often the screen is repainted while something is happening.
@@ -70,6 +74,8 @@ pub struct App {
     pub input: Input,
     pub status: Status,
     pub modal: Option<Modal>,
+    /// The plugin surfaces, for focus, events and rendering.
+    pub surfaces: SurfaceLayer,
     /// The loaded plugins, for the commands they registered and `/plugins`.
     host: Option<Arc<aphid_plugin::PluginHost>>,
     catalog: Catalog,
@@ -107,6 +113,7 @@ impl App {
             input: Input::default(),
             status,
             modal: None,
+            surfaces: SurfaceLayer::default(),
             catalog: Catalog::new(),
             thinking,
             session: None,
@@ -129,6 +136,7 @@ impl App {
             input: Input::default(),
             status: Status::from_model(agent.model()),
             modal: None,
+            surfaces: SurfaceLayer::default(),
             catalog: Catalog::new(),
             thinking: None,
             session: None,
@@ -266,19 +274,7 @@ impl App {
                     reply,
                 }));
             }
-            UiEvent::Mouse(mouse) => {
-                if self.modal.is_none() {
-                    match mouse.kind {
-                        MouseEventKind::ScrollUp => {
-                            self.view.scroll = self.view.scroll.saturating_add(MOUSE_SCROLL_LINES);
-                        }
-                        MouseEventKind::ScrollDown => {
-                            self.view.scroll = self.view.scroll.saturating_sub(MOUSE_SCROLL_LINES);
-                        }
-                        _ => {}
-                    }
-                }
-            }
+            UiEvent::Mouse(mouse) => return self.mouse(mouse),
             UiEvent::Key(_) | UiEvent::Paste(_) | UiEvent::Resize => {}
         }
         true
@@ -294,6 +290,123 @@ impl App {
     fn enqueue(&mut self, prompt: String) {
         self.queued.push_back(prompt);
         self.status.queued = self.status.running;
+    }
+
+    /// Handle a mouse event, routing it to the focused surface or the transcript.
+    fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if self.modal.is_some() {
+            return true;
+        }
+
+        match mouse.kind {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                if self.surfaces.focus().is_some() {
+                    let button = if mouse.kind == MouseEventKind::ScrollUp {
+                        "up"
+                    } else {
+                        "down"
+                    };
+                    self.surface_mouse(button, mouse.column, mouse.row, None);
+                } else if mouse.kind == MouseEventKind::ScrollUp {
+                    self.view.scroll = self.view.scroll.saturating_add(MOUSE_SCROLL_LINES);
+                } else {
+                    self.view.scroll = self.view.scroll.saturating_sub(MOUSE_SCROLL_LINES);
+                }
+            }
+            MouseEventKind::Down(_) => {
+                if let Some((_surface, target)) = self.surfaces.click(mouse.column, mouse.row) {
+                    self.surface_mouse(mouse_button(mouse.kind), mouse.column, mouse.row, target);
+                }
+            }
+            MouseEventKind::Up(_) | MouseEventKind::Drag(_) => {
+                let Some(focus) = self.surfaces.focus() else {
+                    return true;
+                };
+                let target = self
+                    .surfaces
+                    .hit(mouse.column, mouse.row)
+                    .filter(|(key, _)| key == &focus)
+                    .and_then(|(_, target)| target);
+                self.surface_mouse(mouse_button(mouse.kind), mouse.column, mouse.row, target);
+            }
+            _ => {}
+        }
+        true
+    }
+
+    /// Send one mouse event to the focused surface.
+    fn surface_mouse(&mut self, button: &str, column: u16, row: u16, target: Option<String>) {
+        let Some((plugin, name)) = self.surfaces.focus() else {
+            return;
+        };
+        self.dispatch_surface_event(
+            &plugin,
+            &name,
+            SurfaceEvent::Mouse {
+                button: button.to_owned(),
+                row,
+                column,
+                target,
+            },
+        );
+    }
+
+    /// Handle a key while a surface has focus. Returns true when consumed.
+    fn surface_key(&mut self, key: KeyEvent) -> bool {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Char('c') if control => {
+                self.quit = true;
+                true
+            }
+            KeyCode::F(6) => {
+                self.surfaces.cycle_focus();
+                true
+            }
+            KeyCode::Esc => {
+                self.surfaces.release_focus();
+                true
+            }
+            _ => {
+                let Some((plugin, name)) = self.surfaces.focus() else {
+                    return true;
+                };
+                self.dispatch_surface_event(&plugin, &name, surface_key_event(key));
+                true
+            }
+        }
+    }
+
+    /// Handle a paste while a surface has focus. Returns true when consumed.
+    fn surface_paste(&mut self, text: String) -> bool {
+        let Some((plugin, name)) = self.surfaces.focus() else {
+            return false;
+        };
+        self.dispatch_surface_event(&plugin, &name, SurfaceEvent::Paste { text });
+        true
+    }
+
+    /// Deliver one event to a surface and apply its returned actions.
+    fn dispatch_surface_event(&mut self, plugin: &str, name: &str, event: SurfaceEvent) {
+        let Some(host) = self.host.clone() else {
+            self.surfaces.release_focus();
+            return;
+        };
+        let Some(actions) = host.surface_event(plugin, name, event) else {
+            self.surfaces.release_focus();
+            return;
+        };
+
+        for action in actions {
+            match action {
+                SurfaceAction::Consume => {}
+                SurfaceAction::ReleaseFocus => self.surfaces.release_focus(),
+                SurfaceAction::Notice(text) => {
+                    self.view.push_notice(format!("{plugin}: {text}"));
+                }
+            }
+        }
+        self.surfaces.refresh(&host);
     }
 
     /// Handle a keypress that a modal is claiming.
@@ -521,6 +634,10 @@ impl App {
             if commands > 0 {
                 parts.push(format!("{commands} command(s)"));
             }
+            let surfaces = plugin.surfaces().len();
+            if surfaces > 0 {
+                parts.push(format!("{surfaces} surface(s)"));
+            }
             lines.push(format!("  {:<16} {}", plugin.name(), parts.join(" · ")));
         }
 
@@ -528,6 +645,18 @@ impl App {
             lines.push(format!(
                 "  /{:<15} {} [{}]",
                 command.invocation, command.description, command.plugin
+            ));
+        }
+
+        for surface in host.surfaces() {
+            let side = match surface.placement {
+                Placement::Side(Side::Left) => "left",
+                Placement::Side(Side::Right) => "right",
+            };
+            lines.push(format!(
+                "  {:<17} {side} panel [{}]",
+                format!("{}/{}", surface.plugin, surface.name),
+                surface.plugin
             ));
         }
 
@@ -590,12 +719,70 @@ const HELP: &str = "\
   !cmd             run a shell command; its output goes to the transcript
 
 ── keys ──────────────────────────────────────────
-  Esc         cancels a run
+  Esc         cancels a run, or returns focus from a panel
   Ctrl-C      quits
   Ctrl-P      cycles model
   Ctrl-T      shows reasoning
+  F6          focus a plugin panel
   PageUp/Dn   scroll transcript
   Mouse wheel scroll transcript";
+
+/// Map a crossterm mouse kind to the short name a surface callback sees.
+fn mouse_button(kind: MouseEventKind) -> &'static str {
+    match kind {
+        MouseEventKind::Down(MouseButton::Left)
+        | MouseEventKind::Up(MouseButton::Left)
+        | MouseEventKind::Drag(MouseButton::Left) => "left",
+        MouseEventKind::Down(MouseButton::Right)
+        | MouseEventKind::Up(MouseButton::Right)
+        | MouseEventKind::Drag(MouseButton::Right) => "right",
+        MouseEventKind::Down(MouseButton::Middle)
+        | MouseEventKind::Up(MouseButton::Middle)
+        | MouseEventKind::Drag(MouseButton::Middle) => "middle",
+        _ => "unknown",
+    }
+}
+
+/// Map a crossterm key to the normalized event a surface callback sees.
+fn surface_key_event(key: KeyEvent) -> SurfaceEvent {
+    let mut modifiers = Vec::new();
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        modifiers.push("control".to_owned());
+    }
+    if key.modifiers.contains(KeyModifiers::SHIFT) {
+        modifiers.push("shift".to_owned());
+    }
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        modifiers.push("alt".to_owned());
+    }
+
+    SurfaceEvent::Key {
+        code: key_name(key.code),
+        modifiers,
+    }
+}
+
+fn key_name(code: KeyCode) -> String {
+    match code {
+        KeyCode::Char(ch) => ch.to_string(),
+        KeyCode::Enter => "enter".to_owned(),
+        KeyCode::Esc => "esc".to_owned(),
+        KeyCode::Backspace => "backspace".to_owned(),
+        KeyCode::Tab => "tab".to_owned(),
+        KeyCode::Up => "up".to_owned(),
+        KeyCode::Down => "down".to_owned(),
+        KeyCode::Left => "left".to_owned(),
+        KeyCode::Right => "right".to_owned(),
+        KeyCode::PageUp => "pageup".to_owned(),
+        KeyCode::PageDown => "pagedown".to_owned(),
+        KeyCode::Home => "home".to_owned(),
+        KeyCode::End => "end".to_owned(),
+        KeyCode::Delete => "delete".to_owned(),
+        KeyCode::Insert => "insert".to_owned(),
+        KeyCode::F(n) => format!("f{n}"),
+        other => format!("{other:?}").to_lowercase(),
+    }
+}
 
 fn parse_thinking(raw: &str) -> Result<Option<ThinkingLevel>, String> {
     Ok(match raw {
@@ -687,6 +874,7 @@ pub async fn run(
     app.session = Some(session);
     app.view.watch(host.clone());
     app.host = Some(host.clone());
+    app.surfaces.refresh(&host);
 
     if resumed.is_none() {
         app.view.push_logo();
@@ -757,11 +945,12 @@ async fn drive(
     let mut running: Option<Running> = None;
     let mut dirty = true;
 
-    // Armed only for a session that has a plugin waiting on it, so nothing else
-    // pays for a timer it does not use. An `interval` and not a fresh `sleep`
-    // per pass: a sleep built inside `select!` restarts whenever any other
-    // branch wins, which a busy loop would starve for ever.
+    // Armed only for a session that has a plugin hook or a surface waiting on
+    // it, so nothing else pays for a timer it does not use. An `interval` and
+    // not a fresh `sleep` per pass: a sleep built inside `select!` restarts
+    // whenever any other branch wins, which a busy loop would starve for ever.
     let ticked = app.host.clone().filter(|host| host.any_defines("on_tick"));
+    let surfaces_tick = app.host.clone().filter(|host| host.has_surfaces());
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -804,7 +993,9 @@ async fn drive(
                         dirty = true;
                         // A modal is answered with single keys; a paste into
                         // one would mean nothing.
-                        if app.modal.is_none() {
+                        if app.modal.is_none()
+                            && !app.surface_paste(text.clone())
+                        {
                             app.input.paste(&text);
                         }
                     }
@@ -824,9 +1015,14 @@ async fn drive(
             // The plugins' tick. Dispatched off the loop, because a hook that
             // reaches for `exec` or `http` blocks on the plugin worker and the
             // loop that draws the screen must never wait on that.
-            _ = ticker.tick(), if ticked.is_some() => {
-                let host = ticked.clone().expect("only polled while some");
-                tokio::task::spawn_blocking(move || host.tick());
+            _ = ticker.tick(), if ticked.is_some() || surfaces_tick.is_some() => {
+                if let Some(host) = ticked.clone() {
+                    tokio::task::spawn_blocking(move || host.tick());
+                }
+                if let Some(host) = surfaces_tick.clone() {
+                    app.surfaces.refresh(&host);
+                    dirty = true;
+                }
             }
         }
 
@@ -877,6 +1073,16 @@ fn handle_key(app: &mut App, key: KeyEvent, agent: Option<&mut Agent>) {
         {
             app.switch_model(agent, model);
         }
+        return;
+    }
+
+    if app.surfaces.focus().is_some() {
+        app.surface_key(key);
+        return;
+    }
+
+    if key.code == KeyCode::F(6) && app.surfaces.has_focusable() {
+        app.surfaces.focus_first();
         return;
     }
 
@@ -1000,16 +1206,17 @@ fn render(frame: &mut Frame<'_>, app: &mut App) {
     ])
     .areas(frame.area());
 
-    let width = transcript.width as usize;
+    let main = app.surfaces.render(frame, transcript);
+    let width = main.width as usize;
     let lines = app.view.lines(width);
-    let height = transcript.height as usize;
+    let height = main.height as usize;
 
     // Pinned to the bottom unless the user scrolled up.
     let max_scroll = lines.len().saturating_sub(height);
     let scroll = app.view.scroll.min(max_scroll);
     let top = max_scroll - scroll;
     let visible: Vec<Line<'_>> = lines.into_iter().skip(top).take(height).collect();
-    frame.render_widget(Paragraph::new(visible), transcript);
+    frame.render_widget(Paragraph::new(visible), main);
 
     app.input.set_prompt(app.status.running);
     frame.render_widget(app.input.textarea(), input_row);
@@ -1776,6 +1983,71 @@ mod plugin_tests {
         let event = receiver.try_recv().expect("the prompt was sent");
         app.apply(event);
         assert_eq!(app.queued(), Some("Say hello to Ana"));
+    }
+
+    #[test]
+    fn a_focused_surface_gets_keys_and_can_release_focus() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let fixture = Fixture::new(
+            r#"
+            register_command(#{
+                name: "panel",
+                description: "Open the panel.",
+                run: |args| {
+                    let s = state();
+                    s.open = true;
+                    state(s);
+                    notice("panel on")
+                }
+            });
+            register_surface(#{
+                name: "panel",
+                placement: #{ kind: "side", side: "right" },
+                render: |s| {
+                    let open = if "open" in s { s.open } else { false };
+                    if !open { return (); }
+                    #{ type: "text", text: "panel" }
+                },
+                on_event: |event| {
+                    if event.kind == "key" && event.code == "down" {
+                        let s = state();
+                        s.count = if "count" in s { s.count + 1 } else { 1 };
+                        state(s);
+                        return "consume";
+                    }
+                    if event.kind == "key" && event.code == "esc" {
+                        return "release_focus";
+                    }
+                }
+            });
+            "#,
+        );
+        let host = fixture.host();
+        let (mut app, _agent) = app_with(host.clone());
+        app.surfaces.refresh(&host);
+        assert!(!app.surfaces.any_open(), "the panel starts closed");
+
+        let _ = host.run_command("panel", "");
+        app.surfaces.refresh(&host);
+        assert!(app.surfaces.any_open(), "the panel is now open");
+
+        app.surfaces.focus_first();
+        assert!(app.surfaces.focus().is_some(), "the panel can take focus");
+
+        app.surface_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let count = host
+            .state_of("kit")
+            .and_then(|state| state.get("count").cloned())
+            .and_then(|value| value.as_int().ok())
+            .expect("the event ran");
+        assert_eq!(count, 1);
+
+        app.surface_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(
+            app.surfaces.focus().is_none(),
+            "Esc returned focus to the input"
+        );
     }
 
     #[test]

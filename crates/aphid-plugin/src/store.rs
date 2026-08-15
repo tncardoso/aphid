@@ -30,6 +30,8 @@ pub struct Store {
 struct Inner {
     state: Map,
     dirty: bool,
+    /// Increased on every write. Callers cache a rendered projection by this.
+    version: u64,
 }
 
 impl Store {
@@ -52,6 +54,7 @@ impl Store {
             inner: Mutex::new(Inner {
                 state,
                 dirty: false,
+                version: 0,
             }),
             path,
         }
@@ -67,12 +70,30 @@ impl Store {
             .unwrap_or_default()
     }
 
-    /// Replace the state.
+    /// Replace the state and mark it for persistence.
     pub fn set(&self, state: Map) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.state = state;
             inner.dirty = true;
+            inner.version = inner.version.wrapping_add(1);
         }
+    }
+
+    /// Replace the in-memory state without marking it for persistence.
+    pub fn set_memory(&self, state: Map) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.state = state;
+            inner.version = inner.version.wrapping_add(1);
+        }
+    }
+
+    /// The current state version.
+    #[must_use]
+    pub fn version(&self) -> u64 {
+        self.inner
+            .lock()
+            .map(|inner| inner.version)
+            .unwrap_or_default()
     }
 
     /// Write the state back, if it changed and there is anywhere to write it.

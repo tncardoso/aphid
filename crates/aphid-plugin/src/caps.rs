@@ -216,6 +216,9 @@ fn register_storage(
     let reader = Arc::clone(store);
     engine.register_fn("state", move || reader.get());
 
+    let memory = Arc::clone(store);
+    engine.register_fn("state", move |state: Map| memory.set_memory(state));
+
     let writer = Arc::clone(store);
     engine.register_fn("save_state", move |state: Map| writer.set(state));
 }
@@ -427,6 +430,22 @@ pub(crate) fn register_commands(engine: &mut Engine, registry: &crate::command::
                 Ok::<_, Box<EvalAltResult>>(())
             }
             Err(_) => Err(fail("the command registry is poisoned".to_owned())),
+        }
+    });
+}
+
+/// Let a script declare interactive surfaces while its body runs.
+pub(crate) fn register_surfaces(engine: &mut Engine, registry: &crate::surface::Registry) {
+    let target = Arc::clone(registry);
+    engine.register_fn("register_surface", move |declaration: Map| {
+        let spec = crate::surface::spec(&declaration).map_err(fail)?;
+        match target.lock() {
+            Ok(mut specs) => {
+                specs.retain(|existing| existing.name != spec.name);
+                specs.push(spec);
+                Ok::<_, Box<EvalAltResult>>(())
+            }
+            Err(_) => Err(fail("the surface registry is poisoned".to_owned())),
         }
     });
 }
