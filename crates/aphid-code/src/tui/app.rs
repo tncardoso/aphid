@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::io::Stdout;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aphid_agent::{Agent, AgentHandle, RunOutcome, exec};
 use aphid_core::{Model, ThinkingLevel, Transcript};
@@ -200,12 +200,19 @@ impl App {
                 // Block indices restart with each turn's message buffer.
                 self.view.clear_tool_streams();
             }
-            UiEvent::Text(text) => self.view.push_text(&text),
-            UiEvent::Thinking(text) => self.view.push_thinking(&text),
+            UiEvent::Text(text) => {
+                self.status.download.note(Instant::now(), text.len() as u64);
+                self.view.push_text(&text);
+            }
+            UiEvent::Thinking(text) => {
+                self.status.download.note(Instant::now(), text.len() as u64);
+                self.view.push_thinking(&text);
+            }
             UiEvent::ToolStreamStart { block, name } => {
                 self.view.begin_tool_stream(block, &name);
             }
             UiEvent::ToolStreamDelta { block, bytes } => {
+                self.status.download.note(Instant::now(), bytes as u64);
                 self.view.push_tool_stream(block, bytes);
             }
             UiEvent::ToolCall {
@@ -222,6 +229,9 @@ impl App {
                 ..
             } => self.view.finish_tool(&id, &text, is_error, details),
             UiEvent::TurnEnded { usage, error, .. } => {
+                // The stream is over; a stale reading must not sit on an idle
+                // line while `working…` is gone.
+                self.status.download.clear();
                 // Runs after every call and result for the turn, so anything
                 // still streaming is a call that never arrived.
                 self.view.settle_tool_streams();
@@ -239,7 +249,10 @@ impl App {
                 self.view.push_user(text.clone());
                 self.enqueue(text);
             }
-            UiEvent::RunEnded(_) => self.status.running = false,
+            UiEvent::RunEnded(_) => {
+                self.status.download.clear();
+                self.status.running = false;
+            }
             UiEvent::Confirm {
                 tool,
                 summary,
@@ -1269,6 +1282,41 @@ mod tests {
             idle = Some(agent);
         }
         assert_eq!(app.queued(), None, "the queue is drained in order");
+    }
+
+    #[test]
+    fn streaming_events_feed_the_download_meter() {
+        let agent = agent_with(vec![Turn::text("reply")]);
+        let mut app = app_for(&agent);
+
+        app.apply(UiEvent::Text("hello".to_owned()));
+        app.apply(UiEvent::Thinking("weighing".to_owned()));
+        app.apply(UiEvent::ToolStreamDelta {
+            block: 0,
+            bytes: 40,
+        });
+
+        // The meter counts the chunk bytes: prose, reasoning and tool-call
+        // argument deltas alike.
+        assert_eq!(app.status.download.bytes(), 5 + 8 + 40);
+        assert!(app.status.download.rate_kb_s(Instant::now()).is_some());
+    }
+
+    #[test]
+    fn the_download_meter_clears_when_the_turn_ends() {
+        let agent = agent_with(vec![Turn::text("reply")]);
+        let mut app = app_for(&agent);
+
+        app.apply(UiEvent::Text("hello".to_owned()));
+        assert_eq!(app.status.download.bytes(), 5);
+
+        app.apply(UiEvent::TurnEnded {
+            usage: aphid_core::Usage::default(),
+            stop: aphid_core::StopReason::Stop,
+            error: None,
+        });
+        assert_eq!(app.status.download.bytes(), 0);
+        assert!(app.status.download.rate_kb_s(Instant::now()).is_none());
     }
 
     /// The whole streaming path, from protocol events to the transcript: a

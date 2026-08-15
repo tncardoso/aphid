@@ -4,6 +4,8 @@
 
 ### Added
 
+- The status line shows the live download speed, in KB/s, while the model's
+  reply streams in.
 - In the terminal input, a line starting with `!` runs a shell command and
   prints its output into the content area. The input border turns red while
   the line is a command.
