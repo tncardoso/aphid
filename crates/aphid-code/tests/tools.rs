@@ -320,6 +320,72 @@ async fn write_creates_parents_and_reports_what_it_did() {
     assert_eq!(temp.read("a/b/c.txt"), "bye\n");
 }
 
+// ---------------------------------------------------------------- write
+
+#[tokio::test]
+async fn write_reports_progress_when_observed() {
+    struct Collect(Arc<Mutex<Vec<String>>>);
+
+    impl ProgressSink for Collect {
+        fn progress(&self, _call_id: &str, _tool: &str, chunk: &str) {
+            self.0.lock().expect("lock").push(chunk.to_owned());
+        }
+    }
+
+    let temp = Temp::new();
+    let tool = write::tool(&temp.workspace(), None);
+    let chunks = Arc::new(Mutex::new(Vec::new()));
+    let cx = ToolCx::default().with_sink(Arc::new(Collect(Arc::clone(&chunks))));
+
+    let outcome = call_with(
+        &tool,
+        r#"{"path":"a/b/c.txt","content":"hello\nworld\n"}"#,
+        &cx,
+    )
+    .await;
+
+    assert!(!outcome.is_error, "{}", outcome.text_content());
+    assert_eq!(temp.read("a/b/c.txt"), "hello\nworld\n");
+
+    let chunks = chunks.lock().expect("lock").clone();
+    assert_eq!(chunks.len(), 2, "{chunks:?}");
+    assert!(chunks[0].contains("writing a/b/c.txt"), "{chunks:?}");
+    assert!(chunks[0].contains("12 bytes"), "{chunks:?}");
+    assert!(chunks[0].contains("2 lines"), "{chunks:?}");
+    assert!(
+        chunks[1].contains("wrote 12 bytes to a/b/c.txt"),
+        "{chunks:?}"
+    );
+}
+
+#[tokio::test]
+async fn write_sends_no_progress_when_unobserved() {
+    struct Count(Arc<Mutex<u32>>);
+
+    impl ProgressSink for Count {
+        fn progress(&self, _call_id: &str, _tool: &str, _chunk: &str) {
+            *self.0.lock().expect("lock") += 1;
+        }
+
+        // The real sink the agent installs reports observed only when a plugin
+        // listens for progress. The default `ToolCx` sink is `Discard`, which is
+        // not observed, so the tool must skip formatting progress altogether.
+        fn is_observed(&self) -> bool {
+            false
+        }
+    }
+
+    let temp = Temp::new();
+    let tool = write::tool(&temp.workspace(), None);
+    let calls = Arc::new(Mutex::new(0));
+    let cx = ToolCx::default().with_sink(Arc::new(Count(Arc::clone(&calls))));
+
+    let outcome = call_with(&tool, r#"{"path":"x.txt","content":"hi\n"}"#, &cx).await;
+
+    assert!(!outcome.is_error, "{}", outcome.text_content());
+    assert_eq!(*calls.lock().expect("lock"), 0);
+}
+
 // ---------------------------------------------------------------- edit
 
 #[tokio::test]

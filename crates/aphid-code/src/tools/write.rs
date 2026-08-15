@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use aphid_agent::{ToolHandler, ToolOutcome, tool_fn};
+use aphid_agent::{ToolCx, ToolHandler, ToolOutcome, tool_fn};
 use aphid_core::Json;
 use aphid_plugin::{Change, PluginHost};
 use serde::Deserialize;
@@ -39,20 +39,39 @@ pub const DESCRIPTION: &str = "Write content to a file, creating it and any miss
 #[must_use]
 pub fn tool(workspace: &Workspace, host: Option<Arc<PluginHost>>) -> impl ToolHandler {
     let workspace = workspace.clone();
-    tool_fn(NAME, DESCRIPTION, schema(), move |params: Params, _cx| {
+    tool_fn(NAME, DESCRIPTION, schema(), move |params: Params, cx| {
         let workspace = workspace.clone();
         let host = host.clone();
-        async move { execute(&workspace, &params, host.as_deref()).await }
+        async move { execute(&workspace, &params, host.as_deref(), &cx).await }
     })
 }
 
-async fn execute(workspace: &Workspace, params: &Params, host: Option<&PluginHost>) -> ToolOutcome {
+async fn execute(
+    workspace: &Workspace,
+    params: &Params,
+    host: Option<&PluginHost>,
+    cx: &ToolCx,
+) -> ToolOutcome {
     let path = match workspace.resolve(&params.path) {
         Ok(path) => path,
         Err(error) => return ToolOutcome::error(error),
     };
 
     let existed = path.exists();
+    let relative = workspace.display(&path);
+    let lines = params.content.lines().count();
+
+    // A write to a big or networked file can take a moment, and a silent card
+    // looks stuck. Say what is about to happen, so a live card has something on
+    // it before the syscall returns. Progress is advisory: the outcome is the
+    // authoritative report.
+    if cx.is_observed() {
+        cx.progress(&format!(
+            "{verb} {relative} ({bytes} bytes, {lines} lines)",
+            verb = if existed { "overwriting" } else { "writing" },
+            bytes = params.content.len(),
+        ));
+    }
     // Read before writing, and only when a plugin is listening: the old text is
     // what makes a change hook useful, and reading every file for nobody is not.
     let before = if host.is_some() && existed {
@@ -70,13 +89,18 @@ async fn execute(workspace: &Workspace, params: &Params, host: Option<&PluginHos
         return ToolOutcome::error(format!("could not write {}: {error}", params.path));
     }
 
+    if cx.is_observed() {
+        cx.progress(&format!(
+            "wrote {} bytes to {relative}",
+            params.content.len()
+        ));
+    }
+
     if let Some(host) = host {
         host.file_change(&path, Change::Write, before.as_deref(), &params.content);
     }
 
-    let relative = workspace.display(&path);
     let verb = if existed { "Overwrote" } else { "Created" };
-    let lines = params.content.lines().count();
     let mut outcome = ToolOutcome::text(format!(
         "{verb} {relative} ({} bytes, {lines} lines)",
         params.content.len()

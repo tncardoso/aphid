@@ -4,6 +4,9 @@
 
 ### Added
 
+- The `write` tool reports the file size it is about to write and the bytes
+  written, as it runs, so a write to a large or slow file is no longer a silent
+  card.
 - The status line shows the live download speed, in KB/s, while the model's
   reply streams in.
 - In the terminal input, a line starting with `!` runs a shell command and
