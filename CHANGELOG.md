@@ -47,6 +47,9 @@
   pane instead of running off the edge.
 - When you scroll up, new output no longer pushes the viewport off the text you
   were reading.
+- The `/todo` command now sends the prompt to the model in todo mode. Before,
+  the prompt prefix was a `global` constant that a command body could not see,
+  so the todo mode instructions never reached the model.
 
 ## [0.1.0] - 2026-08-13
 

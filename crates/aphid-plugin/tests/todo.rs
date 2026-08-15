@@ -1,18 +1,43 @@
 //! The todo plugin, driven through a real agent run.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use aphid_agent::Agent;
 use aphid_agent::exec;
 use aphid_agent::testing::{Turn, scripted};
 use aphid_core::{ContentRef, MessageRef, providers::deepseek};
-use aphid_plugin::{Action, Capabilities, PluginHost, Silent, SurfaceRender, Widget, explicit};
+use aphid_plugin::{
+    Action, Capabilities, PluginHost, Silent, Sink, SurfaceRender, Widget, explicit,
+};
 
 const PLUGIN: &str = include_str!("../../../.aphid/plugins/todo.rhai");
 
 struct Fixture {
     root: PathBuf,
+}
+
+/// Collects prompts, so a test can assert on what a command sent to the model.
+#[derive(Clone, Default)]
+struct Recorder {
+    prompts: Arc<Mutex<Vec<String>>>,
+}
+
+impl Recorder {
+    fn prompts(&self) -> Vec<String> {
+        self.prompts.lock().expect("lock").clone()
+    }
+}
+
+impl Sink for Recorder {
+    fn notify(&self, _plugin: &str, _text: &str) {}
+
+    fn prompt(&self, plugin: &str, text: &str) {
+        self.prompts
+            .lock()
+            .expect("lock")
+            .push(format!("{plugin}: {text}"));
+    }
 }
 
 impl Fixture {
@@ -35,12 +60,16 @@ impl Fixture {
     }
 
     fn host(&self) -> Arc<PluginHost> {
+        self.host_with(Arc::new(Silent))
+    }
+
+    fn host_with(&self, sink: Arc<dyn Sink>) -> Arc<PluginHost> {
         let file = explicit(&self.root.join(".aphid").join("plugins").join("todo.rhai"))
             .expect("readable");
         let (host, diagnostics) = PluginHost::load(
             &[file],
             &Capabilities::full(&self.root),
-            Arc::new(Silent),
+            sink,
             &Arc::new(exec::Registry::new()),
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -110,6 +139,27 @@ fn todo_status_toggles_the_open_flag() {
 
     host.run_command("todo-status", "off").expect("registered");
     assert!(!open(&host), "the flag was set to false");
+}
+
+#[test]
+fn todo_command_sends_the_prompt_in_todo_mode() {
+    let fixture = Fixture::new();
+    let recorder = Recorder::default();
+    let host = fixture.host_with(Arc::new(recorder.clone()));
+
+    let actions = host.run_command("todo", "write tests").expect("registered");
+    assert_eq!(
+        actions,
+        vec![Action::Notice("todo mode: write tests".to_owned())]
+    );
+
+    let prompts = recorder.prompts();
+    assert_eq!(prompts.len(), 1, "{prompts:?}");
+    assert!(
+        prompts[0].starts_with("todo: You are in TODO MODE."),
+        "{prompts:?}"
+    );
+    assert!(prompts[0].ends_with("write tests"), "{prompts:?}");
 }
 
 #[tokio::test]

@@ -2,10 +2,16 @@
 //! and /todo-status to open or close the right-hand todo panel.
 //! The list lives in memory for this session only.
 
-const TODO_MODE = "You are in TODO MODE. Use the `todo_list`, `todo_add`, \
+/// The prompt prefix for todo mode.
+///
+/// A function and not a constant, because a command body is called without the
+/// script's scope and `global::` reaches nothing from there.
+fn todo_mode() {
+    "You are in TODO MODE. Use the `todo_list`, `todo_add`, \
 `todo_done` and `todo_clear` tools to keep the todo list current: list it \
 before you start, add tasks as you identify them, mark each done as you finish \
-it, and clear it when you start over. Keep your answer short.";
+it, and clear it when you start over. Keep your answer short."
+}
 
 /// The whole state, with defaults filled in.
 fn store() {
@@ -77,7 +83,7 @@ register_command(#{
         if text == "" {
             return notice("usage: /todo <prompt>");
         }
-        prompt(global::TODO_MODE + "\n\n" + text);
+        prompt(todo_mode() + "\n\n" + text);
         notice("todo mode: " + text)
     }
 });
