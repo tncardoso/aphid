@@ -4,6 +4,9 @@
 
 ### Added
 
+- In the terminal input, a line starting with `!` runs a shell command and
+  prints its output into the content area. The input border turns red while
+  the line is a command.
 - Skills are read from `.agents/skills` as well as `.aphid/skills`, in the
   workspace and in your home directory. Thus one skill directory can serve aphid
   and the other agents together. A name in `.aphid/skills` still wins.

@@ -180,6 +180,10 @@ fn key_pressed(app: &mut App, input: &mut Input, key: KeyEvent) -> Vec<Send> {
 
     match input.handle(key) {
         Action::Submit(line) => app.typed(&line),
+        // A colony has no shell, so a `!` line goes into the chat as a
+        // message, exactly as it did before `!` meant something to the coding
+        // agent's terminal.
+        Action::Bang(command) => app.typed(&format!("!{command}")),
         Action::Quit => {
             app.quit = true;
             Vec::new()

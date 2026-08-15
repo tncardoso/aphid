@@ -418,6 +418,16 @@ async fn handle_key(app: &mut App, key: KeyEvent, client: &mut Client) -> std::i
             // watching, so echoing would show it twice in this terminal.
             client.send(&Request::Prompt { text: line }).await?;
         }
+        // The alate terminal has no shell of its own, so a `!` line goes to
+        // the agent as a message, exactly as it did before `!` meant something
+        // to the coding agent's terminal.
+        Action::Bang(command) => {
+            client
+                .send(&Request::Prompt {
+                    text: format!("!{command}"),
+                })
+                .await?;
+        }
     }
     Ok(())
 }

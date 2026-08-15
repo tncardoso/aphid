@@ -41,6 +41,11 @@ pub enum Entry {
     },
     /// A divider or a message from the harness itself.
     Notice(String),
+    /// A `!` command the user ran, with its output.
+    Shell {
+        command: String,
+        output: String,
+    },
     /// The wordmark, shown once when a new session opens.
     Logo,
 }
@@ -98,6 +103,12 @@ impl View {
 
     pub fn push_logo(&mut self) {
         self.entries.push(Entry::Logo);
+        self.pin();
+    }
+
+    /// A `!` command the user ran, and its output.
+    pub fn push_shell(&mut self, command: String, output: String) {
+        self.entries.push(Entry::Shell { command, output });
         self.pin();
     }
 
@@ -314,6 +325,29 @@ impl View {
                     for raw in text.lines() {
                         for part in wrap(raw, width) {
                             lines.push(Line::styled(part, Style::default().fg(Color::DarkGray)));
+                        }
+                    }
+                    lines.push(Line::default());
+                }
+                Entry::Shell { command, output } => {
+                    // A card like a tool's: a one-line header naming the
+                    // command, then its output wrapped below. Every line the
+                    // user asked for is shown — the transcript scrolls.
+                    lines.push(Line::from(vec![
+                        Span::styled("$ ", Style::default().fg(Color::Gray)),
+                        Span::styled(
+                            command.clone(),
+                            Style::default()
+                                .fg(Color::Gray)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                    for raw in output.lines() {
+                        for part in wrap(raw, width.saturating_sub(2)) {
+                            lines.push(Line::styled(
+                                format!("  {part}"),
+                                Style::default().fg(Color::Gray),
+                            ));
                         }
                     }
                     lines.push(Line::default());
@@ -717,6 +751,33 @@ mod tests {
         view.show_thinking = true;
         let rendered: Vec<String> = view.lines(40).iter().map(ToString::to_string).collect();
         assert!(rendered.iter().any(|line| line.contains("weighing it up")));
+    }
+
+    #[test]
+    fn a_shell_command_renders_a_header_and_its_output() {
+        let mut view = View::default();
+        view.push_shell("ls".to_owned(), "a.rs\nb.rs".to_owned());
+
+        let rendered: Vec<String> = view.lines(40).iter().map(ToString::to_string).collect();
+        assert_eq!(rendered[0].trim(), "$ ls");
+        assert_eq!(rendered[1].trim(), "a.rs");
+        assert_eq!(rendered[2].trim(), "b.rs");
+    }
+
+    #[test]
+    fn a_shell_command_wraps_long_output() {
+        let mut view = View::default();
+        view.push_shell("ls".to_owned(), "some very long output line".to_owned());
+
+        let rendered: Vec<String> = view.lines(12).iter().map(ToString::to_string).collect();
+        assert_eq!(rendered[0].trim(), "$ ls");
+        assert!(
+            rendered
+                .iter()
+                .skip(1)
+                .any(|line| line.contains("some very")),
+            "the output is wrapped, not dropped: {rendered:?}"
+        );
     }
 
     #[test]

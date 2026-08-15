@@ -10,12 +10,17 @@ use super::logo::COLOR as BANNER;
 /// Border color of the input box: the banner green of the wordmark.
 const BORDER: Color = Color::Rgb(BANNER.0, BANNER.1, BANNER.2);
 
+/// Border color when the line is a `!` command.
+const BANG_BORDER: Color = Color::Red;
+
 /// What a keypress meant.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     /// Nothing the caller needs to handle.
     None,
     Submit(String),
+    /// Enter on a line that starts with `!`: run the rest as a shell command.
+    Bang(String),
     /// Esc — cancel a run, or clear the line when idle.
     Cancel,
     Quit,
@@ -89,13 +94,25 @@ impl Input {
     /// each frame, since the title depends on `Status::running`.
     pub fn set_prompt(&mut self, running: bool) {
         let title = if running { " … " } else { " > " };
+        let border = if self.bang() { BANG_BORDER } else { BORDER };
         self.textarea.set_block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(BORDER))
+                .border_style(Style::default().fg(border))
                 .padding(Padding::horizontal(1))
                 .title(title),
         );
+    }
+
+    /// The first non-blank character of the buffer is `!`: the line is a
+    /// shell command, not a prompt.
+    fn bang(&self) -> bool {
+        self.textarea
+            .lines()
+            .iter()
+            .map(|line| line.trim_start())
+            .find(|line| !line.is_empty())
+            .is_some_and(|line| line.starts_with('!'))
     }
 
     /// Recompute the scroll window for a viewport of `height` screen rows.
@@ -159,6 +176,22 @@ impl Input {
                     return Action::None;
                 }
                 let trimmed = trimmed.to_owned();
+                // A line starting with `!` is a shell command, not a prompt.
+                if let Some(command) = trimmed.strip_prefix('!') {
+                    let command = command.trim();
+                    if command.is_empty() {
+                        // A bare `!` runs nothing and stays for the user to
+                        // finish.
+                        return Action::None;
+                    }
+                    // Remembered like a prompt, so `Up` recalls the line as
+                    // typed and `Enter` runs it again; cleared like a submit,
+                    // because the line is going to the transcript, not back
+                    // into the box.
+                    self.remember(&trimmed);
+                    self.clear();
+                    return Action::Bang(command.to_owned());
+                }
                 self.remember(&trimmed);
                 self.clear();
                 return Action::Submit(trimmed);
@@ -259,6 +292,82 @@ mod tests {
             Action::Submit("hello".into())
         );
         assert_eq!(input.text(), "");
+    }
+
+    #[test]
+    fn a_bang_line_runs_a_command_instead_of_submitting() {
+        let mut input = Input::default();
+        typed(&mut input, "!ls");
+        assert_eq!(input.text(), "!ls");
+        assert_eq!(input.handle(key(KeyCode::Enter)), Action::Bang("ls".into()));
+        assert_eq!(input.text(), "", "the box is cleared like a submit");
+    }
+
+    #[test]
+    fn a_bang_line_is_remembered_in_history() {
+        let mut input = Input::default();
+        typed(&mut input, "!ls");
+        input.handle(key(KeyCode::Enter));
+
+        // Up recalls the line as typed, `!` included, so Enter runs it again.
+        input.handle(key(KeyCode::Up));
+        assert_eq!(input.text(), "!ls");
+        assert_eq!(input.handle(key(KeyCode::Enter)), Action::Bang("ls".into()));
+    }
+
+    #[test]
+    fn a_bare_bang_runs_nothing() {
+        let mut input = Input::default();
+        typed(&mut input, "!");
+        assert_eq!(input.handle(key(KeyCode::Enter)), Action::None);
+        assert_eq!(input.text(), "!", "the line stays for the user to finish");
+    }
+
+    #[test]
+    fn leading_whitespace_still_makes_a_bang_line() {
+        let mut input = Input::default();
+        typed(&mut input, "  !ls");
+        assert_eq!(input.handle(key(KeyCode::Enter)), Action::Bang("ls".into()));
+    }
+
+    #[test]
+    fn the_border_turns_red_for_a_bang_line() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::widgets::Widget;
+
+        // The block's border style is private to ratatui, so the border color
+        // is read from what the textarea actually draws.
+        fn border_color(input: &Input) -> Color {
+            let area = Rect::new(0, 0, 20, 3);
+            let mut buf = Buffer::empty(area);
+            input.textarea().render(area, &mut buf);
+            buf[(0, 0)].style().fg.expect("a border fg")
+        }
+
+        let mut input = Input::default();
+        input.set_prompt(false);
+        assert_eq!(
+            border_color(&input),
+            BORDER,
+            "an ordinary line keeps the green border"
+        );
+
+        typed(&mut input, "!ls");
+        input.set_prompt(false);
+        assert_eq!(
+            border_color(&input),
+            BANG_BORDER,
+            "a bang line turns the border red"
+        );
+
+        input.handle(key(KeyCode::Enter));
+        input.set_prompt(false);
+        assert_eq!(
+            border_color(&input),
+            BORDER,
+            "clearing the line turns the border green again"
+        );
     }
 
     #[test]

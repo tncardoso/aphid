@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::io::Stdout;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use aphid_agent::{Agent, AgentHandle, RunOutcome, exec};
@@ -34,6 +34,7 @@ use crate::plugins::permissions::{Decision, Permissions};
 use crate::plugins::scripts;
 use crate::session::{self, SessionPlugin, sessions_dir};
 use crate::skills::{self, Skill};
+use crate::tools::Workspace;
 use crate::tui::event::{UiConfirmer, UiEvent, UiPlugin, UiSink, spawn_input_thread};
 use crate::tui::input::{Action, Input};
 use crate::tui::modal::{Confirm, Modal};
@@ -79,6 +80,10 @@ pub struct App {
     queued: VecDeque<String>,
     /// Every command the runtime has started, for `/ps`.
     processes: Arc<exec::Registry>,
+    /// Where `!` commands run.
+    workspace: Workspace,
+    /// A `!` command in flight; delivers `(command, output)` when it finishes.
+    bang: Option<tokio::sync::oneshot::Receiver<(String, String)>>,
     /// The skills the model was told about, for `/skills`.
     skills: Vec<Skill>,
     /// Skill files that did not load, for the same list.
@@ -107,6 +112,8 @@ impl App {
             session: None,
             queued: VecDeque::new(),
             processes: Arc::clone(processes),
+            workspace: harness.workspace.clone(),
+            bang: None,
             skills: harness.skills.clone(),
             skill_diagnostics: harness.diagnostics.clone(),
             handle: harness.agent.handle(),
@@ -127,6 +134,8 @@ impl App {
             session: None,
             queued: VecDeque::new(),
             processes: Arc::new(exec::Registry::new()),
+            workspace: Workspace::new(std::env::temp_dir()),
+            bang: None,
             skills: Vec::new(),
             skill_diagnostics: Vec::new(),
             handle: agent.handle(),
@@ -542,6 +551,11 @@ impl App {
 
         format!("── skills ──\n{}", lines.join("\n"))
     }
+
+    /// A finished `!` command: put its output in the content area.
+    fn apply_bang_output(&mut self, command: String, output: String) {
+        self.view.push_shell(command, output);
+    }
 }
 
 /// The widest description a `/skills` line carries. A skill may describe itself
@@ -560,6 +574,7 @@ const HELP: &str = "\
   /skills          list the skills the model can open
   /help            this list
   /quit            exit
+  !cmd             run a shell command; its output goes to the transcript
 
 ── keys ──────────────────────────────────────────
   Esc         cancels a run
@@ -755,6 +770,16 @@ async fn drive(
                 }
                 dirty = true;
             }
+            // A `!` command finished; its output goes into the content area.
+            bang = async { app.bang.as_mut().expect("only polled while some").await },
+                if app.bang.is_some() =>
+            {
+                app.bang = None;
+                if let Ok((command, output)) = bang {
+                    app.apply_bang_output(command, output);
+                }
+                dirty = true;
+            }
             event = receiver.recv() => {
                 let Some(event) = event else { break };
                 match event {
@@ -856,6 +881,18 @@ fn handle_key(app: &mut App, key: KeyEvent, agent: Option<&mut Agent>) {
         Action::ScrollUp => app.view.scroll = app.view.scroll.saturating_add(10),
         Action::ScrollDown => app.view.scroll = app.view.scroll.saturating_sub(10),
         Action::ToggleThinking => app.view.show_thinking = !app.view.show_thinking,
+        Action::Bang(command) => {
+            // No agent involved, so a `!` command works mid-run too, like
+            // `/ps`. The registry tracks it, so `/ps` can stop it.
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let processes = Arc::clone(&app.processes);
+            let root = app.workspace.root().to_path_buf();
+            app.bang = Some(rx);
+            tokio::spawn(async move {
+                let output = run_bang(&processes, &root, &command).await;
+                let _ = tx.send((command, output));
+            });
+        }
         Action::CycleModel => {
             let next = app.catalog.next_after(&app.status.model.clone());
             if let (Some(model), Some(agent)) = (next, agent) {
@@ -889,6 +926,50 @@ fn split_command(line: &str) -> Option<(&str, &str)> {
     let line = line.strip_prefix('/')?;
     let (name, rest) = line.split_once(' ').unwrap_or((line, ""));
     Some((name, rest.trim()))
+}
+
+/// Run a `!` command to completion in the workspace root, and return its
+/// output. The same engine and the same one-line status markers as the `bash`
+/// tool; only the tool context is missing, because a `!` command belongs to
+/// no tool call.
+async fn run_bang(
+    processes: &Arc<exec::Registry>,
+    root: &std::path::Path,
+    command: &str,
+) -> String {
+    // stdout and stderr are pumped concurrently and appended to one buffer, so
+    // the output reads the way it would in a terminal, as in the `bash` tool.
+    let collected = Arc::new(Mutex::new(String::new()));
+    let sink = {
+        let collected = Arc::clone(&collected);
+        Arc::new(move |_stream: exec::Stream, line: &str| {
+            if let Ok(mut buffer) = collected.lock() {
+                buffer.push_str(line);
+                buffer.push('\n');
+            }
+        })
+    };
+
+    let spec = exec::Spec::new("tui", command).cwd(Some(root.to_path_buf()));
+    let status = exec::run(processes, spec, None, sink).await;
+
+    let mut output = collected.lock().expect("output lock").clone();
+    match status {
+        exec::Status::Exited(0) => {}
+        // A non-zero exit is not an error — plenty of commands report through
+        // their status, and the user ran this one on purpose.
+        exec::Status::Exited(code) => output.push_str(&format!("\n[exit code {code}]")),
+        exec::Status::Signalled => output.push_str("\n[terminated by signal]"),
+        exec::Status::TimedOut => output.push_str("\n[timed out]"),
+        exec::Status::Cancelled => output.push_str("\n[cancelled]"),
+        exec::Status::Killed | exec::Status::Killing => output.push_str("\n[killed]"),
+        exec::Status::Failed(error) => output.push_str(&format!("\n[{error}]")),
+        exec::Status::Running => {}
+    }
+    if output.is_empty() {
+        output.push_str("[no output]");
+    }
+    output
 }
 
 /// The input box grows with content up to this many rows, then scrolls.
@@ -1458,6 +1539,89 @@ mod tests {
 
         let status = running.await.expect("the sleep");
         assert_eq!(status, exec::Status::Killed);
+    }
+
+    /// A throwaway workspace for `!` commands that must not touch the repo.
+    fn temp_workspace() -> Workspace {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+
+        let root = std::env::temp_dir().join(format!(
+            "aphid-bang-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).expect("create");
+        Workspace::new(root)
+    }
+
+    fn shell_outputs(app: &App) -> Vec<String> {
+        use crate::tui::view::Entry;
+        app.view
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Shell { output, .. } => Some(output.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_bang_line_runs_the_command_and_prints_its_output() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+        app.workspace = temp_workspace();
+        let mut idle = Some(agent);
+
+        type_line(&mut app, &mut idle, "!echo hi");
+
+        assert_eq!(app.queued(), None, "a bang line is not a prompt");
+        let (command, output) = app
+            .bang
+            .take()
+            .expect("a bang run started")
+            .await
+            .expect("the command ran");
+        app.apply_bang_output(command, output);
+
+        assert_eq!(shell_outputs(&app), vec!["hi\n"]);
+        assert!(!app.status.running, "no agent run was started");
+    }
+
+    #[tokio::test]
+    async fn a_failing_bang_command_prints_its_exit_code() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+        app.workspace = temp_workspace();
+        let mut idle = Some(agent);
+
+        type_line(&mut app, &mut idle, "!exit 3");
+
+        let (command, output) = app
+            .bang
+            .take()
+            .expect("a bang run started")
+            .await
+            .expect("the command ran");
+        app.apply_bang_output(command, output);
+
+        let shown = shell_outputs(&app).remove(0);
+        assert!(shown.ends_with("[exit code 3]"), "{shown:?}");
+    }
+
+    #[tokio::test]
+    async fn a_bang_line_works_while_a_run_holds_the_agent() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+        app.workspace = temp_workspace();
+        let mut away: Option<Agent> = None;
+        app.status.running = true;
+
+        type_line(&mut app, &mut away, "!echo hi");
+
+        assert!(app.bang.is_some(), "the bang run started without the agent");
+        assert_eq!(app.queued(), None, "it must not queue as a prompt");
     }
 }
 

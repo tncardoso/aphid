@@ -38,6 +38,17 @@ A paste does not send the message: press `Enter` when the message is complete.
 `Up` on the first line shows the message you sent before. `Down` comes back to
 what you were writing, which is kept while you look.
 
+## Shell commands
+
+A line that starts with `!` is a shell command, not a message. The terminal
+user interface runs the text after the `!` in the workspace, and prints the
+output into the content area.
+
+The input border turns red while the line is a command. The command never
+goes to the model. It runs through the same engine as the `bash` tool, so
+`/ps` shows it while it runs, and `k` stops it. A bang line is kept in the
+input history, so `Up` recalls it and `Enter` runs it again.
+
 `/model` with no name opens a list of the catalogue. `/model <name>` accepts the
 same three forms as `--model`: the full identifier, the last part of it, or a
 prefix.
