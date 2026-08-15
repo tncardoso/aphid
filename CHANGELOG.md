@@ -40,6 +40,13 @@
 
 - In the terminal input, `Down` on the line you are writing no longer wipes the
   draft, and the draft survives a trip `Up` and back `Down`.
+- The terminal UI keeps only the latest 300 transcript entries on screen and
+  redraws only the message blocks that changed, so a long session no longer gets
+  slower as it grows.
+- Long lines inside assistant code blocks wrap to the width of the transcript
+  pane instead of running off the edge.
+- When you scroll up, new output no longer pushes the viewport off the text you
+  were reading.
 
 ## [0.1.0] - 2026-08-13
 

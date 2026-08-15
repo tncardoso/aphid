@@ -26,7 +26,6 @@ use ratatui::crossterm::{ExecutableCommand, cursor};
 use ratatui::layout::{Constraint, Layout, Margin};
 use ratatui::prelude::CrosstermBackend;
 use ratatui::style::{Color, Style};
-use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -1207,15 +1206,9 @@ fn render(frame: &mut Frame<'_>, app: &mut App) {
     .areas(frame.area());
 
     let main = app.surfaces.render(frame, transcript);
-    let width = main.width as usize;
-    let lines = app.view.lines(width);
-    let height = main.height as usize;
-
-    // Pinned to the bottom unless the user scrolled up.
-    let max_scroll = lines.len().saturating_sub(height);
-    let scroll = app.view.scroll.min(max_scroll);
-    let top = max_scroll - scroll;
-    let visible: Vec<Line<'_>> = lines.into_iter().skip(top).take(height).collect();
+    let visible = app
+        .view
+        .visible_lines(main.width as usize, main.height as usize);
     frame.render_widget(Paragraph::new(visible), main);
 
     app.input.set_prompt(app.status.running);

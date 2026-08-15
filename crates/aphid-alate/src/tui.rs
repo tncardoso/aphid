@@ -30,7 +30,6 @@ use ratatui::crossterm::terminal::{
 use ratatui::crossterm::{ExecutableCommand, cursor};
 use ratatui::layout::{Constraint, Layout};
 use ratatui::prelude::CrosstermBackend;
-use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui::{Frame, Terminal};
 use std::io::Stdout;
@@ -489,14 +488,7 @@ fn render(frame: &mut Frame<'_>, app: &mut App) {
     .areas(frame.area());
 
     let view = app.views.entry(app.current.clone()).or_default();
-    let lines = view.lines(transcript.width as usize);
-    let height = transcript.height as usize;
-
-    // Pinned to the bottom unless the user scrolled up.
-    let max_scroll = lines.len().saturating_sub(height);
-    let scroll = view.scroll.min(max_scroll);
-    let top = max_scroll - scroll;
-    let visible: Vec<Line<'_>> = lines.into_iter().skip(top).take(height).collect();
+    let visible = view.visible_lines(transcript.width as usize, transcript.height as usize);
     frame.render_widget(Paragraph::new(visible), transcript);
 
     app.input.set_prompt(app.status.running);

@@ -13,6 +13,12 @@ use ratatui::text::{Line, Span};
 /// Tool output longer than this is folded behind a summary line.
 pub const COLLAPSE_AFTER: usize = 15;
 
+/// How many transcript entries the view keeps in memory.
+///
+/// The agent transcript is not touched; this only bounds what the TUI can
+/// render and scroll back through.
+const MAX_ENTRIES: usize = 300;
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum ToolState {
     /// The arguments are still arriving; the call has not been announced yet.
@@ -65,6 +71,21 @@ pub struct View {
     /// Lines scrolled up from the bottom. Zero means pinned to the newest.
     pub scroll: usize,
     pub show_thinking: bool,
+    /// The entry index where the current turn starts. Entries before this are
+    /// settled history and may be evicted by [`MAX_ENTRIES`]. `None` means no
+    /// user turn has started yet, so every entry is evictable.
+    turn_start: Option<usize>,
+    /// Flattened rendered lines, in transcript order.
+    lines: Vec<Line<'static>>,
+    /// Where each entry's rendered block starts in [`Self::lines`].
+    starts: Vec<usize>,
+    /// Entries whose rendered block is stale.
+    dirty: Vec<bool>,
+    /// How many entries are already represented in [`Self::lines`].
+    rendered_entries: usize,
+    /// The width and thinking state [`Self::lines`] was built for.
+    cache_width: usize,
+    cache_show_thinking: bool,
 }
 
 impl View {
@@ -85,11 +106,16 @@ impl View {
         self.by_call.clear();
         self.streams.clear();
         self.scroll = 0;
+        self.turn_start = None;
+        self.invalidate_cache();
     }
 
     pub fn push_user(&mut self, text: impl Into<String>) {
-        self.entries.push(Entry::User(text.into()));
-        self.pin();
+        // A user message starts a new turn. The turn, not the message, is the
+        // unit the agent works on, so everything from here to the next user
+        // message is protected from the history cap.
+        self.turn_start = Some(self.entries.len());
+        self.push_entry(Entry::User(text.into()));
     }
 
     pub fn push_notice(&mut self, text: impl Into<String>) {
@@ -97,36 +123,37 @@ impl View {
         if let Some(host) = &self.host {
             host.notice(&text);
         }
-        self.entries.push(Entry::Notice(text));
-        self.pin();
+        self.push_entry(Entry::Notice(text));
     }
 
     pub fn push_logo(&mut self) {
-        self.entries.push(Entry::Logo);
-        self.pin();
+        self.push_entry(Entry::Logo);
     }
 
     /// A `!` command the user ran, and its output.
     pub fn push_shell(&mut self, command: String, output: String) {
-        self.entries.push(Entry::Shell { command, output });
-        self.pin();
+        self.push_entry(Entry::Shell { command, output });
     }
 
     /// Append streamed prose, continuing the current assistant entry.
     pub fn push_text(&mut self, chunk: &str) {
         match self.entries.last_mut() {
-            Some(Entry::Assistant(text)) => text.push_str(chunk),
-            _ => self.entries.push(Entry::Assistant(chunk.to_owned())),
+            Some(Entry::Assistant(text)) => {
+                text.push_str(chunk);
+                self.mark_dirty(self.entries.len() - 1);
+            }
+            _ => self.push_entry(Entry::Assistant(chunk.to_owned())),
         }
-        self.pin();
     }
 
     pub fn push_thinking(&mut self, chunk: &str) {
         match self.entries.last_mut() {
-            Some(Entry::Thinking(text)) => text.push_str(chunk),
-            _ => self.entries.push(Entry::Thinking(chunk.to_owned())),
+            Some(Entry::Thinking(text)) => {
+                text.push_str(chunk);
+                self.mark_dirty(self.entries.len() - 1);
+            }
+            _ => self.push_entry(Entry::Thinking(chunk.to_owned())),
         }
-        self.pin();
     }
 
     /// Open a placeholder for a tool call whose arguments are still streaming.
@@ -139,7 +166,7 @@ impl View {
             return;
         }
         self.streams.insert(block, self.entries.len());
-        self.entries.push(Entry::Tool {
+        self.push_entry(Entry::Tool {
             name: name.to_owned(),
             arguments: String::new(),
             output: String::new(),
@@ -147,7 +174,6 @@ impl View {
             details: None,
             streamed: 0,
         });
-        self.pin();
     }
 
     /// Count argument bytes into the placeholder for `block`.
@@ -158,7 +184,7 @@ impl View {
         if let Some(Entry::Tool { streamed, .. }) = self.entries.get_mut(index) {
             *streamed += bytes;
         }
-        self.pin();
+        self.mark_dirty(index);
     }
 
     /// Forget which blocks were streaming, without touching their entries.
@@ -171,12 +197,14 @@ impl View {
     /// A turn that failed or was cancelled mid-stream never announces its
     /// calls, and a card left at `Streaming` would count up forever.
     pub fn settle_tool_streams(&mut self) {
-        for index in self.streams.values() {
-            if let Some(Entry::Tool { output, state, .. }) = self.entries.get_mut(*index)
+        let indices: Vec<usize> = self.streams.values().copied().collect();
+        for index in indices {
+            if let Some(Entry::Tool { output, state, .. }) = self.entries.get_mut(index)
                 && *state == ToolState::Streaming
             {
                 *state = ToolState::Failed;
                 *output = "the turn ended before the call was complete".to_owned();
+                self.mark_dirty(index);
             }
         }
         self.streams.clear();
@@ -200,12 +228,12 @@ impl View {
             raw.push_str(arguments);
             *state = ToolState::Running;
             self.by_call.insert(id.to_owned(), index);
-            self.pin();
+            self.mark_dirty(index);
             return;
         }
 
         self.by_call.insert(id.to_owned(), self.entries.len());
-        self.entries.push(Entry::Tool {
+        self.push_entry(Entry::Tool {
             name: name.to_owned(),
             arguments: arguments.to_owned(),
             output: String::new(),
@@ -213,7 +241,6 @@ impl View {
             details: None,
             streamed: 0,
         });
-        self.pin();
     }
 
     fn first_streaming(&self) -> Option<usize> {
@@ -223,20 +250,26 @@ impl View {
     }
 
     pub fn push_tool_progress(&mut self, id: &str, chunk: &str) {
-        if let Some(Entry::Tool { output, .. }) = self.entry_for(id) {
+        let Some(&index) = self.by_call.get(id) else {
+            return;
+        };
+        if let Some(Entry::Tool { output, .. }) = self.entries.get_mut(index) {
             output.push_str(chunk);
             output.push('\n');
         }
-        self.pin();
+        self.mark_dirty(index);
     }
 
     pub fn finish_tool(&mut self, id: &str, text: &str, is_error: bool, payload: Option<Json>) {
+        let Some(&index) = self.by_call.get(id) else {
+            return;
+        };
         if let Some(Entry::Tool {
             output,
             state,
             details,
             ..
-        }) = self.entry_for(id)
+        }) = self.entries.get_mut(index)
         {
             // The final result is authoritative; progress chunks were a preview
             // of it, so they are replaced rather than appended to.
@@ -248,124 +281,302 @@ impl View {
             };
             *details = payload;
         }
-        self.pin();
+        self.mark_dirty(index);
     }
 
-    fn entry_for(&mut self, id: &str) -> Option<&mut Entry> {
-        let index = *self.by_call.get(id)?;
-        self.entries.get_mut(index)
+    fn push_entry(&mut self, entry: Entry) {
+        self.entries.push(entry);
+        self.starts.push(self.lines.len());
+        self.dirty.push(true);
+        self.trim_to_cap();
     }
 
-    /// Follow the newest output unless the user has scrolled away from it.
-    fn pin(&mut self) {
-        if self.scroll == 0 {
+    fn mark_dirty(&mut self, index: usize) {
+        if let Some(dirty) = self.dirty.get_mut(index) {
+            *dirty = true;
+        }
+    }
+
+    fn invalidate_cache(&mut self) {
+        self.lines.clear();
+        self.starts.clear();
+        self.dirty.clear();
+        self.rendered_entries = 0;
+        self.cache_width = 0;
+        self.cache_show_thinking = self.show_thinking;
+    }
+
+    fn trim_to_cap(&mut self) {
+        let removable = match self.turn_start {
+            Some(start) => self.entries.len().saturating_sub(MAX_ENTRIES).min(start),
+            None => self.entries.len().saturating_sub(MAX_ENTRIES),
+        };
+        if removable == 0 {
             return;
         }
-        // Keep the same content in view by moving with it.
-        self.scroll = self.scroll.saturating_add(0);
+
+        // A cache that is not current for the view cannot be spliced safely.
+        // Drop it; the next render rebuilds from the remaining entries.
+        if self.cache_width == 0
+            || self.cache_show_thinking != self.show_thinking
+            || self.starts.len() != self.entries.len()
+            || self.dirty.len() != self.entries.len()
+        {
+            self.entries.drain(0..removable);
+            self.adjust_maps(removable);
+            if let Some(start) = &mut self.turn_start {
+                *start -= removable;
+            }
+            self.invalidate_cache();
+            return;
+        }
+
+        let removed_lines = self.starts[removable];
+        self.entries.drain(0..removable);
+        self.starts.drain(0..removable);
+        self.dirty.drain(0..removable);
+        self.lines.drain(0..removed_lines);
+        for start in &mut self.starts {
+            *start -= removed_lines;
+        }
+        self.rendered_entries = self.rendered_entries.saturating_sub(removable);
+        self.adjust_maps(removable);
+        if let Some(start) = &mut self.turn_start {
+            *start -= removable;
+        }
     }
 
-    /// Render every entry to wrapped lines at `width`.
-    #[must_use]
-    pub fn lines(&self, width: usize) -> Vec<Line<'static>> {
-        let width = width.max(8);
-        let mut lines = Vec::new();
+    fn adjust_maps(&mut self, removed: usize) {
+        self.by_call = self
+            .by_call
+            .iter()
+            .filter_map(|(id, index)| {
+                let index = index.checked_sub(removed)?;
+                Some((id.clone(), index))
+            })
+            .collect();
+        self.streams = self
+            .streams
+            .iter()
+            .filter_map(|(block, index)| {
+                let index = index.checked_sub(removed)?;
+                Some((*block, index))
+            })
+            .collect();
+    }
 
-        for entry in &self.entries {
-            match entry {
-                Entry::User(text) => {
-                    for (index, part) in wrap(text, width - 2).into_iter().enumerate() {
-                        let prefix = if index == 0 { "> " } else { "  " };
-                        lines.push(Line::from(vec![
-                            Span::styled(prefix, Style::default().fg(Color::Cyan)),
-                            Span::styled(
-                                part,
-                                Style::default()
-                                    .fg(Color::Cyan)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                        ]));
+    /// Rebuild every rendered block for `width`.
+    fn rebuild_all(&mut self, width: usize) {
+        self.lines.clear();
+        self.starts.clear();
+        self.dirty.clear();
+
+        for index in 0..self.entries.len() {
+            let rendered = render_entry(&self.entries[index], width, self.show_thinking);
+            self.starts.push(self.lines.len());
+            self.lines.extend(rendered);
+            self.dirty.push(false);
+        }
+
+        self.rendered_entries = self.entries.len();
+        self.cache_width = width;
+        self.cache_show_thinking = self.show_thinking;
+    }
+
+    /// Re-render only entries marked dirty, splicing their new blocks into the
+    /// flattened line buffer.
+    fn rebuild_dirty(&mut self, width: usize, old_top: usize) -> (usize, isize) {
+        let old_rendered = self.rendered_entries;
+        let mut appended_lines = 0usize;
+        let mut shifted_delta = 0isize;
+
+        for index in 0..self.entries.len() {
+            if !self.dirty.get(index).copied().unwrap_or(false) {
+                continue;
+            }
+
+            let rendered = render_entry(&self.entries[index], width, self.show_thinking);
+            let rendered_len = rendered.len();
+
+            if index >= old_rendered {
+                let start = self.lines.len();
+                self.lines.extend(rendered);
+                self.starts[index] = start;
+                appended_lines += rendered_len;
+            } else {
+                let old_start = self.starts[index];
+                let old_len = if index + 1 < self.starts.len() {
+                    self.starts[index + 1] - old_start
+                } else {
+                    self.lines.len() - old_start
+                };
+                let delta = rendered_len as isize - old_len as isize;
+                self.lines.splice(old_start..old_start + old_len, rendered);
+                if delta != 0 {
+                    for start in &mut self.starts[index + 1..] {
+                        *start = (*start as isize + delta) as usize;
                     }
-                    lines.push(Line::default());
                 }
-                Entry::Assistant(text) => {
-                    lines.extend(markdown(text, width));
-                    lines.push(Line::default());
+
+                // Only content at or below the old viewport moves the viewport
+                // when it grows or shrinks.
+                if self.scroll > 0 && old_start >= old_top {
+                    shifted_delta += delta;
                 }
-                Entry::Thinking(text) => {
-                    if self.show_thinking {
-                        for part in wrap(text, width - 2) {
-                            lines.push(Line::styled(
-                                format!("┊ {part}"),
-                                Style::default()
-                                    .fg(Color::DarkGray)
-                                    .add_modifier(Modifier::ITALIC),
-                            ));
-                        }
-                        lines.push(Line::default());
-                    }
-                }
-                Entry::Tool {
-                    name,
-                    arguments,
-                    output,
-                    state,
-                    details,
-                    streamed,
-                } => {
-                    lines.push(tool_header(name, arguments, *state, *streamed, width));
-                    if let Some(diff) = diff_lines(details) {
-                        lines.extend(diff);
-                    } else {
-                        lines.extend(output_lines(output, *state, width));
-                    }
-                    lines.push(Line::default());
-                }
-                Entry::Notice(text) => {
-                    for raw in text.lines() {
-                        for part in wrap(raw, width) {
-                            lines.push(Line::styled(part, Style::default().fg(Color::DarkGray)));
-                        }
-                    }
-                    lines.push(Line::default());
-                }
-                Entry::Shell { command, output } => {
-                    // A card like a tool's: a one-line header naming the
-                    // command, then its output wrapped below. Every line the
-                    // user asked for is shown — the transcript scrolls.
-                    lines.push(Line::from(vec![
-                        Span::styled("$ ", Style::default().fg(Color::Gray)),
-                        Span::styled(
-                            command.clone(),
-                            Style::default()
-                                .fg(Color::Gray)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]));
-                    for raw in output.lines() {
-                        for part in wrap(raw, width.saturating_sub(2)) {
-                            lines.push(Line::styled(
-                                format!("  {part}"),
-                                Style::default().fg(Color::Gray),
-                            ));
-                        }
-                    }
-                    lines.push(Line::default());
-                }
-                Entry::Logo => {
-                    let (r, g, b) = super::logo::COLOR;
-                    let style = Style::default().fg(Color::Rgb(r, g, b));
-                    lines.push(Line::default());
-                    for raw in super::logo::LINES {
-                        lines.push(Line::styled(raw, style));
-                    }
-                    lines.push(Line::default());
-                }
+            }
+
+            self.dirty[index] = false;
+        }
+
+        (appended_lines, shifted_delta)
+    }
+
+    /// Render every entry to wrapped lines at `width`, keeping the result in
+    /// the view's cache.
+    #[must_use]
+    pub fn lines(&mut self, width: usize) -> &[Line<'static>] {
+        self.lines_for(width, 0)
+    }
+
+    /// The visible transcript lines for a viewport, cloned from the cache.
+    ///
+    /// Ratatui's `Paragraph` owns its text, so the visible slice is the only
+    /// copy. The cache means the full transcript is not re-wrapped or copied
+    /// on every frame.
+    pub fn visible_lines(&mut self, width: usize, height: usize) -> Vec<Line<'static>> {
+        self.lines_for(width, height);
+        let max_scroll = self.lines.len().saturating_sub(height);
+        self.scroll = self.scroll.min(max_scroll);
+        let top = max_scroll - self.scroll;
+        self.lines.iter().skip(top).take(height).cloned().collect()
+    }
+
+    /// Ensure the cache is current for `width`, then return it.
+    ///
+    /// `height` is the transcript viewport height. It is used only for scroll
+    /// anchoring: when a block at or below the old viewport changes size, the
+    /// scroll offset moves with it so the same content stays under the cursor.
+    fn lines_for(&mut self, width: usize, height: usize) -> &[Line<'static>] {
+        let width = width.max(8);
+
+        if self.cache_width != width || self.cache_show_thinking != self.show_thinking {
+            self.rebuild_all(width);
+            self.trim_to_cap();
+            return &self.lines;
+        }
+
+        let old_total = self.lines.len();
+        let old_scroll = self.scroll;
+        let old_top = old_total.saturating_sub(height).saturating_sub(old_scroll);
+        let (appended_lines, shifted_delta) = self.rebuild_dirty(width, old_top);
+        self.trim_to_cap();
+        self.rendered_entries = self.entries.len();
+
+        if old_scroll > 0 {
+            let delta = appended_lines as isize + shifted_delta;
+            if delta > 0 {
+                self.scroll = self.scroll.saturating_add(delta as usize);
+            } else if delta < 0 {
+                self.scroll = self.scroll.saturating_sub((-delta) as usize);
             }
         }
 
-        lines
+        &self.lines
     }
+}
+
+fn render_entry(entry: &Entry, width: usize, show_thinking: bool) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    match entry {
+        Entry::User(text) => {
+            for (index, part) in wrap(text, width - 2).into_iter().enumerate() {
+                let prefix = if index == 0 { "> " } else { "  " };
+                lines.push(Line::from(vec![
+                    Span::styled(prefix, Style::default().fg(Color::Cyan)),
+                    Span::styled(
+                        part,
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+            }
+            lines.push(Line::default());
+        }
+        Entry::Assistant(text) => {
+            lines.extend(markdown(text, width));
+            lines.push(Line::default());
+        }
+        Entry::Thinking(text) => {
+            if show_thinking {
+                for part in wrap(text, width - 2) {
+                    lines.push(Line::styled(
+                        format!("┊ {part}"),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::ITALIC),
+                    ));
+                }
+                lines.push(Line::default());
+            }
+        }
+        Entry::Tool {
+            name,
+            arguments,
+            output,
+            state,
+            details,
+            streamed,
+        } => {
+            lines.push(tool_header(name, arguments, *state, *streamed, width));
+            if let Some(diff) = diff_lines(details) {
+                lines.extend(diff);
+            } else {
+                lines.extend(output_lines(output, *state, width));
+            }
+            lines.push(Line::default());
+        }
+        Entry::Notice(text) => {
+            for raw in text.lines() {
+                for part in wrap(raw, width) {
+                    lines.push(Line::styled(part, Style::default().fg(Color::DarkGray)));
+                }
+            }
+            lines.push(Line::default());
+        }
+        Entry::Shell { command, output } => {
+            lines.push(Line::from(vec![
+                Span::styled("$ ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    command.clone(),
+                    Style::default()
+                        .fg(Color::Gray)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            for raw in output.lines() {
+                for part in wrap(raw, width.saturating_sub(2)) {
+                    lines.push(Line::styled(
+                        format!("  {part}"),
+                        Style::default().fg(Color::Gray),
+                    ));
+                }
+            }
+            lines.push(Line::default());
+        }
+        Entry::Logo => {
+            let (r, g, b) = super::logo::COLOR;
+            let style = Style::default().fg(Color::Rgb(r, g, b));
+            lines.push(Line::default());
+            for raw in super::logo::LINES {
+                lines.push(Line::styled(raw, style));
+            }
+            lines.push(Line::default());
+        }
+    }
+
+    lines
 }
 
 fn tool_header(
@@ -493,10 +704,9 @@ fn markdown(text: &str, width: usize) -> Vec<Line<'static>> {
         }
 
         if in_code {
-            lines.push(Line::styled(
-                raw.to_owned(),
-                Style::default().fg(Color::LightGreen),
-            ));
+            for part in wrap(raw, width) {
+                lines.push(Line::styled(part, Style::default().fg(Color::LightGreen)));
+            }
             continue;
         }
 
@@ -889,5 +1099,85 @@ mod tests {
         assert!(rendered.iter().any(|line| line.contains("final output")));
         assert!(!rendered.iter().any(|line| line.contains("partial")));
         assert!(rendered.iter().any(|line| line.contains("bash")));
+    }
+
+    #[test]
+    fn old_entries_are_evicted_at_the_cap() {
+        let mut view = View::default();
+        for number in 0..MAX_ENTRIES + 50 {
+            view.push_notice(format!("notice {number}"));
+        }
+
+        assert_eq!(view.entries().len(), MAX_ENTRIES);
+        assert!(
+            matches!(view.entries().first(), Some(Entry::Notice(text)) if text == "notice 50"),
+            "the oldest settled entries are gone"
+        );
+    }
+
+    #[test]
+    fn the_current_turn_is_never_evicted() {
+        let mut view = View::default();
+        for number in 0..10 {
+            view.push_notice(format!("notice {number}"));
+        }
+        view.push_user("keep me");
+        for number in 0..MAX_ENTRIES + 20 {
+            view.push_tool_call(&format!("call-{number}"), "bash", "{}");
+        }
+
+        assert!(view.entries().len() > MAX_ENTRIES);
+        assert!(
+            matches!(view.entries().first(), Some(Entry::User(text)) if text == "keep me"),
+            "the cap may not eat the turn the user is watching"
+        );
+    }
+
+    #[test]
+    fn only_changed_blocks_are_marked_dirty() {
+        let mut view = View::default();
+        view.push_user("hello");
+        view.push_text("an answer");
+        let _ = view.lines(40);
+
+        assert!(view.dirty.iter().all(|dirty| !dirty));
+
+        view.push_text(" with more");
+        assert_eq!(view.dirty.iter().filter(|dirty| **dirty).count(), 1);
+        assert!(view.dirty.last().copied().unwrap_or(false));
+
+        let _ = view.lines(40);
+        assert!(view.dirty.iter().all(|dirty| !dirty));
+    }
+
+    #[test]
+    fn new_lines_below_the_viewport_anchor_the_scroll() {
+        let mut view = View::default();
+        for number in 0..10 {
+            view.push_notice(format!("line {number}"));
+        }
+        view.lines_for(20, 5);
+
+        let old_total = view.lines.len();
+        view.scroll = 2;
+        view.push_notice("fresh content");
+        view.lines_for(20, 5);
+
+        let added = view.lines.len() - old_total;
+        assert!(added > 0);
+        assert_eq!(view.scroll, 2 + added);
+    }
+
+    #[test]
+    fn assistant_code_blocks_wrap_long_lines() {
+        let mut view = View::default();
+        view.push_text("```\n012345678901234567890123456789\n```");
+
+        let rendered: Vec<String> = view.lines(12).iter().map(ToString::to_string).collect();
+        assert!(
+            rendered.iter().all(|line| line.chars().count() <= 12),
+            "code lines are wrapped to the pane: {rendered:?}"
+        );
+        assert!(rendered.iter().any(|line| line.contains("0123456789")));
     }
 }
