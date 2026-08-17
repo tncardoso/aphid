@@ -15,7 +15,7 @@
 //! [`UiConfirmer`](event::UiConfirmer) blocks on a channel until the app answers,
 //! and if both lived on one task that would deadlock. It also means the UI never
 //! touches the agent while a run is in flight: everything it draws comes from
-//! [`UiEvent`](event::UiEvent)s, and the agent comes back when the run ends.
+//! [`Msg`](msg::Msg)s, and the agent comes back when the run ends.
 
 pub mod app;
 pub mod effect;
@@ -33,6 +33,6 @@ pub mod surface;
 pub use app::{App, run};
 pub use effect::Effect;
 pub use event::{UiConfirmer, UiPlugin, UiSink};
-pub use msg::{Msg, UiEvent};
+pub use msg::Msg;
 pub use scrollback::Scrollback;
 pub use status::Status;

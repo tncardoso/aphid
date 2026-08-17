@@ -1,9 +1,9 @@
-//! What the UI reacts to, and where it comes from.
+//! Where the terminal's messages come from.
 //!
-//! Two producers, one channel. The agent's hooks are synchronous, so they push
-//! onto an unbounded sender — a non-blocking, infallible operation, which is
-//! precisely why the plugin API was built that way. Terminal input arrives on
-//! its own thread, because `crossterm::event::read` blocks.
+//! The agent's hooks are synchronous, so they push onto the hub — a
+//! non-blocking, infallible operation, which is precisely why the plugin API
+//! was built that way. Terminal input arrives on its own thread, because
+//! `crossterm::event::read` blocks.
 
 use aphid_agent::{
     Cx, Flow, Guard, Interest, PendingCall, Plugin, ResultCx, RunOutcome, StreamCx, ToolOutcome,
@@ -13,7 +13,7 @@ use aphid_core::{BlockKind, ContentRef, Event};
 use ratatui::crossterm::event;
 
 use crate::plugins::permissions::{Confirmer, Decision, Risk};
-pub use crate::tui::msg::UiEvent;
+use crate::tui::msg::Msg;
 use crate::tui::runtime::{self, ANSWER_TIMEOUT, Answers, Hub};
 
 /// Sends a plugin's `notify` and `prompt` output to the app loop.
@@ -22,40 +22,38 @@ use crate::tui::runtime::{self, ANSWER_TIMEOUT, Answers, Hub};
 /// has to arrive as an event like everything else. `log` still goes to standard
 /// error, where the UI is not drawing and a developer can capture it.
 pub struct UiSink {
-    events: Hub<UiEvent>,
+    events: Hub<Msg>,
 }
 
 impl UiSink {
     #[must_use]
-    pub fn new(events: Hub<UiEvent>) -> Self {
+    pub fn new(events: Hub<Msg>) -> Self {
         Self { events }
     }
 }
 
 impl aphid_plugin::Sink for UiSink {
     fn notify(&self, plugin: &str, text: &str) {
-        let _ = self
-            .events
-            .send(UiEvent::Notice(format!("{plugin}: {text}")));
+        let _ = self.events.send(Msg::Notice(format!("{plugin}: {text}")));
     }
 
     fn prompt(&self, _plugin: &str, text: &str) {
-        self.events.send(UiEvent::Prompt(text.to_owned()));
+        self.events.send(Msg::Prompt(text.to_owned()));
     }
 }
 
 /// Forwards the run to the app loop.
 pub struct UiPlugin {
-    events: Hub<UiEvent>,
+    events: Hub<Msg>,
 }
 
 impl UiPlugin {
     #[must_use]
-    pub fn new(events: Hub<UiEvent>) -> Self {
+    pub fn new(events: Hub<Msg>) -> Self {
         Self { events }
     }
 
-    fn send(&self, event: UiEvent) {
+    fn send(&self, event: Msg) {
         // A closed channel means the app is gone; there is nothing to do about
         // it here, and the run is being cancelled anyway.
         self.events.send(event);
@@ -78,7 +76,7 @@ impl Plugin for UiPlugin {
     }
 
     fn on_turn_start(&self, _cx: &mut Cx<'_>) {
-        self.send(UiEvent::TurnStarted);
+        self.send(Msg::TurnStarted);
     }
 
     fn on_event(&self, event: &Event, cx: &StreamCx<'_>) {
@@ -92,13 +90,13 @@ impl Plugin for UiPlugin {
                 kind: BlockKind::ToolCall,
             } => {
                 let name = tool_name(cx, index);
-                self.send(UiEvent::ToolStreamStart { block: index, name });
+                self.send(Msg::ToolStreamStart { block: index, name });
             }
             Event::Delta {
                 index,
                 kind: BlockKind::ToolCall,
                 span,
-            } => self.send(UiEvent::ToolStreamDelta {
+            } => self.send(Msg::ToolStreamDelta {
                 block: index,
                 bytes: span.len() as usize,
             }),
@@ -106,18 +104,18 @@ impl Plugin for UiPlugin {
                 kind: BlockKind::Text,
                 span,
                 ..
-            } => self.send(UiEvent::Text(cx.text(span).to_owned())),
+            } => self.send(Msg::Text(cx.text(span).to_owned())),
             Event::Delta {
                 kind: BlockKind::Thinking,
                 span,
                 ..
-            } => self.send(UiEvent::Thinking(cx.text(span).to_owned())),
+            } => self.send(Msg::Thinking(cx.text(span).to_owned())),
             _ => {}
         }
     }
 
     fn on_tool_call(&self, call: &mut PendingCall<'_>) -> Guard {
-        self.send(UiEvent::ToolCall {
+        self.send(Msg::ToolCall {
             id: call.id().to_owned(),
             name: call.name().to_owned(),
             arguments: call.arguments().to_owned(),
@@ -126,14 +124,14 @@ impl Plugin for UiPlugin {
     }
 
     fn on_tool_progress(&self, call_id: &str, _tool: &str, chunk: &str) {
-        self.send(UiEvent::ToolProgress {
+        self.send(Msg::ToolProgress {
             id: call_id.to_owned(),
             chunk: chunk.to_owned(),
         });
     }
 
     fn on_tool_result(&self, outcome: &mut ToolOutcome, cx: &ResultCx<'_>) {
-        self.send(UiEvent::ToolResult {
+        self.send(Msg::ToolResult {
             id: cx.id().to_owned(),
             name: cx.name().to_owned(),
             text: outcome.text_content(),
@@ -143,7 +141,7 @@ impl Plugin for UiPlugin {
     }
 
     fn on_turn_end(&self, _cx: &mut Cx<'_>, turn: &TurnSummary) -> Flow {
-        self.send(UiEvent::TurnEnded {
+        self.send(Msg::TurnEnded {
             usage: turn.usage,
             stop: turn.stop_reason,
             error: turn.error.clone(),
@@ -152,7 +150,7 @@ impl Plugin for UiPlugin {
     }
 
     fn on_run_end(&self, _cx: &mut Cx<'_>, outcome: &RunOutcome) {
-        self.send(UiEvent::RunEnded {
+        self.send(Msg::RunEnded {
             stop: outcome.stop,
             turns: outcome.turns,
             error: outcome.error.clone(),
@@ -182,13 +180,13 @@ fn tool_name(cx: &StreamCx<'_>, index: u32) -> String {
 /// This is why the agent runs on its own task rather than inside the app's
 /// `select!`: blocking here must not stop the loop that draws the prompt.
 pub struct UiConfirmer {
-    events: Hub<UiEvent>,
+    events: Hub<Msg>,
     answers: Answers<Decision>,
 }
 
 impl UiConfirmer {
     #[must_use]
-    pub fn new(events: Hub<UiEvent>, answers: Answers<Decision>) -> Self {
+    pub fn new(events: Hub<Msg>, answers: Answers<Decision>) -> Self {
         Self { events, answers }
     }
 }
@@ -196,7 +194,7 @@ impl UiConfirmer {
 impl Confirmer for UiConfirmer {
     fn confirm(&self, tool: &str, summary: &str, risk: Risk) -> Decision {
         let (id, answer) = self.answers.open();
-        let asked = self.events.send(UiEvent::Confirm {
+        let asked = self.events.send(Msg::Confirm {
             id,
             tool: tool.to_owned(),
             summary: summary.to_owned(),
@@ -215,16 +213,17 @@ impl Confirmer for UiConfirmer {
     }
 }
 
-/// Read the terminal on a dedicated thread and forward what it says.
+/// Read the terminal, and say what each event means to this app.
 ///
-/// `crossterm::event::read` blocks, and a blocked runtime thread is a stalled
-/// UI. The thread ends when the channel closes.
-pub fn spawn_input_thread(hub: &Hub<UiEvent>) {
+/// The thread is the runtime's; what is here is the mapping, because what a
+/// mouse wheel or a paste means is the app's own business. The other two
+/// terminals write the same few lines and answer differently.
+pub fn spawn_input_thread(hub: &Hub<Msg>) {
     runtime::spawn_input_thread(hub.clone(), |event| match event {
-        event::Event::Key(key) => Some(UiEvent::Key(key)),
-        event::Event::Paste(text) => Some(UiEvent::Paste(text)),
-        event::Event::Mouse(mouse) => Some(UiEvent::Mouse(mouse)),
-        event::Event::Resize(_, _) => Some(UiEvent::Resize),
+        event::Event::Key(key) => Some(Msg::Key(key)),
+        event::Event::Paste(text) => Some(Msg::Paste(text)),
+        event::Event::Mouse(mouse) => Some(Msg::Mouse(mouse)),
+        event::Event::Resize(_, _) => Some(Msg::Resize),
         _ => None,
     });
 }

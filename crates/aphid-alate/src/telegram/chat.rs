@@ -7,7 +7,7 @@
 //! does that, and it is the same thing it does for two terminals.
 //!
 //! The task here is therefore only translation: frames in, messages out. It is
-//! the Telegram counterpart of [`crate::tui::App::apply`], and it drops far more
+//! the Telegram counterpart of [`crate::tui::App::update`], and it drops far more
 //! than it shows. A phone is not a terminal: thinking, tool arguments and tool
 //! results belong in `aphid alate attach`, not in a chat.
 

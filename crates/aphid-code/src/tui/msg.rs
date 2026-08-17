@@ -114,8 +114,3 @@ pub enum Msg {
         actions: Vec<aphid_plugin::SurfaceAction>,
     },
 }
-
-/// The old name, for the terminals that only ever matched its key events.
-///
-/// Removed once the alate and the colony run on the runtime too.
-pub type UiEvent = Msg;

@@ -1,6 +1,6 @@
 //! The transcript the UI shows, and how it is drawn.
 //!
-//! This model is built from [`UiEvent`](super::event::UiEvent)s, not from the
+//! This model is built from [`Msg`](super::msg::Msg)s, not from the
 //! agent's arena. Collapsing, scrolling and diff rendering are presentation
 //! state, and the transcript on disk should not carry any of it.
 

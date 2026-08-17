@@ -1,9 +1,14 @@
 //! The loop that keeps an alate awake.
 //!
-//! It is [`aphid_code::tui::app::drive`] with the terminal taken out, a clock
-//! put in, and one conversation grown into several. Every session runs on its
-//! own task and hands its agent back when the run ends; the loop meanwhile
-//! serves terminals, ticks the plugins and watches the time.
+//! It is the coding agent's loop with the terminal taken out, a clock put in,
+//! and one conversation grown into several. Every session runs on its own task
+//! and hands its agent back when the run ends; the loop meanwhile serves
+//! terminals, ticks the plugins and watches the time.
+//!
+//! It does not run on [`aphid_code::tui::runtime`], as the three terminals do.
+//! That loop waits on a channel and up to three clocks; this one also waits on
+//! a [`JoinSet`](tokio::task::JoinSet) of running sessions, and the same set is
+//! read by the code that would be its update.
 //!
 //! Four things put words to an alate, and each says which conversation it means:
 //!
