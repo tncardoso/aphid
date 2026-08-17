@@ -339,3 +339,138 @@ async fn an_empty_process_list_says_so() {
 
     assert!(rendered.join("\n").contains("nothing running"));
 }
+
+// ---------------------------------------------------------------------------
+// The transcript cache, pinned.
+//
+// The pane keeps a per-entry line cache and re-renders only the blocks that
+// changed. These say what the pane must paint, so a change to how the cache
+// is kept has to keep painting it.
+// ---------------------------------------------------------------------------
+
+/// A transcript with one of each thing the pane draws.
+fn transcript() -> View {
+    let mut view = View::default();
+    view.push_user("explain the wrapping rule");
+    view.push_text("Lines are wrapped at the pane width, and broken at a space when there is one.");
+    view.push_tool_call("c1", "bash", r#"{"command":"ls"}"#);
+    view.finish_tool("c1", "Cargo.toml\nsrc\n", false, None);
+    view.push_notice("── switched to deepseek-v4-flash ──");
+    view
+}
+
+/// What the pane paints into a `width` by `height` viewport.
+fn painted(view: &mut View, width: u16, height: u16) -> Vec<String> {
+    let lines = view.visible_lines(width as usize, height as usize);
+    draw(width, height, |frame| {
+        frame.render_widget(Paragraph::new(lines), frame.area());
+    })
+}
+
+#[test]
+fn a_narrow_pane_wraps_every_kind_of_entry() {
+    assert_eq!(
+        painted(&mut transcript(), 30, 14),
+        [
+            "> explain the wrapping rule",
+            "",
+            "Lines are wrapped at the pane",
+            "width, and broken at a space",
+            "when there is one.",
+            "",
+            "→ bash {\"command\":\"ls\"}",
+            "  Cargo.toml",
+            "  src",
+            "",
+            "── switched to",
+            "deepseek-v4-flash ──",
+            "",
+            "",
+        ]
+    );
+}
+
+#[test]
+fn a_wide_pane_wraps_less_and_says_the_same_thing() {
+    assert_eq!(
+        painted(&mut transcript(), 60, 14),
+        [
+            "> explain the wrapping rule",
+            "",
+            "Lines are wrapped at the pane width, and broken at a space",
+            "when there is one.",
+            "",
+            "→ bash {\"command\":\"ls\"}",
+            "  Cargo.toml",
+            "  src",
+            "",
+            "── switched to deepseek-v4-flash ──",
+            "",
+            "",
+            "",
+            "",
+        ]
+    );
+}
+
+#[test]
+fn a_streamed_answer_leaves_what_is_above_it_alone() {
+    let mut view = View::default();
+    view.push_user("explain the wrapping rule");
+    view.push_text("Lines are wrapped at the pane width");
+    let before = painted(&mut view, 40, 20);
+
+    view.push_text(", and broken at a space when there is one.");
+    let after = painted(&mut view, 40, 20);
+
+    assert_eq!(after[..2], before[..2], "the question does not move");
+    assert!(after.join("\n").contains("broken at a space"), "{after:#?}");
+}
+
+#[test]
+fn eviction_paints_what_the_survivors_alone_would_paint() {
+    const PUSHED: usize = 400;
+
+    let mut capped = View::default();
+    for number in 0..PUSHED {
+        capped.push_notice(format!("notice {number}"));
+    }
+    let kept = capped.entries().len();
+    assert!(
+        kept < PUSHED,
+        "the cap has to have bitten for this to mean anything"
+    );
+
+    let mut survivors = View::default();
+    for number in PUSHED - kept..PUSHED {
+        survivors.push_notice(format!("notice {number}"));
+    }
+
+    assert_eq!(
+        painted(&mut capped, 40, 12),
+        painted(&mut survivors, 40, 12),
+        "an evicted prefix leaves no trace in the pane"
+    );
+}
+
+#[test]
+fn scrolling_up_holds_the_viewport_while_content_arrives_below() {
+    let mut view = View::default();
+    for number in 0..40 {
+        view.push_notice(format!("notice {number}"));
+    }
+    let _ = view.visible_lines(40, 10);
+
+    view.scroll = 12;
+    let parked = painted(&mut view, 40, 10);
+
+    for number in 40..46 {
+        view.push_notice(format!("notice {number}"));
+    }
+
+    assert_eq!(
+        painted(&mut view, 40, 10),
+        parked,
+        "reading back through the transcript is not disturbed by what arrives"
+    );
+}

@@ -86,6 +86,12 @@ pub struct View {
     /// The width and thinking state [`Self::lines`] was built for.
     cache_width: usize,
     cache_show_thinking: bool,
+    /// How many entry blocks the last cache pass rendered.
+    ///
+    /// The point of the per-entry cache is that one changed entry costs one
+    /// block, so a test asserts the work and not only the staleness flag.
+    #[cfg(test)]
+    rebuilt: usize,
 }
 
 impl View {
@@ -365,6 +371,15 @@ impl View {
             .collect();
     }
 
+    /// Render one entry's block, counting the work the cache did not save.
+    fn render_block(&mut self, index: usize, width: usize) -> Vec<Line<'static>> {
+        #[cfg(test)]
+        {
+            self.rebuilt += 1;
+        }
+        render_entry(&self.entries[index], width, self.show_thinking)
+    }
+
     /// Rebuild every rendered block for `width`.
     fn rebuild_all(&mut self, width: usize) {
         self.lines.clear();
@@ -372,7 +387,7 @@ impl View {
         self.dirty.clear();
 
         for index in 0..self.entries.len() {
-            let rendered = render_entry(&self.entries[index], width, self.show_thinking);
+            let rendered = self.render_block(index, width);
             self.starts.push(self.lines.len());
             self.lines.extend(rendered);
             self.dirty.push(false);
@@ -395,7 +410,7 @@ impl View {
                 continue;
             }
 
-            let rendered = render_entry(&self.entries[index], width, self.show_thinking);
+            let rendered = self.render_block(index, width);
             let rendered_len = rendered.len();
 
             if index >= old_rendered {
@@ -458,6 +473,10 @@ impl View {
     /// scroll offset moves with it so the same content stays under the cursor.
     fn lines_for(&mut self, width: usize, height: usize) -> &[Line<'static>] {
         let width = width.max(8);
+        #[cfg(test)]
+        {
+            self.rebuilt = 0;
+        }
 
         if self.cache_width != width || self.cache_show_thinking != self.show_thinking {
             self.rebuild_all(width);
@@ -1148,6 +1167,47 @@ mod tests {
 
         let _ = view.lines(40);
         assert!(view.dirty.iter().all(|dirty| !dirty));
+    }
+
+    #[test]
+    fn only_the_changed_block_is_rebuilt() {
+        let mut view = View::default();
+        for number in 0..MAX_ENTRIES {
+            view.push_notice(format!("notice {number}"));
+        }
+
+        let _ = view.lines(40);
+        assert_eq!(
+            view.rebuilt, MAX_ENTRIES,
+            "the first pass renders everything"
+        );
+
+        view.push_notice("one more");
+        let _ = view.lines(40);
+        assert_eq!(view.rebuilt, 1, "an appended entry costs one block");
+
+        view.push_text("an answer");
+        view.push_text(" with more");
+        let _ = view.lines(40);
+        assert_eq!(view.rebuilt, 1, "a grown entry costs one block");
+
+        let _ = view.lines(40);
+        assert_eq!(view.rebuilt, 0, "an unchanged transcript costs nothing");
+    }
+
+    #[test]
+    fn a_new_width_rebuilds_every_block() {
+        let mut view = View::default();
+        for number in 0..10 {
+            view.push_notice(format!("notice {number}"));
+        }
+
+        let _ = view.lines(40);
+        let _ = view.lines(20);
+        assert_eq!(
+            view.rebuilt, 10,
+            "wrapping is width-bound, so nothing carries"
+        );
     }
 
     #[test]
