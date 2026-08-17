@@ -6,7 +6,7 @@
 //! from. Instead of a channel fed by plugins in this process, it is a socket
 //! fed by a daemon in another.
 //!
-//! An alate holds several conversations at once, so this holds a [`View`] for
+//! An alate holds several conversations at once, so this holds a [`Scrollback`] for
 //! each one it has looked at and draws whichever is current. Switching is
 //! [`Request::Watch`]: the daemon replays that session from its transcript, so
 //! one that finished last week draws exactly like one running now.
@@ -21,8 +21,8 @@ use aphid_code::plugins::permissions::Decision;
 use aphid_code::tui::event::{UiEvent, spawn_input_thread};
 use aphid_code::tui::input::{Action, Input};
 use aphid_code::tui::modal::{Confirm, Modal};
+use aphid_code::tui::scrollback::Scrollback;
 use aphid_code::tui::status::Status;
-use aphid_code::tui::view::View;
 use ratatui::crossterm::event::{DisableBracketedPaste, EnableBracketedPaste, KeyCode, KeyEvent};
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -34,7 +34,6 @@ use ratatui::widgets::Paragraph;
 use ratatui::{Frame, Terminal};
 use std::io::Stdout;
 use std::time::Duration;
-use tokio::sync::mpsc::unbounded_channel;
 
 use crate::gateway::Client;
 use crate::gateway::wire::{Answer, Envelope, Frame as Wire, Request};
@@ -67,7 +66,7 @@ type Screen = Terminal<CrosstermBackend<Stdout>>;
 struct App {
     /// One for each session looked at. Switching draws a different one rather
     /// than fetching the same history twice.
-    views: HashMap<String, View>,
+    views: HashMap<String, Scrollback>,
     /// The session being drawn and typed into.
     current: String,
     /// The session being filled from a replay, if one is arriving.
@@ -89,11 +88,11 @@ struct App {
 impl App {
     /// The view for the session on screen, made if this is the first frame for
     /// it.
-    fn view(&mut self) -> &mut View {
+    fn scrollback(&mut self) -> &mut Scrollback {
         self.views.entry(self.current.clone()).or_default()
     }
 
-    fn view_of(&mut self, id: &str) -> &mut View {
+    fn view_of(&mut self, id: &str) -> &mut Scrollback {
         self.views.entry(id.to_owned()).or_default()
     }
 }
@@ -125,8 +124,8 @@ pub async fn run(home: &Home) -> std::io::Result<()> {
             ),
         )
     })?;
-    let (events, mut keys) = unbounded_channel();
-    spawn_input_thread(events);
+    let (events, mut keys) = aphid_code::tui::runtime::channel();
+    spawn_input_thread(&events);
 
     let mut app = App {
         views: HashMap::new(),
@@ -166,12 +165,12 @@ async fn drive(
                 // The daemon stopped, which is worth saying rather than
                 // vanishing from under the user.
                 Ok(None) => {
-                    app.view().push_notice("── the alate stopped ──");
+                    app.scrollback().push_notice("── the alate stopped ──");
                     app.status.running = false;
                     dirty = true;
                 }
                 Err(error) => {
-                    app.view().push_notice(format!("── lost the connection: {error} ──"));
+                    app.scrollback().push_notice(format!("── lost the connection: {error} ──"));
                     dirty = true;
                 }
             },
@@ -227,7 +226,7 @@ impl App {
                     "── {} ──\nA conversation of your own. /sessions shows the others.",
                     self.instance
                 );
-                self.view().push_notice(greeting);
+                self.scrollback().push_notice(greeting);
             }
             Wire::HistoryStart { id } => {
                 // Whatever was drawn for this session is stale; the replay that
@@ -247,13 +246,13 @@ impl App {
                     ));
                 }
                 text.push_str("\n\n/session <id> looks at one. An id can be shortened.");
-                self.view().push_notice(text);
+                self.scrollback().push_notice(text);
             }
             Wire::SessionOpened { info } => {
                 if !self.show_log || info.id == self.current {
                     return info.id == self.current;
                 }
-                self.view()
+                self.scrollback()
                     .push_notice(format!("── {} started: {} ──", info.kind, info.id));
             }
             // The alate's own, so it is drawn wherever the terminal happens to
@@ -262,12 +261,12 @@ impl App {
                 if !self.show_log {
                     return false;
                 }
-                self.view()
+                self.scrollback()
                     .push_notice(format!("── woke at {at} ──\n{note}"));
             }
             Wire::SessionClosed { id } => {
                 if id == self.current {
-                    self.view().push_notice("── this session ended ──");
+                    self.scrollback().push_notice("── this session ended ──");
                 } else {
                     self.views.remove(&id);
                     return false;
@@ -390,21 +389,21 @@ async fn handle_key(app: &mut App, key: KeyEvent, client: &mut Client) -> std::i
         Action::Cancel => {
             if app.status.running {
                 client.send(&Request::Cancel).await?;
-                app.view().push_notice("── cancelled ──");
+                app.scrollback().push_notice("── cancelled ──");
             } else {
                 app.input.clear();
             }
         }
-        Action::ScrollUp => app.view().scroll_up(PAGE_LINES),
-        Action::ScrollDown => app.view().scroll_down(PAGE_LINES),
+        Action::ScrollUp => app.scrollback().scroll_up(PAGE_LINES),
+        Action::ScrollDown => app.scrollback().scroll_down(PAGE_LINES),
         Action::ToggleThinking => {
-            let view = app.view();
+            let view = app.scrollback();
             view.show_thinking = !view.show_thinking;
         }
         // There is no model picker here: the model belongs to the alate, and
         // terminals on different sessions must not be able to disagree about it.
         Action::CycleModel => app
-            .view()
+            .scrollback()
             .push_notice("the model is the alate's; set it in alate.json"),
         Action::Submit(line) => {
             if let Some(rest) = line.strip_prefix('/') {
@@ -437,14 +436,15 @@ async fn command(app: &mut App, line: &str, client: &mut Client) -> std::io::Res
     let (name, rest) = line.split_once(' ').unwrap_or((line, ""));
     match name {
         "quit" | "exit" | "detach" => app.quit = true,
-        "clear" => app.view().clear(),
-        "help" => app.view().push_notice(HELP),
+        "clear" => app.scrollback().clear(),
+        "help" => app.scrollback().push_notice(HELP),
         "sessions" => client.send(&Request::Sessions).await?,
         "new" => client.send(&Request::New).await?,
         "session" => {
             let id = rest.trim();
             if id.is_empty() {
-                app.view().push_notice("which one? /sessions lists them");
+                app.scrollback()
+                    .push_notice("which one? /sessions lists them");
             } else {
                 // The daemon resolves a shortened id, because it is the one
                 // that knows every session there has ever been.
@@ -455,12 +455,12 @@ async fn command(app: &mut App, line: &str, client: &mut Client) -> std::io::Res
         "log" => {
             app.show_log = !app.show_log;
             let state = if app.show_log { "shown" } else { "hidden" };
-            app.view()
+            app.scrollback()
                 .push_notice(format!("notices, heartbeats and jobs are {state}"));
         }
         _ => {
             let text = format!("no command /{name}; try /help");
-            app.view().push_notice(text);
+            app.scrollback().push_notice(text);
         }
     }
     Ok(())

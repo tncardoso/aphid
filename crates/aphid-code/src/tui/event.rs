@@ -13,9 +13,9 @@ use aphid_agent::{
 };
 use aphid_core::{BlockKind, ContentRef, Event, Json, StopReason, Usage};
 use ratatui::crossterm::event::{self, KeyEvent, MouseEvent};
-use tokio::sync::mpsc::UnboundedSender;
 
 use crate::plugins::permissions::{Confirmer, Decision, Risk};
+use crate::tui::runtime::{self, Hub};
 
 /// Everything the app loop reacts to.
 pub enum UiEvent {
@@ -85,12 +85,12 @@ pub enum UiEvent {
 /// has to arrive as an event like everything else. `log` still goes to standard
 /// error, where the UI is not drawing and a developer can capture it.
 pub struct UiSink {
-    events: UnboundedSender<UiEvent>,
+    events: Hub<UiEvent>,
 }
 
 impl UiSink {
     #[must_use]
-    pub fn new(events: UnboundedSender<UiEvent>) -> Self {
+    pub fn new(events: Hub<UiEvent>) -> Self {
         Self { events }
     }
 }
@@ -103,25 +103,25 @@ impl aphid_plugin::Sink for UiSink {
     }
 
     fn prompt(&self, _plugin: &str, text: &str) {
-        let _ = self.events.send(UiEvent::Prompt(text.to_owned()));
+        self.events.send(UiEvent::Prompt(text.to_owned()));
     }
 }
 
 /// Forwards the run to the app loop.
 pub struct UiPlugin {
-    events: UnboundedSender<UiEvent>,
+    events: Hub<UiEvent>,
 }
 
 impl UiPlugin {
     #[must_use]
-    pub fn new(events: UnboundedSender<UiEvent>) -> Self {
+    pub fn new(events: Hub<UiEvent>) -> Self {
         Self { events }
     }
 
     fn send(&self, event: UiEvent) {
         // A closed channel means the app is gone; there is nothing to do about
         // it here, and the run is being cancelled anyway.
-        let _ = self.events.send(event);
+        self.events.send(event);
     }
 }
 
@@ -241,12 +241,12 @@ fn tool_name(cx: &StreamCx<'_>, index: u32) -> String {
 /// This is why the agent runs on its own task rather than inside the app's
 /// `select!`: blocking here must not stop the loop that draws the prompt.
 pub struct UiConfirmer {
-    events: UnboundedSender<UiEvent>,
+    events: Hub<UiEvent>,
 }
 
 impl UiConfirmer {
     #[must_use]
-    pub fn new(events: UnboundedSender<UiEvent>) -> Self {
+    pub fn new(events: Hub<UiEvent>) -> Self {
         Self { events }
     }
 }
@@ -254,16 +254,14 @@ impl UiConfirmer {
 impl Confirmer for UiConfirmer {
     fn confirm(&self, tool: &str, summary: &str, risk: Risk) -> Decision {
         let (reply, answer) = std::sync::mpsc::channel();
-        if self
-            .events
-            .send(UiEvent::Confirm {
-                tool: tool.to_owned(),
-                summary: summary.to_owned(),
-                risk,
-                reply,
-            })
-            .is_err()
-        {
+        let asked = self.events.send(UiEvent::Confirm {
+            tool: tool.to_owned(),
+            summary: summary.to_owned(),
+            risk,
+            reply,
+        });
+        if !asked {
+            // Nobody is left to ask, so nobody can allow it.
             return Decision::Deny;
         }
         // A dropped sender means the app quit without answering.
@@ -275,42 +273,12 @@ impl Confirmer for UiConfirmer {
 ///
 /// `crossterm::event::read` blocks, and a blocked runtime thread is a stalled
 /// UI. The thread ends when the channel closes.
-pub fn spawn_input_thread(events: UnboundedSender<UiEvent>) {
-    std::thread::spawn(move || {
-        loop {
-            match event::read() {
-                Ok(event::Event::Key(key)) => {
-                    if events.send(UiEvent::Key(key)).is_err() {
-                        return;
-                    }
-                }
-                Ok(event::Event::Paste(text)) => {
-                    if events.send(UiEvent::Paste(text)).is_err() {
-                        return;
-                    }
-                }
-                Ok(event::Event::Mouse(mouse))
-                    if matches!(
-                        mouse.kind,
-                        event::MouseEventKind::Down(_)
-                            | event::MouseEventKind::Up(_)
-                            | event::MouseEventKind::Drag(_)
-                            | event::MouseEventKind::ScrollUp
-                            | event::MouseEventKind::ScrollDown
-                    ) =>
-                {
-                    if events.send(UiEvent::Mouse(mouse)).is_err() {
-                        return;
-                    }
-                }
-                Ok(event::Event::Resize(_, _)) => {
-                    if events.send(UiEvent::Resize).is_err() {
-                        return;
-                    }
-                }
-                Ok(_) => {}
-                Err(_) => return,
-            }
-        }
+pub fn spawn_input_thread(hub: &Hub<UiEvent>) {
+    runtime::spawn_input_thread(hub.clone(), |event| match event {
+        event::Event::Key(key) => Some(UiEvent::Key(key)),
+        event::Event::Paste(text) => Some(UiEvent::Paste(text)),
+        event::Event::Mouse(mouse) => Some(UiEvent::Mouse(mouse)),
+        event::Event::Resize(_, _) => Some(UiEvent::Resize),
+        _ => None,
     });
 }

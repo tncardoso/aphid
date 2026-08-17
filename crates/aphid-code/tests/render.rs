@@ -5,8 +5,8 @@
 use aphid_agent::exec;
 use aphid_code::plugins::permissions::Risk;
 use aphid_code::tui::modal::{Confirm, Modal};
+use aphid_code::tui::scrollback::Scrollback;
 use aphid_code::tui::status::Status;
-use aphid_code::tui::view::View;
 use aphid_core::{Cost, Usage, providers::deepseek};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -79,7 +79,7 @@ fn a_filling_context_window_is_called_out() {
 
 #[test]
 fn a_tool_call_renders_as_a_header_and_collapsed_output() {
-    let mut view = View::default();
+    let mut view = Scrollback::default();
     view.push_tool_call("c1", "bash", r#"{"command":"cargo test"}"#);
     let output: String = (0..40).map(|n| format!("line {n}\n")).collect();
     view.finish_tool("c1", &output, false, None);
@@ -100,7 +100,7 @@ fn a_tool_call_renders_as_a_header_and_collapsed_output() {
 
 #[test]
 fn a_streaming_call_counts_up_then_becomes_the_call() {
-    let mut view = View::default();
+    let mut view = Scrollback::default();
     view.begin_tool_stream(0, "bash");
     view.push_tool_stream(0, 412);
 
@@ -125,7 +125,7 @@ fn a_streaming_call_counts_up_then_becomes_the_call() {
 
 #[test]
 fn an_edit_renders_as_a_diff() {
-    let mut view = View::default();
+    let mut view = Scrollback::default();
     view.push_tool_call("c1", "edit", r#"{"path":"src/buffer.rs"}"#);
     view.finish_tool(
         "c1",
@@ -149,7 +149,7 @@ fn an_edit_renders_as_a_diff() {
 
 #[test]
 fn a_failed_tool_is_marked_and_keeps_its_message() {
-    let mut view = View::default();
+    let mut view = Scrollback::default();
     view.push_tool_call("c1", "edit", r#"{"path":"a.rs"}"#);
     view.finish_tool("c1", "edit 1: old_text does not appear in a.rs", true, None);
 
@@ -163,7 +163,7 @@ fn a_failed_tool_is_marked_and_keeps_its_message() {
 
 #[test]
 fn a_running_tool_shows_its_latest_output() {
-    let mut view = View::default();
+    let mut view = Scrollback::default();
     view.push_tool_call("c1", "bash", r#"{"command":"cargo build"}"#);
     for n in 0..40 {
         view.push_tool_progress("c1", &format!("Compiling crate-{n}"));
@@ -185,7 +185,7 @@ fn a_running_tool_shows_its_latest_output() {
 
 #[test]
 fn the_conversation_reads_in_order() {
-    let mut view = View::default();
+    let mut view = Scrollback::default();
     view.push_user("fix the failing test");
     view.push_tool_call("c1", "bash", r#"{"command":"cargo test"}"#);
     view.finish_tool("c1", "test result: FAILED. 1 failed", true, None);
@@ -205,7 +205,7 @@ fn the_conversation_reads_in_order() {
 
 #[test]
 fn long_text_wraps_to_the_pane_width() {
-    let mut view = View::default();
+    let mut view = Scrollback::default();
     view.push_text("the quick brown fox jumps over the lazy dog and keeps going");
 
     let rendered = draw(20, 8, |frame| {
@@ -348,8 +348,8 @@ fn an_empty_process_list_says_so() {
 // ---------------------------------------------------------------------------
 
 /// A transcript with one of each thing the pane draws.
-fn transcript() -> View {
-    let mut view = View::default();
+fn transcript() -> Scrollback {
+    let mut view = Scrollback::default();
     view.push_user("explain the wrapping rule");
     view.push_text("Lines are wrapped at the pane width, and broken at a space when there is one.");
     view.push_tool_call("c1", "bash", r#"{"command":"ls"}"#);
@@ -359,7 +359,7 @@ fn transcript() -> View {
 }
 
 /// What the pane paints into a `width` by `height` viewport.
-fn painted(view: &mut View, width: u16, height: u16) -> Vec<String> {
+fn painted(view: &mut Scrollback, width: u16, height: u16) -> Vec<String> {
     let lines = view.visible_lines(width as usize, height as usize);
     draw(width, height, |frame| {
         frame.render_widget(Paragraph::new(lines), frame.area());
@@ -414,7 +414,7 @@ fn a_wide_pane_wraps_less_and_says_the_same_thing() {
 
 #[test]
 fn a_streamed_answer_leaves_what_is_above_it_alone() {
-    let mut view = View::default();
+    let mut view = Scrollback::default();
     view.push_user("explain the wrapping rule");
     view.push_text("Lines are wrapped at the pane width");
     let before = painted(&mut view, 40, 20);
@@ -430,7 +430,7 @@ fn a_streamed_answer_leaves_what_is_above_it_alone() {
 fn eviction_paints_what_the_survivors_alone_would_paint() {
     const PUSHED: usize = 400;
 
-    let mut capped = View::default();
+    let mut capped = Scrollback::default();
     for number in 0..PUSHED {
         capped.push_notice(format!("notice {number}"));
     }
@@ -440,7 +440,7 @@ fn eviction_paints_what_the_survivors_alone_would_paint() {
         "the cap has to have bitten for this to mean anything"
     );
 
-    let mut survivors = View::default();
+    let mut survivors = Scrollback::default();
     for number in PUSHED - kept..PUSHED {
         survivors.push_notice(format!("notice {number}"));
     }
@@ -454,7 +454,7 @@ fn eviction_paints_what_the_survivors_alone_would_paint() {
 
 #[test]
 fn scrolling_up_holds_the_viewport_while_content_arrives_below() {
-    let mut view = View::default();
+    let mut view = Scrollback::default();
     for number in 0..40 {
         view.push_notice(format!("notice {number}"));
     }

@@ -13,8 +13,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::plugins::permissions::{Decision, Risk};
+use crate::tui::scrollback::{bytes, one_line};
 use crate::tui::status::tokens;
-use crate::tui::view::{bytes, one_line};
 
 /// What is covering the transcript, if anything.
 pub enum Modal {
@@ -288,7 +288,7 @@ fn render_confirm(frame: &mut Frame<'_>, area: Rect, confirm: &Confirm) {
     };
 
     let width = area.width.saturating_sub(8).min(80);
-    let body = crate::tui::view::wrap(&confirm.summary, width.saturating_sub(4) as usize);
+    let body = crate::tui::scrollback::wrap(&confirm.summary, width.saturating_sub(4) as usize);
     // title, blank, body, blank, key hints, plus the two border rows.
     let height = body.len() as u16 + 6;
     let cell = centred(area, width, height);

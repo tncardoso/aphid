@@ -35,7 +35,7 @@ use ratatui::crossterm::terminal::{
 };
 use ratatui::crossterm::{ExecutableCommand, cursor};
 use ratatui::prelude::CrosstermBackend;
-use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::client::Client;
 use app::{App, Send};
@@ -86,8 +86,8 @@ pub async fn run(options: Options) -> std::io::Result<()> {
         post(&client, message).await;
     }
 
-    let (events, mut keys) = unbounded_channel();
-    spawn_input_thread(events);
+    let (events, mut keys) = aphid_code::tui::runtime::channel();
+    spawn_input_thread(&events);
 
     let mut input = Input::default();
     input.set_prompt(false);

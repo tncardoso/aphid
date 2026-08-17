@@ -89,7 +89,7 @@ pub struct Viewport {
 
 /// The transcript pane's state.
 #[derive(Default)]
-pub struct View {
+pub struct Scrollback {
     entries: Vec<Entry>,
     /// Told about every notice, so a plugin can watch what the user is shown.
     /// One field here beats a call at each of the fifteen places that push one.
@@ -132,7 +132,7 @@ pub struct View {
     rebuilt: usize,
 }
 
-impl View {
+impl Scrollback {
     /// Report notices to these plugins.
     pub fn watch(&mut self, host: std::sync::Arc<aphid_plugin::PluginHost>) {
         if host.any_defines("on_notify") {
@@ -1014,7 +1014,7 @@ mod tests {
 
     #[test]
     fn a_multiline_message_keeps_its_shape() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.push_user("one\ntwo".to_owned());
         let rendered: Vec<String> = view.lines(40).iter().map(ToString::to_string).collect();
 
@@ -1074,7 +1074,7 @@ mod tests {
 
     #[test]
     fn thinking_is_hidden_until_it_is_asked_for() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.push_thinking("weighing it up");
         assert!(view.lines(40).is_empty());
 
@@ -1085,7 +1085,7 @@ mod tests {
 
     #[test]
     fn a_shell_command_renders_a_header_and_its_output() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.push_shell("ls".to_owned(), "a.rs\nb.rs".to_owned());
 
         let rendered: Vec<String> = view.lines(40).iter().map(ToString::to_string).collect();
@@ -1096,7 +1096,7 @@ mod tests {
 
     #[test]
     fn a_shell_command_wraps_long_output() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.push_shell("ls".to_owned(), "some very long output line".to_owned());
 
         let rendered: Vec<String> = view.lines(12).iter().map(ToString::to_string).collect();
@@ -1112,7 +1112,7 @@ mod tests {
 
     #[test]
     fn streamed_text_accumulates_into_one_entry() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.push_text("Hello");
         view.push_text(", world");
         assert_eq!(view.entries().len(), 1);
@@ -1132,7 +1132,7 @@ mod tests {
 
     #[test]
     fn a_streaming_call_shows_its_name_and_a_growing_count() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.begin_tool_stream(0, "bash");
         view.push_tool_stream(0, 300);
 
@@ -1147,7 +1147,7 @@ mod tests {
 
     #[test]
     fn an_announced_call_claims_its_placeholder() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.begin_tool_stream(0, "bash");
         view.push_tool_stream(0, 24);
         view.push_tool_call("c1", "bash", r#"{"command":"cargo test"}"#);
@@ -1167,7 +1167,7 @@ mod tests {
 
     #[test]
     fn two_streamed_calls_are_claimed_in_source_order() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.begin_tool_stream(0, "read");
         view.begin_tool_stream(1, "bash");
         view.push_tool_call("c1", "read", r#"{"path":"a.rs"}"#);
@@ -1187,7 +1187,7 @@ mod tests {
 
     #[test]
     fn a_placeholder_whose_call_never_arrives_is_settled() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.begin_tool_stream(0, "edit");
         view.push_tool_stream(0, 90);
         view.settle_tool_streams();
@@ -1199,7 +1199,7 @@ mod tests {
 
     #[test]
     fn settling_leaves_a_call_that_did_arrive_alone() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.begin_tool_stream(0, "bash");
         view.push_tool_call("c1", "bash", r#"{"command":"ls"}"#);
         view.settle_tool_streams();
@@ -1210,7 +1210,7 @@ mod tests {
 
     #[test]
     fn a_tool_result_replaces_its_streamed_preview() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.push_tool_call("c1", "bash", r#"{"command":"ls"}"#);
         view.push_tool_progress("c1", "partial");
         view.finish_tool("c1", "final output", false, None);
@@ -1223,7 +1223,7 @@ mod tests {
 
     #[test]
     fn old_entries_are_evicted_at_the_cap() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         for number in 0..MAX_ENTRIES + 50 {
             view.push_notice(format!("notice {number}"));
         }
@@ -1237,7 +1237,7 @@ mod tests {
 
     #[test]
     fn the_current_turn_is_never_evicted() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         for number in 0..10 {
             view.push_notice(format!("notice {number}"));
         }
@@ -1255,7 +1255,7 @@ mod tests {
 
     #[test]
     fn only_changed_blocks_move_their_revision() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.push_user("hello");
         view.push_text("an answer");
         let _ = view.lines(40);
@@ -1279,7 +1279,7 @@ mod tests {
 
     #[test]
     fn only_the_changed_block_is_rebuilt() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         for number in 0..MAX_ENTRIES {
             view.push_notice(format!("notice {number}"));
         }
@@ -1305,7 +1305,7 @@ mod tests {
 
     #[test]
     fn a_new_width_rebuilds_every_block() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         for number in 0..10 {
             view.push_notice(format!("notice {number}"));
         }
@@ -1320,7 +1320,7 @@ mod tests {
 
     #[test]
     fn new_lines_below_the_viewport_do_not_move_it() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         for number in 0..10 {
             view.push_notice(format!("line {number}"));
         }
@@ -1339,7 +1339,7 @@ mod tests {
 
     #[test]
     fn a_block_above_the_viewport_growing_carries_it_along() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.push_tool_call("c1", "bash", r#"{"command":"ls"}"#);
         for number in 0..10 {
             view.push_notice(format!("line {number}"));
@@ -1364,7 +1364,7 @@ mod tests {
 
     #[test]
     fn scrolling_back_to_the_bottom_parks_there() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         for number in 0..40 {
             view.push_notice(format!("line {number}"));
         }
@@ -1380,7 +1380,7 @@ mod tests {
 
     #[test]
     fn two_page_keys_without_a_draw_between_move_two_pages() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         for number in 0..40 {
             view.push_notice(format!("line {number}"));
         }
@@ -1394,7 +1394,7 @@ mod tests {
 
     #[test]
     fn an_evicted_anchor_falls_back_to_the_bottom() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         for number in 0..MAX_ENTRIES {
             view.push_notice(format!("line {number}"));
         }
@@ -1416,7 +1416,7 @@ mod tests {
 
     #[test]
     fn assistant_code_blocks_wrap_long_lines() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.push_text("```\n012345678901234567890123456789\n```");
 
         let rendered: Vec<String> = view.lines(12).iter().map(ToString::to_string).collect();

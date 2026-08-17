@@ -1,7 +1,6 @@
 //! The app: state, the command set, and the loop that drives both.
 
 use std::collections::VecDeque;
-use std::io::Stdout;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -13,22 +12,14 @@ use aphid_plugin::{
     SurfaceEvent,
 };
 use compact_str::CompactString;
+use ratatui::Frame;
 use ratatui::crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, KeyCode,
-    KeyEvent, KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use ratatui::crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-    supports_keyboard_enhancement,
-};
-use ratatui::crossterm::{ExecutableCommand, cursor};
 use ratatui::layout::{Constraint, Layout, Margin};
-use ratatui::prelude::CrosstermBackend;
 use ratatui::style::{Color, Style};
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
-use ratatui::{Frame, Terminal};
-use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::harness::{self, Harness, HarnessOptions};
 use crate::model::{Catalog, ResolveError, clamp_thinking};
@@ -40,9 +31,10 @@ use crate::tools::Workspace;
 use crate::tui::event::{UiConfirmer, UiEvent, UiPlugin, UiSink, spawn_input_thread};
 use crate::tui::input::{Action, Input};
 use crate::tui::modal::{Confirm, Modal};
+use crate::tui::runtime::{self, Tty, restore, setup};
+use crate::tui::scrollback::{Scrollback, one_line};
 use crate::tui::status::Status;
 use crate::tui::surface::SurfaceLayer;
-use crate::tui::view::{View, one_line};
 
 /// How often the screen is repainted while something is happening.
 const FRAME: Duration = Duration::from_millis(33);
@@ -65,14 +57,12 @@ const MOUSE_SCROLL_LINES: usize = 3;
 /// How many transcript lines PageUp and PageDown move.
 const PAGE_LINES: usize = 10;
 
-type Screen = Terminal<CrosstermBackend<Stdout>>;
-
 /// A run in flight, plus the agent it borrowed.
 type Running = tokio::task::JoinHandle<(Agent, RunOutcome)>;
 
 /// Everything the UI holds.
 pub struct App {
-    pub view: View,
+    pub scrollback: Scrollback,
     pub input: Input,
     pub status: Status,
     pub modal: Option<Modal>,
@@ -111,7 +101,7 @@ impl App {
         status.thinking = thinking.map(|level| level.as_str().to_owned());
 
         Self {
-            view: View::default(),
+            scrollback: Scrollback::default(),
             input: Input::default(),
             status,
             modal: None,
@@ -134,7 +124,7 @@ impl App {
     #[cfg(test)]
     fn new_for_test(agent: &Agent) -> Self {
         Self {
-            view: View::default(),
+            scrollback: Scrollback::default(),
             input: Input::default(),
             status: Status::from_model(agent.model()),
             modal: None,
@@ -154,7 +144,7 @@ impl App {
         }
     }
 
-    /// Replay a resumed transcript into the view, so the pane shows the
+    /// Replay a resumed transcript into the scrollback, so the pane shows the
     /// conversation you are continuing rather than starting blank.
     fn replay(&mut self, transcript: &Transcript) {
         use aphid_core::{ContentRef, Role};
@@ -165,18 +155,18 @@ impl App {
                 Role::User => {
                     let text: String = message.content().filter_map(|c| c.text()).collect();
                     if !text.is_empty() {
-                        self.view.push_user(text);
+                        self.scrollback.push_user(text);
                     }
                 }
                 Role::Assistant => {
                     for content in message.content() {
                         match content {
-                            ContentRef::Text(text) => self.view.push_text(text.text()),
+                            ContentRef::Text(text) => self.scrollback.push_text(text.text()),
                             ContentRef::Thinking(thinking) => {
-                                self.view.push_thinking(thinking.text());
+                                self.scrollback.push_thinking(thinking.text());
                             }
                             ContentRef::ToolCall(call) => {
-                                self.view.push_tool_call(
+                                self.scrollback.push_tool_call(
                                     call.id(),
                                     call.name(),
                                     call.arguments_raw(),
@@ -191,7 +181,7 @@ impl App {
                         continue;
                     };
                     let text: String = message.content().filter_map(|c| c.text()).collect();
-                    self.view.finish_tool(
+                    self.scrollback.finish_tool(
                         &meta.tool_call_id,
                         &text,
                         meta.is_error,
@@ -208,55 +198,55 @@ impl App {
             UiEvent::TurnStarted => {
                 self.status.running = true;
                 // Block indices restart with each turn's message buffer.
-                self.view.clear_tool_streams();
+                self.scrollback.clear_tool_streams();
             }
             UiEvent::Text(text) => {
                 self.status.download.note(Instant::now(), text.len() as u64);
-                self.view.push_text(&text);
+                self.scrollback.push_text(&text);
             }
             UiEvent::Thinking(text) => {
                 self.status.download.note(Instant::now(), text.len() as u64);
-                self.view.push_thinking(&text);
+                self.scrollback.push_thinking(&text);
             }
             UiEvent::ToolStreamStart { block, name } => {
-                self.view.begin_tool_stream(block, &name);
+                self.scrollback.begin_tool_stream(block, &name);
             }
             UiEvent::ToolStreamDelta { block, bytes } => {
                 self.status.download.note(Instant::now(), bytes as u64);
-                self.view.push_tool_stream(block, bytes);
+                self.scrollback.push_tool_stream(block, bytes);
             }
             UiEvent::ToolCall {
                 id,
                 name,
                 arguments,
-            } => self.view.push_tool_call(&id, &name, &arguments),
-            UiEvent::ToolProgress { id, chunk } => self.view.push_tool_progress(&id, &chunk),
+            } => self.scrollback.push_tool_call(&id, &name, &arguments),
+            UiEvent::ToolProgress { id, chunk } => self.scrollback.push_tool_progress(&id, &chunk),
             UiEvent::ToolResult {
                 id,
                 text,
                 is_error,
                 details,
                 ..
-            } => self.view.finish_tool(&id, &text, is_error, details),
+            } => self.scrollback.finish_tool(&id, &text, is_error, details),
             UiEvent::TurnEnded { usage, error, .. } => {
                 // The stream is over; a stale reading must not sit on an idle
                 // line while `working…` is gone.
                 self.status.download.clear();
                 // Runs after every call and result for the turn, so anything
                 // still streaming is a call that never arrived.
-                self.view.settle_tool_streams();
+                self.scrollback.settle_tool_streams();
                 self.status.last = Some(usage);
                 self.status.total += usage;
                 if let Some(error) = error {
-                    self.view.push_notice(format!("error: {error}"));
+                    self.scrollback.push_notice(format!("error: {error}"));
                 }
             }
-            UiEvent::Notice(text) => self.view.push_notice(text),
+            UiEvent::Notice(text) => self.scrollback.push_notice(text),
             // A plugin's prompt takes the path a typed line takes, minus the
             // command set: the agent is not in hand here, and a plugin has no
             // business running `/quit`.
             UiEvent::Prompt(text) => {
-                self.view.push_user(text.clone());
+                self.scrollback.push_user(text.clone());
                 self.enqueue(text);
             }
             UiEvent::RunEnded(_) => {
@@ -310,9 +300,9 @@ impl App {
                     };
                     self.surface_mouse(button, mouse.column, mouse.row, None);
                 } else if mouse.kind == MouseEventKind::ScrollUp {
-                    self.view.scroll_up(MOUSE_SCROLL_LINES);
+                    self.scrollback.scroll_up(MOUSE_SCROLL_LINES);
                 } else {
-                    self.view.scroll_down(MOUSE_SCROLL_LINES);
+                    self.scrollback.scroll_down(MOUSE_SCROLL_LINES);
                 }
             }
             MouseEventKind::Down(_) => {
@@ -404,7 +394,7 @@ impl App {
                 SurfaceAction::Consume => {}
                 SurfaceAction::ReleaseFocus => self.surfaces.release_focus(),
                 SurfaceAction::Notice(text) => {
-                    self.view.push_notice(format!("{plugin}: {text}"));
+                    self.scrollback.push_notice(format!("{plugin}: {text}"));
                 }
             }
         }
@@ -466,10 +456,10 @@ impl App {
         self.status.model = model.id.to_string();
         self.status.context_window = model.context_window;
 
-        self.view
+        self.scrollback
             .push_notice(format!("── switched to {} ──", model.id));
         if let Some(note) = note {
-            self.view.push_notice(note);
+            self.scrollback.push_notice(note);
         }
 
         // The key belongs to the provider, not to the session: switching to a
@@ -479,7 +469,7 @@ impl App {
             Ok(key) => agent.set_api_key(Some(key)),
             Err(note) => {
                 agent.set_api_key(None);
-                self.view.push_notice(note);
+                self.scrollback.push_notice(note);
             }
         }
 
@@ -500,7 +490,7 @@ impl App {
         match name {
             "quit" | "q" | "exit" => self.quit = true,
             "clear" | "new" => {
-                self.view.clear();
+                self.scrollback.clear();
                 // Keep the system prompt; drop the conversation.
                 let transcript = agent.transcript_mut();
                 let keep = usize::from(
@@ -510,7 +500,7 @@ impl App {
                 );
                 transcript.truncate(keep);
                 self.status.last = None;
-                self.view.push_notice("── new session ──");
+                self.scrollback.push_notice("── new session ──");
             }
             "model" => {
                 if rest.is_empty() {
@@ -520,7 +510,7 @@ impl App {
                 } else {
                     match self.catalog.resolve(rest) {
                         Ok(model) => self.switch_model(agent, model),
-                        Err(error) => self.view.push_notice(match error {
+                        Err(error) => self.scrollback.push_notice(match error {
                             ResolveError::Unknown { candidates } => {
                                 format!("no model `{rest}`. Available: {}", candidates.join(", "))
                             }
@@ -537,18 +527,18 @@ impl App {
                     self.thinking = level;
                     self.status.thinking = level.map(|level| level.as_str().to_owned());
                     agent.set_thinking(level);
-                    self.view.push_notice(note.unwrap_or_else(|| {
+                    self.scrollback.push_notice(note.unwrap_or_else(|| {
                         format!(
                             "thinking {}",
                             level.map_or("off", aphid_core::ThinkingLevel::as_str)
                         )
                     }));
                 }
-                Err(message) => self.view.push_notice(message),
+                Err(message) => self.scrollback.push_notice(message),
             },
             "tools" => {
                 let names: Vec<&str> = agent.tools().names().collect();
-                self.view
+                self.scrollback
                     .push_notice(format!("tools: {}", names.join(", ")));
             }
             "session" => {
@@ -560,11 +550,11 @@ impl App {
                         || "not being saved".to_owned(),
                         |(id, path)| format!("{id} — {}", path.display()),
                     );
-                self.view.push_notice(format!("session: {described}"));
+                self.scrollback.push_notice(format!("session: {described}"));
             }
-            "help" => self.view.push_notice(HELP),
-            "plugins" => self.view.push_notice(self.plugin_summary()),
-            "skills" => self.view.push_notice(self.skills_summary()),
+            "help" => self.scrollback.push_notice(HELP),
+            "plugins" => self.scrollback.push_notice(self.plugin_summary()),
+            "skills" => self.scrollback.push_notice(self.skills_summary()),
             // Built-ins win, so a plugin can never take `/quit` away.
             other => self.plugin_command(other, rest),
         }
@@ -596,19 +586,19 @@ impl App {
     /// which arrives as its own event, so there is nothing to hand back here.
     fn plugin_command(&mut self, name: &str, args: &str) {
         let Some(host) = self.host.clone() else {
-            self.view
+            self.scrollback
                 .push_notice(format!("unknown command `/{name}` — try /help"));
             return;
         };
         let Some(actions) = host.run_command(name, args) else {
-            self.view
+            self.scrollback
                 .push_notice(format!("unknown command `/{name}` — try /help"));
             return;
         };
 
         for action in actions {
             match action {
-                PluginAction::Notice(text) => self.view.push_notice(text),
+                PluginAction::Notice(text) => self.scrollback.push_notice(text),
             }
         }
     }
@@ -698,7 +688,7 @@ impl App {
 
     /// A finished `!` command: put its output in the content area.
     fn apply_bang_output(&mut self, command: String, output: String) {
-        self.view.push_shell(command, output);
+        self.scrollback.push_shell(command, output);
     }
 }
 
@@ -818,7 +808,7 @@ pub async fn run(
         ));
     }
 
-    let (events, receiver) = unbounded_channel();
+    let (events, receiver) = runtime::channel();
 
     options
         .plugins
@@ -874,26 +864,26 @@ pub async fn run(
     let mut harness = harness::build(options);
     let mut app = App::new(&harness, thinking, &processes);
     app.session = Some(session);
-    app.view.watch(host.clone());
+    app.scrollback.watch(host.clone());
     app.host = Some(host.clone());
     app.surfaces.refresh(&host);
 
     if resumed.is_none() {
-        app.view.push_logo();
+        app.scrollback.push_logo();
     }
 
     for note in &harness.notes {
-        app.view.push_notice(note.clone());
+        app.scrollback.push_notice(note.clone());
     }
     for diagnostic in &harness.diagnostics {
-        app.view.push_notice(format!(
+        app.scrollback.push_notice(format!(
             "skipped skill {}: {}",
             diagnostic.path.display(),
             diagnostic.message
         ));
     }
     for problem in &plugin_problems {
-        app.view.push_notice(problem.to_string());
+        app.scrollback.push_notice(problem.to_string());
     }
     if let Some(transcript) = resumed {
         app.replay(&transcript);
@@ -910,17 +900,17 @@ pub async fn run(
             .filter_map(|index| restored.id_at(index))
             .collect();
         restored.compact_into(&keep, target);
-        app.view
+        app.scrollback
             .push_notice(format!("── resumed {} messages ──", keep.len()));
     }
-    app.view.push_notice(format!(
+    app.scrollback.push_notice(format!(
         "aphid · {} · {} — /help for commands",
         harness.agent.model().id,
         workspace.root().display()
     ));
 
     let (mut terminal, kitty) = setup()?;
-    spawn_input_thread(events.clone());
+    spawn_input_thread(&events);
     let result = drive(&mut terminal, &mut app, harness.agent, receiver).await;
     restore(&mut terminal, kitty)?;
 
@@ -938,7 +928,7 @@ pub async fn run(
 }
 
 async fn drive(
-    terminal: &mut Screen,
+    terminal: &mut Tty,
     app: &mut App,
     agent: Agent,
     mut receiver: UnboundedReceiver<UiEvent>,
@@ -970,7 +960,7 @@ async fn drive(
                 app.status.running = false;
                 match finished {
                     Ok((agent, _outcome)) => idle = Some(agent),
-                    Err(error) => app.view.push_notice(format!("the run panicked: {error}")),
+                    Err(error) => app.scrollback.push_notice(format!("the run panicked: {error}")),
                 }
                 dirty = true;
             }
@@ -1106,14 +1096,14 @@ fn handle_key(app: &mut App, key: KeyEvent, agent: Option<&mut Agent>) {
         Action::Cancel => {
             if app.status.running {
                 app.handle.cancel();
-                app.view.push_notice("── cancelled ──");
+                app.scrollback.push_notice("── cancelled ──");
             } else {
                 app.input.clear();
             }
         }
-        Action::ScrollUp => app.view.scroll_up(PAGE_LINES),
-        Action::ScrollDown => app.view.scroll_down(PAGE_LINES),
-        Action::ToggleThinking => app.view.show_thinking = !app.view.show_thinking,
+        Action::ScrollUp => app.scrollback.scroll_up(PAGE_LINES),
+        Action::ScrollDown => app.scrollback.scroll_down(PAGE_LINES),
+        Action::ToggleThinking => app.scrollback.show_thinking = !app.scrollback.show_thinking,
         Action::Bang(command) => {
             // No agent involved, so a `!` command works mid-run too, like
             // `/ps`. The registry tracks it, so `/ps` can stop it.
@@ -1148,7 +1138,7 @@ fn handle_key(app: &mut App, key: KeyEvent, agent: Option<&mut Agent>) {
                 return;
             };
 
-            app.view.push_user(prompt.clone());
+            app.scrollback.push_user(prompt.clone());
             app.enqueue(prompt);
         }
     }
@@ -1222,7 +1212,7 @@ fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     let main = app.surfaces.render(frame, transcript);
     let visible = app
-        .view
+        .scrollback
         .visible_lines(main.width as usize, main.height as usize);
     frame.render_widget(Paragraph::new(visible), main);
 
@@ -1256,59 +1246,6 @@ fn render(frame: &mut Frame<'_>, app: &mut App) {
     if let Some(modal) = &app.modal {
         modal.render(frame, frame.area());
     }
-}
-
-/// Sets up the terminal, and reports whether the keyboard-enhancement
-/// protocol was enabled — needed so `restore` knows whether to pop it, and
-/// so Shift+Enter can be told apart from plain Enter in the input box. On
-/// terminals that don't support it, Shift+Enter is indistinguishable from
-/// plain Enter, so it just submits — a graceful degradation, not a bug.
-fn setup() -> std::io::Result<(Screen, bool)> {
-    // Restore the terminal even when something panics, so a crash does not
-    // leave the shell in raw mode.
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let _ = disable_raw_mode();
-        let _ = std::io::stdout().execute(DisableMouseCapture);
-        let _ = std::io::stdout().execute(LeaveAlternateScreen);
-        previous(info);
-    }));
-
-    enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    stdout.execute(EnterAlternateScreen)?;
-    // Pasted text then arrives whole, instead of as the keys it looks like —
-    // one Enter per line, each of which would submit. The legacy Windows
-    // console has no such mode and says so; a session there is no worse off
-    // than before, so the refusal is not worth failing the start-up over.
-    let _ = stdout.execute(EnableBracketedPaste);
-    // Mouse reporting is also best-effort: a terminal that cannot report the
-    // wheel still works, it just keeps keyboard-only scrolling.
-    let _ = stdout.execute(EnableMouseCapture);
-
-    let kitty = supports_keyboard_enhancement().unwrap_or(false);
-    if kitty {
-        stdout.execute(PushKeyboardEnhancementFlags(
-            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
-        ))?;
-    }
-
-    let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
-    Ok((terminal, kitty))
-}
-
-fn restore(terminal: &mut Screen, kitty: bool) -> std::io::Result<()> {
-    if kitty {
-        terminal
-            .backend_mut()
-            .execute(PopKeyboardEnhancementFlags)?;
-    }
-    let _ = terminal.backend_mut().execute(DisableMouseCapture);
-    let _ = terminal.backend_mut().execute(DisableBracketedPaste);
-    disable_raw_mode()?;
-    terminal.backend_mut().execute(LeaveAlternateScreen)?;
-    terminal.backend_mut().execute(cursor::Show)?;
-    Ok(())
 }
 
 /// The key for a model, from the variable the model itself names.
@@ -1475,11 +1412,11 @@ mod tests {
 
         // Both are in the pane already, as a typed line would be.
         let users: Vec<String> = app
-            .view
+            .scrollback
             .entries()
             .iter()
             .filter_map(|entry| match entry {
-                crate::tui::view::Entry::User(text) => Some(text.clone()),
+                crate::tui::scrollback::Entry::User(text) => Some(text.clone()),
                 _ => None,
             })
             .collect();
@@ -1539,13 +1476,13 @@ mod tests {
     /// call must land in that same card rather than a second one.
     #[tokio::test]
     async fn a_streamed_tool_call_shows_up_before_it_is_announced() {
-        use crate::tui::view::{Entry, ToolState};
+        use crate::tui::scrollback::{Entry, ToolState};
 
         let (backend, _script) = scripted(vec![
             Turn::call("c1", "bash", r#"{"command":"cargo test"}"#),
             Turn::text("all green"),
         ]);
-        let (events, mut receiver) = unbounded_channel();
+        let (events, mut receiver) = crate::tui::runtime::channel::<UiEvent>();
         let mut agent = Agent::builder()
             .model(deepseek::flash())
             .stream_fn(backend)
@@ -1572,7 +1509,7 @@ mod tests {
                 name,
                 streamed,
                 ..
-            }) = app.view.entries().last()
+            }) = app.scrollback.entries().last()
             {
                 assert_eq!(name, "bash");
                 streaming_seen |= *streamed > 0;
@@ -1581,7 +1518,7 @@ mod tests {
 
         assert!(streaming_seen, "the card should have counted bytes");
         let tools: Vec<&Entry> = app
-            .view
+            .scrollback
             .entries()
             .iter()
             .filter(|entry| matches!(entry, Entry::Tool { .. }))
@@ -1604,9 +1541,9 @@ mod tests {
     /// out once: a wheel step means nothing until the pane has a size.
     fn scrollable(app: &mut App) -> usize {
         for number in 0..40 {
-            app.view.push_notice(format!("notice {number}"));
+            app.scrollback.push_notice(format!("notice {number}"));
         }
-        app.view.layout(40, 10).top
+        app.scrollback.layout(40, 10).top
     }
 
     #[test]
@@ -1616,10 +1553,13 @@ mod tests {
         let bottom = scrollable(&mut app);
 
         app.apply(UiEvent::Mouse(mouse(MouseEventKind::ScrollUp)));
-        assert_eq!(app.view.layout(40, 10).top, bottom - MOUSE_SCROLL_LINES);
+        assert_eq!(
+            app.scrollback.layout(40, 10).top,
+            bottom - MOUSE_SCROLL_LINES
+        );
 
         app.apply(UiEvent::Mouse(mouse(MouseEventKind::ScrollDown)));
-        assert_eq!(app.view.layout(40, 10).top, bottom);
+        assert_eq!(app.scrollback.layout(40, 10).top, bottom);
     }
 
     #[test]
@@ -1630,8 +1570,8 @@ mod tests {
 
         app.apply(UiEvent::Mouse(mouse(MouseEventKind::ScrollDown)));
         app.apply(UiEvent::Mouse(mouse(MouseEventKind::ScrollDown)));
-        assert_eq!(app.view.layout(40, 10).top, bottom);
-        assert!(!app.view.scrolled());
+        assert_eq!(app.scrollback.layout(40, 10).top, bottom);
+        assert!(!app.scrollback.scrolled());
     }
 
     #[test]
@@ -1641,7 +1581,7 @@ mod tests {
         scrollable(&mut app);
 
         app.apply(UiEvent::Mouse(mouse(MouseEventKind::Moved)));
-        assert!(!app.view.scrolled());
+        assert!(!app.scrollback.scrolled());
     }
 
     #[test]
@@ -1671,8 +1611,8 @@ mod tests {
     }
 
     fn notice_lines(app: &App) -> Vec<String> {
-        use crate::tui::view::Entry;
-        app.view
+        use crate::tui::scrollback::Entry;
+        app.scrollback
             .entries()
             .iter()
             .filter_map(|entry| match entry {
@@ -1832,8 +1772,8 @@ mod tests {
     }
 
     fn shell_outputs(app: &App) -> Vec<String> {
-        use crate::tui::view::Entry;
-        app.view
+        use crate::tui::scrollback::Entry;
+        app.scrollback
             .entries()
             .iter()
             .filter_map(|entry| match entry {
@@ -1908,11 +1848,10 @@ mod plugin_tests {
     use aphid_agent::{Agent, exec};
     use aphid_core::providers::deepseek;
     use aphid_plugin::{Capabilities, PluginHost, Silent, explicit};
-    use tokio::sync::mpsc::unbounded_channel;
 
     use super::{App, Status};
     use crate::tui::event::{UiEvent, UiSink};
-    use crate::tui::view::Entry;
+    use crate::tui::scrollback::Entry;
 
     /// A workspace with one plugin, removed on drop.
     struct Fixture(std::path::PathBuf);
@@ -1967,7 +1906,7 @@ mod plugin_tests {
     }
 
     fn notices(app: &App) -> Vec<String> {
-        app.view
+        app.scrollback
             .entries()
             .iter()
             .filter_map(|entry| match entry {
@@ -1991,7 +1930,7 @@ mod plugin_tests {
             });
             "#,
         );
-        let (events, mut receiver) = unbounded_channel::<UiEvent>();
+        let (events, mut receiver) = crate::tui::runtime::channel::<UiEvent>();
         let host = fixture.host_with(Arc::new(UiSink::new(events)));
         let (mut app, mut agent) = app_with(host);
 
