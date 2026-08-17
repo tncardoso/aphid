@@ -1,7 +1,6 @@
 //! The things that take over the screen: the model picker, the permission
 //! prompt and the process list.
 
-use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use aphid_agent::exec::{Process, Status};
@@ -12,7 +11,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-use crate::plugins::permissions::{Decision, Risk};
+use crate::plugins::permissions::Risk;
+use crate::tui::runtime::RequestId;
 use crate::tui::scrollback::{bytes, one_line};
 use crate::tui::status::tokens;
 
@@ -33,19 +33,15 @@ pub enum Modal {
 }
 
 /// A gated tool call waiting on an answer.
+///
+/// Names the question by id rather than holding the channel it is answered
+/// on. The channel is the runtime's; this is what the screen shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Confirm {
+    pub id: RequestId,
     pub tool: String,
     pub summary: String,
     pub risk: Risk,
-    pub reply: Sender<Decision>,
-}
-
-impl Confirm {
-    /// Answer, releasing the agent's task.
-    pub fn answer(self, decision: Decision) {
-        // A closed channel means the run was already cancelled.
-        let _ = self.reply.send(decision);
-    }
 }
 
 impl Modal {

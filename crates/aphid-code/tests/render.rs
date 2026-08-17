@@ -243,12 +243,11 @@ fn the_model_picker_lists_what_it_offers() {
 
 #[test]
 fn the_permission_prompt_says_what_it_is_asking_about() {
-    let (reply, _answer) = std::sync::mpsc::channel();
     let modal = Modal::Confirm(Confirm {
+        id: 1,
         tool: "bash".into(),
         summary: "rm -rf build".into(),
         risk: Risk::Destructive,
-        reply,
     });
 
     let rendered = draw(80, 14, |frame| {

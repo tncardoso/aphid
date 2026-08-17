@@ -5,8 +5,6 @@
 //! precisely why the plugin API was built that way. Terminal input arrives on
 //! its own thread, because `crossterm::event::read` blocks.
 
-use std::sync::mpsc::Sender as Reply;
-
 use aphid_agent::{
     Cx, Flow, Guard, Interest, PendingCall, Plugin, ResultCx, RunOutcome, StreamCx, ToolOutcome,
     TurnSummary,
@@ -15,7 +13,7 @@ use aphid_core::{BlockKind, ContentRef, Event, Json, StopReason, Usage};
 use ratatui::crossterm::event::{self, KeyEvent, MouseEvent};
 
 use crate::plugins::permissions::{Confirmer, Decision, Risk};
-use crate::tui::runtime::{self, Hub};
+use crate::tui::runtime::{self, ANSWER_TIMEOUT, Answers, Hub, RequestId};
 
 /// Everything the app loop reacts to.
 pub enum UiEvent {
@@ -57,13 +55,13 @@ pub enum UiEvent {
         error: Option<String>,
     },
     RunEnded(Box<RunOutcome>),
-    /// A gated tool is waiting for an answer. The agent's task blocks on `reply`
-    /// until the app sends one.
+    /// A gated tool is waiting for an answer. The agent's task is blocked on
+    /// the channel this id names, and stays blocked until the app answers it.
     Confirm {
+        id: RequestId,
         tool: String,
         summary: String,
         risk: Risk,
-        reply: Reply<Decision>,
     },
     /// Something a plugin wants the user to see.
     Notice(String),
@@ -242,30 +240,35 @@ fn tool_name(cx: &StreamCx<'_>, index: u32) -> String {
 /// `select!`: blocking here must not stop the loop that draws the prompt.
 pub struct UiConfirmer {
     events: Hub<UiEvent>,
+    answers: Answers<Decision>,
 }
 
 impl UiConfirmer {
     #[must_use]
-    pub fn new(events: Hub<UiEvent>) -> Self {
-        Self { events }
+    pub fn new(events: Hub<UiEvent>, answers: Answers<Decision>) -> Self {
+        Self { events, answers }
     }
 }
 
 impl Confirmer for UiConfirmer {
     fn confirm(&self, tool: &str, summary: &str, risk: Risk) -> Decision {
-        let (reply, answer) = std::sync::mpsc::channel();
+        let (id, answer) = self.answers.open();
         let asked = self.events.send(UiEvent::Confirm {
+            id,
             tool: tool.to_owned(),
             summary: summary.to_owned(),
             risk,
-            reply,
         });
         if !asked {
             // Nobody is left to ask, so nobody can allow it.
+            self.answers.abandon(id);
             return Decision::Deny;
         }
-        // A dropped sender means the app quit without answering.
-        answer.recv().unwrap_or(Decision::Deny)
+        // A dropped sender means the app quit without answering; the timeout
+        // means whoever it asked walked away. Both refuse.
+        answer
+            .recv_timeout(ANSWER_TIMEOUT)
+            .unwrap_or(Decision::Deny)
     }
 }
 

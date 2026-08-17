@@ -31,7 +31,7 @@ use crate::tools::Workspace;
 use crate::tui::event::{UiConfirmer, UiEvent, UiPlugin, UiSink, spawn_input_thread};
 use crate::tui::input::{Action, Input};
 use crate::tui::modal::{Confirm, Modal};
-use crate::tui::runtime::{self, Tty, restore, setup};
+use crate::tui::runtime::{self, Answers, Tty, restore, setup};
 use crate::tui::scrollback::{Scrollback, one_line};
 use crate::tui::status::Status;
 use crate::tui::surface::SurfaceLayer;
@@ -87,6 +87,9 @@ pub struct App {
     /// Skill files that did not load, for the same list.
     skill_diagnostics: Vec<skills::Diagnostic>,
     handle: AgentHandle,
+    /// The reply channels for questions on screen. Runtime state, held here
+    /// until the executor exists to own it.
+    answers: Answers<Decision>,
     quit: bool,
 }
 
@@ -117,6 +120,7 @@ impl App {
             skill_diagnostics: harness.diagnostics.clone(),
             handle: harness.agent.handle(),
             host: None,
+            answers: Answers::default(),
             quit: false,
         }
     }
@@ -140,6 +144,7 @@ impl App {
             skill_diagnostics: Vec::new(),
             handle: agent.handle(),
             host: None,
+            answers: Answers::default(),
             quit: false,
         }
     }
@@ -254,16 +259,18 @@ impl App {
                 self.status.running = false;
             }
             UiEvent::Confirm {
+                id,
                 tool,
                 summary,
                 risk,
-                reply,
             } => {
+                // A question arriving while another modal is up replaces it:
+                // the agent is blocked on this one, and a picker is not.
                 self.modal = Some(Modal::Confirm(Confirm {
+                    id,
                     tool,
                     summary,
                     risk,
-                    reply,
                 }));
             }
             UiEvent::Mouse(mouse) => return self.mouse(mouse),
@@ -442,7 +449,7 @@ impl App {
                 if let Some(decision) = decision
                     && let Some(Modal::Confirm(confirm)) = self.modal.take()
                 {
-                    confirm.answer(decision);
+                    self.answers.answer(confirm.id, decision);
                 }
             }
         }
@@ -809,6 +816,8 @@ pub async fn run(
     }
 
     let (events, receiver) = runtime::channel();
+    // One set of reply channels, shared by whoever asks and whoever answers.
+    let answers = Answers::default();
 
     options
         .plugins
@@ -818,6 +827,7 @@ pub async fn run(
             .plugins
             .push(Arc::new(Permissions::new(Arc::new(UiConfirmer::new(
                 events.clone(),
+                answers.clone(),
             )))));
     }
 
@@ -863,6 +873,7 @@ pub async fn run(
 
     let mut harness = harness::build(options);
     let mut app = App::new(&harness, thinking, &processes);
+    app.answers = answers;
     app.session = Some(session);
     app.scrollback.watch(host.clone());
     app.host = Some(host.clone());
@@ -1036,7 +1047,10 @@ async fn drive(
         }
     }
 
-    // Leave nothing running behind us.
+    // Leave nothing running behind us. Abandoning the open questions first
+    // releases any task blocked on one, which cancelling alone would leave
+    // waiting out its timeout.
+    app.answers.abandon_all();
     app.handle.cancel();
     if let Some(running) = running {
         running.abort();
@@ -1266,6 +1280,7 @@ fn api_key(model: &Model) -> Result<CompactString, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::permissions::{Confirmer, Risk};
     use aphid_agent::testing::{Turn, scripted};
     use aphid_core::{Role, providers::deepseek};
     use ratatui::crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
@@ -1544,6 +1559,72 @@ mod tests {
             app.scrollback.push_notice(format!("notice {number}"));
         }
         app.scrollback.layout(40, 10).top
+    }
+
+    /// A gated call is a question with a task blocked behind it. These say
+    /// that the answer reaches that task, and that no answer ever leaves it
+    /// blocked.
+    #[test]
+    fn answering_a_prompt_reaches_the_call_that_asked() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+        let (id, waiting) = app.answers.open();
+
+        app.apply(UiEvent::Confirm {
+            id,
+            tool: "bash".to_owned(),
+            summary: "rm -rf build".to_owned(),
+            risk: Risk::Destructive,
+        });
+        assert!(matches!(app.modal, Some(Modal::Confirm(_))));
+
+        app.key_in_modal(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+
+        assert_eq!(waiting.try_recv(), Ok(Decision::Deny));
+        assert!(app.modal.is_none(), "the question is answered and gone");
+    }
+
+    #[test]
+    fn a_second_keypress_on_an_answered_prompt_does_nothing() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+        let (id, waiting) = app.answers.open();
+
+        app.apply(UiEvent::Confirm {
+            id,
+            tool: "bash".to_owned(),
+            summary: "rm -rf build".to_owned(),
+            risk: Risk::Destructive,
+        });
+        app.key_in_modal(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        app.key_in_modal(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+
+        assert_eq!(waiting.try_recv(), Ok(Decision::Allow));
+        assert!(waiting.try_recv().is_err(), "only the first answer counted");
+    }
+
+    #[tokio::test]
+    async fn a_session_that_quits_refuses_what_it_was_asked() {
+        let (events, mut receiver) = crate::tui::runtime::channel::<UiEvent>();
+        let answers = Answers::default();
+        let confirmer = UiConfirmer::new(events, answers.clone());
+
+        // Blocks exactly as the agent's task does, on a thread of its own.
+        let asked: tokio::task::JoinHandle<Decision> = tokio::task::spawn_blocking(move || {
+            confirmer.confirm("bash", "rm -rf /", Risk::Destructive)
+        });
+
+        let event = receiver.recv().await.expect("the question");
+        assert!(matches!(event, UiEvent::Confirm { .. }));
+
+        // What the loop does on the way out.
+        answers.abandon_all();
+
+        assert_eq!(
+            asked.await.expect("the blocked call"),
+            Decision::Deny,
+            "a question nobody will answer is a refusal, not a wait"
+        );
     }
 
     #[test]

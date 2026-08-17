@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- In the terminal, a permission question that nobody answers refuses the tool
+  call after five minutes, as it already did for an alate. A run left waiting
+  on a prompt no longer holds for the rest of the day.
+- Quitting the terminal while a permission question is on screen refuses the
+  call immediately, instead of leaving it to time out.
+
 ## [0.2.0] - 2026-08-16
 
 ### Added

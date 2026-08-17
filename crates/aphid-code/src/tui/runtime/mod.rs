@@ -29,6 +29,7 @@
 //!
 //! which is the whole point.
 
+mod answers;
 mod cmd;
 mod driver;
 mod hub;
@@ -36,6 +37,7 @@ mod keys;
 mod program;
 mod terminal;
 
+pub use answers::{ANSWER_TIMEOUT, Answers, RequestId};
 pub use cmd::Cmd;
 pub use driver::run;
 pub use hub::{Hub, channel};

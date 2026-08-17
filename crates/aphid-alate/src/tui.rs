@@ -15,7 +15,6 @@
 //! when the terminal does; the resident session and anything a job ran do not.
 
 use std::collections::HashMap;
-use std::sync::mpsc::Receiver;
 
 use aphid_code::plugins::permissions::Decision;
 use aphid_code::tui::event::{UiEvent, spawn_input_thread};
@@ -78,7 +77,6 @@ struct App {
     /// The confirmation on screen, and the channel the modal answers into. The
     /// modal type wants a sender, so it gets a local one and the answer is
     /// carried to the daemon from the other end.
-    asked: Option<(u64, Receiver<Decision>)>,
     /// Whether notices, heartbeats and jobs are drawn. On by default: watching
     /// an alate work between prompts is most of the reason to attach.
     show_log: bool,
@@ -135,7 +133,6 @@ pub async fn run(home: &Home) -> std::io::Result<()> {
         status: Status::default(),
         instance: home.name().to_owned(),
         modal: None,
-        asked: None,
         show_log: true,
         quit: false,
     };
@@ -281,13 +278,13 @@ impl App {
                 summary,
                 risk,
             } => {
-                let (reply, answer) = std::sync::mpsc::channel();
-                self.asked = Some((id, answer));
+                // The daemon's own id travels with the question and comes back
+                // with the answer, so nothing local has to remember it.
                 self.modal = Some(Modal::Confirm(Confirm {
+                    id,
                     tool,
                     summary,
                     risk: risk.into(),
-                    reply,
                 }));
             }
             // Everything below is a conversation's, so it is drawn into that
@@ -367,18 +364,12 @@ async fn handle_key(app: &mut App, key: KeyEvent, client: &mut Client) -> std::i
         if let Some(decision) = decision
             && let Some(Modal::Confirm(confirm)) = app.modal.take()
         {
-            // Through the modal's own channel and out the other end, so the
-            // modal keeps its type and this keeps its socket.
-            confirm.answer(decision);
-            if let Some((id, answer)) = app.asked.take() {
-                let decision = answer.try_recv().unwrap_or(Decision::Deny);
-                client
-                    .send(&Request::Answer {
-                        id,
-                        decision: answer_of(decision),
-                    })
-                    .await?;
-            }
+            client
+                .send(&Request::Answer {
+                    id: confirm.id,
+                    decision: answer_of(decision),
+                })
+                .await?;
         }
         return Ok(());
     }
