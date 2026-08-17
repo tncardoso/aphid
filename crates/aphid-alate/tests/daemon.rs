@@ -18,6 +18,8 @@ use aphid_alate::gateway::wire::{Envelope, Frame, Request};
 use aphid_alate::gateway::{Client, is_listening};
 use aphid_alate::home::Home;
 use aphid_alate::memory::Memory;
+use aphid_core::Model;
+use aphid_core::catalog::ModelEntry;
 use common::Temp;
 
 /// Wait for a daemon to come up, rather than for a fixed time.
@@ -79,6 +81,20 @@ fn quiet() -> Config {
     }
 }
 
+/// A model the daemon can resolve without any `~/.aphid/models.json` on the
+/// machine running the tests. The scripted backend replaces the provider, so
+/// this model is never contacted — it only has to resolve.
+fn dummy_model() -> Model {
+    let entry: ModelEntry = serde_json::from_value(serde_json::json!({
+        "id": "test-model",
+        "base_url": "http://localhost:8080/v1",
+        "context_window": 32768,
+        "max_tokens": 4096,
+    }))
+    .expect("a valid entry");
+    Model::try_from(&entry).expect("a valid model")
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_terminal_gets_a_conversation_of_its_own() {
     let temp = Temp::new("daemon");
@@ -90,6 +106,7 @@ async fn a_terminal_gets_a_conversation_of_its_own() {
     let daemon = tokio::spawn(daemon::run(Options {
         home,
         config,
+        model: Some(dummy_model()),
         stream_fn: Some(stream_fn),
     }));
 
@@ -136,6 +153,7 @@ async fn a_terminal_is_not_put_in_the_resident_session() {
     let daemon = tokio::spawn(daemon::run(Options {
         home,
         config,
+        model: Some(dummy_model()),
         stream_fn: Some(stream_fn),
     }));
 
@@ -203,6 +221,7 @@ async fn a_job_runs_in_a_session_of_its_own() {
     let daemon = tokio::spawn(daemon::run(Options {
         home,
         config,
+        model: Some(dummy_model()),
         stream_fn: Some(stream_fn),
     }));
 
@@ -296,6 +315,7 @@ async fn what_the_agent_remembers_is_on_disk_afterwards() {
     let daemon = tokio::spawn(daemon::run(Options {
         home,
         config,
+        model: Some(dummy_model()),
         stream_fn: Some(stream_fn),
     }));
 
@@ -356,6 +376,7 @@ async fn a_stored_fact_and_the_crontab_reach_the_model() {
     let daemon = tokio::spawn(daemon::run(Options {
         home,
         config,
+        model: Some(dummy_model()),
         stream_fn: Some(stream_fn),
     }));
 
@@ -404,6 +425,7 @@ async fn a_heartbeat_wakes_the_resident_session() {
     let daemon = tokio::spawn(daemon::run(Options {
         home,
         config,
+        model: Some(dummy_model()),
         stream_fn: Some(stream_fn),
     }));
 
@@ -436,6 +458,7 @@ async fn a_session_can_be_watched_after_it_ended() {
     let daemon = tokio::spawn(daemon::run(Options {
         home,
         config,
+        model: Some(dummy_model()),
         stream_fn: Some(stream_fn),
     }));
 
@@ -498,6 +521,7 @@ async fn each_session_writes_its_own_transcript() {
     let daemon = tokio::spawn(daemon::run(Options {
         home,
         config,
+        model: Some(dummy_model()),
         stream_fn: Some(stream_fn),
     }));
 
@@ -542,6 +566,7 @@ async fn two_daemons_cannot_share_one_alate() {
     let first = tokio::spawn(daemon::run(Options {
         home: Home::open_in(&temp.root, "test").expect("open"),
         config: config.clone(),
+        model: Some(dummy_model()),
         stream_fn: Some(stream_fn),
     }));
     let _client = attach(&socket).await;
@@ -550,6 +575,7 @@ async fn two_daemons_cannot_share_one_alate() {
     let refused = daemon::run(Options {
         home,
         config,
+        model: Some(dummy_model()),
         stream_fn: Some(stream_fn),
     })
     .await
@@ -570,6 +596,7 @@ async fn a_session_is_listed_under_the_channel_it_belongs_to() {
     let daemon = tokio::spawn(daemon::run(Options {
         home,
         config,
+        model: Some(dummy_model()),
         stream_fn: Some(stream_fn),
     }));
 

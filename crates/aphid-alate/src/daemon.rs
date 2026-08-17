@@ -46,6 +46,11 @@ const CLOCK: Duration = Duration::from_secs(5);
 pub struct Options {
     pub home: Home,
     pub config: Config,
+    /// The model to run, when the caller already resolved one. `None` resolves
+    /// it from the catalog, as the CLI does. Tests pass a dummy — the scripted
+    /// backend never contacts it — so a run does not depend on the machine's
+    /// `~/.aphid/models.json`.
+    pub model: Option<aphid_core::Model>,
     /// Replace the provider backend. `None` talks to the real provider; tests
     /// pass a scripted one, exactly as [`HarnessOptions::stream_fn`] does.
     ///
@@ -88,15 +93,21 @@ pub async fn run(options: Options) -> Result<(), String> {
     let Options {
         home,
         config,
+        model: given,
         stream_fn,
     } = options;
 
+    // A caller that already resolved a model — the tests — needs no catalog
+    // and no `~/.aphid/models.json`.
     let catalog = Catalog::new();
-    let model = match &config.model {
-        Some(name) => catalog.resolve(name).map_err(|error| error.to_string())?,
-        None => catalog.default_model().ok_or_else(|| {
-            "no models configured. Add one with `aphid models add <provider/model>`.".to_owned()
-        })?,
+    let model = match given {
+        Some(model) => model,
+        None => match &config.model {
+            Some(name) => catalog.resolve(name).map_err(|error| error.to_string())?,
+            None => catalog.default_model().ok_or_else(|| {
+                "no models configured. Add one with `aphid models add <provider/model>`.".to_owned()
+            })?,
+        },
     };
 
     // A scripted backend reaches no provider, so it needs no key. Demanding one

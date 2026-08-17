@@ -52,6 +52,7 @@ async fn start(name: &str) -> ExitCode {
     match daemon::run(Options {
         home,
         config,
+        model: None,
         stream_fn: None,
     })
     .await
