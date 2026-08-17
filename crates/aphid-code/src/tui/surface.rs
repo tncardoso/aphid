@@ -5,10 +5,7 @@
 //! tree, and closed when it returns unit. Rendering is cached by the plugin's
 //! state version, then re-run after events and on the tick.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use aphid_plugin::{Placement, PluginHost, Side, SurfaceRender, Widget};
+use aphid_plugin::{Open, Side, Widget};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
@@ -50,18 +47,25 @@ pub struct Panes {
     pub right: Vec<Pane>,
 }
 
-/// Renders the panels by asking the plugins. The executor's half.
-///
-/// Keeps what it last rendered against the plugin's state version, so a panel
-/// whose plugin has not moved is not re-rendered.
-#[derive(Default)]
-pub struct SurfaceSource {
-    cache: HashMap<SurfaceKey, Cached>,
-}
-
-struct Cached {
-    version: u64,
-    view: Option<Pane>,
+impl Panes {
+    /// Sort what the script thread rendered into the two columns.
+    #[must_use]
+    pub fn of(open: Vec<Open>) -> Self {
+        let mut panes = Self::default();
+        for surface in open {
+            let pane = Pane {
+                key: (surface.plugin, surface.name.clone()),
+                title: surface.name,
+                interactive: surface.interactive,
+                widget: surface.widget,
+            };
+            match surface.side {
+                Side::Left => panes.left.push(pane),
+                Side::Right => panes.right.push(pane),
+            }
+        }
+        panes
+    }
 }
 
 /// One clickable region a panel drew.
@@ -71,43 +75,6 @@ pub struct Hit {
     target: Option<String>,
     interactive: bool,
     area: Rect,
-}
-
-impl SurfaceSource {
-    /// Ask the host for the open surfaces and their widget trees.
-    ///
-    /// Runs plugin `render` functions on the calling thread. They are expected
-    /// to be cheap, the same bargain slash commands make.
-    #[must_use]
-    pub fn refresh(&mut self, host: &Arc<PluginHost>) -> Panes {
-        let mut left = Vec::new();
-        let mut right = Vec::new();
-
-        for surface in host.surfaces() {
-            let Placement::Side(side) = surface.placement;
-            let key = (surface.plugin.clone(), surface.name.clone());
-            let version = host.state_version(&surface.plugin).unwrap_or(0);
-
-            let stale = match self.cache.get(&key) {
-                None => true,
-                Some(cached) => cached.version != version,
-            };
-            if stale {
-                let view = render_view(host, &surface);
-                self.cache.insert(key.clone(), Cached { version, view });
-            }
-
-            let Some(view) = self.cache.get(&key).and_then(|cached| cached.view.clone()) else {
-                continue;
-            };
-            match side {
-                Side::Left => left.push(view),
-                Side::Right => right.push(view),
-            }
-        }
-
-        Panes { left, right }
-    }
 }
 
 impl SurfaceLayer {
@@ -293,27 +260,6 @@ impl SurfaceLayer {
             .iter()
             .chain(self.right.iter())
             .any(|view| view.interactive && view.key == *key)
-    }
-}
-
-fn render_view(host: &Arc<PluginHost>, surface: &aphid_plugin::RegisteredSurface) -> Option<Pane> {
-    match host.render_surface(&surface.plugin, &surface.name) {
-        Some(SurfaceRender::Widget(widget)) => Some(Pane {
-            key: (surface.plugin.clone(), surface.name.clone()),
-            title: surface.name.clone(),
-            interactive: surface.interactive,
-            widget,
-        }),
-        Some(SurfaceRender::Closed) | None => None,
-        Some(SurfaceRender::Failed(error)) => Some(Pane {
-            key: (surface.plugin.clone(), surface.name.clone()),
-            title: surface.name.clone(),
-            interactive: surface.interactive,
-            widget: Widget::Text {
-                id: None,
-                text: format!("plugin error: {error}"),
-            },
-        }),
     }
 }
 

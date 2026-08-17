@@ -52,6 +52,7 @@ mod convert;
 mod cx;
 mod discover;
 mod host;
+pub mod hub;
 mod script;
 mod store;
 mod surface;
@@ -68,6 +69,7 @@ pub use convert::{object_to_map, to_dynamic, to_json};
 pub use cx::ScriptCx;
 pub use discover::{DIR_NAME, Diagnostic, ENTRY_FILE, EXTENSION, PluginFile, discover, explicit};
 pub use host::{PluginHost, silent_sink};
+pub use hub::{Job, Open, PluginHub, Report};
 pub use script::ScriptPlugin;
 pub use store::Store;
 pub use surface::{

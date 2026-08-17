@@ -12,6 +12,9 @@
 
 ### Fixed
 
+- A plugin's tick and its panel no longer run at the same time. They could
+  both read the plugin's state, change it and write it back, and one of the
+  two changes was lost.
 - A slash command typed while the model is replying now runs. It used to be
   sent to the model as the text of the command, so `/tools` mid-reply asked
   the model about the word `/tools`.

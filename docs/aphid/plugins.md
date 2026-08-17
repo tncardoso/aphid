@@ -106,6 +106,11 @@ while the user is at the prompt, and `exec` and the http functions stop it until
 they are complete. Aphid does not start a tick while the last one runs. There
 are no ticks in headless mode.
 
+Every call into a plugin — a hook, a tick, a command, a panel — runs on one
+thread, one at a time. So a change a tick makes to the state is what the next
+panel render reads, and two calls can never both read the state, change it, and
+write it back over each other.
+
 Each hook gets a map. These are the fields:
 
 - `on_prompt`: `text`
@@ -326,7 +331,9 @@ The callback returns `"consume"` to handle the event, `"release_focus"` to
 return focus to the input box, or `notice("text")` to show a notice. It may also
 call `state(map)`, `save_state(map)`, `notify` and `prompt` directly.
 
-Render and event callbacks run on the UI thread. Keep them short, like `on_tick`.
+Render and event callbacks run on the same thread as every other script call,
+which is not the thread that draws the screen. Keep them short: a slow one
+delays the other plugins, but it does not hold the terminal.
 
 ## When a plugin fails
 

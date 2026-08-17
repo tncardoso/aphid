@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use aphid_agent::{Agent, AgentHandle, RunOutcome, exec};
 use aphid_core::{Model, ThinkingLevel, Transcript};
 use aphid_plugin::{
-    Action as PluginAction, Placement, ScriptBackend, SessionInfo, Side, SurfaceAction,
-    SurfaceEvent,
+    Action as PluginAction, Job as PluginJob, Placement, PluginHub, Report as PluginReport,
+    ScriptBackend, SessionInfo, Side, SurfaceAction, SurfaceEvent,
 };
 use compact_str::CompactString;
 use ratatui::Frame;
@@ -35,7 +35,7 @@ use crate::tui::runtime::{
 };
 use crate::tui::scrollback::{Scrollback, one_line};
 use crate::tui::status::Status;
-use crate::tui::surface::{SurfaceLayer, SurfaceSource};
+use crate::tui::surface::{Panes, SurfaceLayer};
 
 /// How often the screen is repainted while something is happening.
 const FRAME: Duration = Duration::from_millis(33);
@@ -139,13 +139,13 @@ impl App {
             plugins_watch_notices: false,
             plugins_tick: false,
             plugins_draw: false,
+            host: None,
             session: None,
             queued: VecDeque::new(),
             processes: Arc::clone(processes),
             workspace: harness.workspace.clone(),
             skills: harness.skills.clone(),
             skill_diagnostics: harness.diagnostics.clone(),
-            host: None,
             answers: Answers::default(),
             quit: false,
         }
@@ -168,13 +168,13 @@ impl App {
             plugins_watch_notices: false,
             plugins_tick: false,
             plugins_draw: false,
+            host: None,
             session: None,
             queued: VecDeque::new(),
             processes: Arc::new(exec::Registry::new()),
             workspace: Workspace::new(std::env::temp_dir()),
             skills: Vec::new(),
             skill_diagnostics: Vec::new(),
-            host: None,
             answers: Answers::default(),
             quit: false,
         }
@@ -1103,6 +1103,7 @@ pub async fn run(
     ));
 
     let mut executor = Executor::new(harness.agent, &app, events.clone());
+    executor.plugins = Some(spawn_plugin_hub(host.clone(), events.clone()));
 
     let (mut terminal, kitty) = setup()?;
     spawn_input_thread(&events);
@@ -1115,6 +1116,11 @@ pub async fn run(
     )
     .await;
     restore(&mut terminal, kitty)?;
+    // Before the session hooks, so they are not racing the script thread on
+    // the way out. Its queue is drained first.
+    if let Some(plugins) = executor.plugins.take() {
+        plugins.stop();
+    }
 
     // After the terminal is back: a session hook that writes to standard error
     // then lands on a screen that is its own again. `session_end` also flushes
@@ -1144,11 +1150,10 @@ struct Executor {
     handle: AgentHandle,
     processes: Arc<exec::Registry>,
     workspace: Workspace,
-    host: Option<Arc<aphid_plugin::PluginHost>>,
     answers: Answers<Decision>,
-    /// Renders the panels, keeping what it last drew against each plugin's
-    /// state version.
-    surfaces: SurfaceSource,
+    /// The one thread that calls into a script. Nothing here waits on it: a
+    /// job goes in and its answer comes back as a message.
+    plugins: Option<PluginHub>,
     hub: Hub<Msg>,
 }
 
@@ -1162,9 +1167,8 @@ impl Executor {
             pending: Vec::new(),
             processes: Arc::clone(&app.processes),
             workspace: app.workspace.clone(),
-            host: app.host.clone(),
             answers: app.answers.clone(),
-            surfaces: SurfaceSource::default(),
+            plugins: None,
             hub,
         }
     }
@@ -1200,52 +1204,33 @@ impl Executor {
             }
             Effect::Answer { id, decision } => self.answers.answer(id, decision),
             Effect::PluginCommand { name, args } => {
-                let Some(host) = self.host.clone() else {
-                    return;
-                };
-                for action in host.run_command(&name, &args).unwrap_or_default() {
-                    let PluginAction::Notice(text) = action;
-                    self.hub.send(Msg::Notice(text));
-                }
+                self.to_plugins(PluginJob::Command { name, args });
             }
-            Effect::PluginNotice(text) => {
-                if let Some(host) = &self.host {
-                    host.notice(&text);
-                }
-            }
+            Effect::PluginNotice(text) => self.to_plugins(PluginJob::Notice(text)),
             Effect::Surface {
                 plugin,
                 name,
                 event,
-            } => {
-                let Some(host) = self.host.clone() else {
-                    return;
-                };
-                // No surface by that name any more: an empty answer, which
-                // the update reads as "it is gone, take the focus back".
-                let actions = host.surface_event(&plugin, &name, event);
-                self.hub.send(Msg::SurfaceDone {
-                    plugin,
-                    actions: actions.unwrap_or_default(),
-                });
-            }
-            Effect::RefreshSurfaces => {
-                if let Some(host) = self.host.clone() {
-                    let panes = self.surfaces.refresh(&host);
-                    self.hub.send(Msg::Panes(panes));
-                }
-            }
-            Effect::PluginTick => {
-                if let Some(host) = self.host.clone() {
-                    tokio::task::spawn_blocking(move || host.tick());
-                }
-            }
+            } => self.to_plugins(PluginJob::Surface {
+                plugin,
+                name,
+                event,
+            }),
+            Effect::RefreshSurfaces => self.to_plugins(PluginJob::Refresh),
+            Effect::PluginTick => self.to_plugins(PluginJob::Tick),
             Effect::Quit => {
                 // Releasing the questions first unwinds whoever is blocked on
                 // one; cancelling alone would leave it waiting out its timeout.
                 self.answers.abandon_all();
                 self.handle.cancel();
             }
+        }
+    }
+
+    /// Queue a job for the script thread. Never waits.
+    fn to_plugins(&self, job: PluginJob) {
+        if let Some(plugins) = &self.plugins {
+            plugins.send(job);
         }
     }
 
@@ -1262,6 +1247,34 @@ impl Executor {
             (agent, outcome)
         }));
     }
+}
+
+/// Start the thread that calls into the scripts, and turn what it reports
+/// into messages.
+fn spawn_plugin_hub(host: Arc<aphid_plugin::PluginHost>, hub: Hub<Msg>) -> PluginHub {
+    PluginHub::spawn(host, move |report| {
+        match report {
+            PluginReport::Command(actions) => {
+                for action in actions {
+                    let PluginAction::Notice(text) = action;
+                    hub.send(Msg::Notice(text));
+                }
+            }
+            PluginReport::Surface {
+                plugin, actions, ..
+            } => {
+                hub.send(Msg::SurfaceDone {
+                    plugin,
+                    // No surface by that name any more: an empty answer, which
+                    // the update reads as "it is gone, take the focus back".
+                    actions: actions.unwrap_or_default(),
+                });
+            }
+            PluginReport::Surfaces(open) => {
+                hub.send(Msg::Panes(Panes::of(open)));
+            }
+        };
+    })
 }
 
 /// Do one of the effects that only the agent itself can answer.
@@ -1478,9 +1491,8 @@ mod tests {
             pending: Vec::new(),
             processes: Arc::new(exec::Registry::new()),
             workspace: Workspace::new(std::env::temp_dir()),
-            host: None,
             answers: Answers::default(),
-            surfaces: SurfaceSource::default(),
+            plugins: None,
             hub,
         }
     }
@@ -2143,7 +2155,6 @@ mod plugin_tests {
 
     use crate::tui::effect::Effect;
     use crate::tui::msg::Msg;
-    use crate::tui::surface::SurfaceSource;
 
     use aphid_agent::{Agent, exec};
     use aphid_core::providers::deepseek;
@@ -2210,10 +2221,29 @@ mod plugin_tests {
         (app, agent)
     }
 
-    /// Render the panels and hand them to the model, as the executor does.
-    fn refresh(app: &mut App, panels: &mut SurfaceSource, host: &Arc<PluginHost>) {
-        let panes = panels.refresh(host);
-        app.update(Msg::Panes(panes));
+    /// Render the panels and hand them to the model, as the script thread
+    /// does. Called straight rather than through the thread, so the test does
+    /// not have to wait for one.
+    fn refresh(app: &mut App, host: &Arc<PluginHost>) {
+        let open: Vec<aphid_plugin::Open> = host
+            .surfaces()
+            .into_iter()
+            .filter_map(|surface| {
+                let aphid_plugin::Placement::Side(side) = surface.placement;
+                let widget = match host.render_surface(&surface.plugin, &surface.name)? {
+                    aphid_plugin::SurfaceRender::Widget(widget) => widget,
+                    _ => return None,
+                };
+                Some(aphid_plugin::Open {
+                    plugin: surface.plugin,
+                    name: surface.name,
+                    side,
+                    interactive: surface.interactive,
+                    widget,
+                })
+            })
+            .collect();
+        app.update(Msg::Panes(crate::tui::surface::Panes::of(open)));
     }
 
     fn notices(app: &App) -> Vec<String> {
@@ -2310,12 +2340,11 @@ mod plugin_tests {
         );
         let host = fixture.host();
         let (mut app, _agent) = app_with(host.clone());
-        let mut panels = SurfaceSource::default();
-        refresh(&mut app, &mut panels, &host);
+        refresh(&mut app, &host);
         assert!(!app.surfaces.any_open(), "the panel starts closed");
 
         let _ = host.run_command("panel", "");
-        refresh(&mut app, &mut panels, &host);
+        refresh(&mut app, &host);
         assert!(app.surfaces.any_open(), "the panel is now open");
 
         app.surfaces.focus_first();
