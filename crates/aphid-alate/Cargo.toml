@@ -27,7 +27,7 @@ aphid-code.workspace = true
 # alate: the bridge wants the client half of a colony and nothing else. Cargo
 # refuses to turn the default features off on an inherited dependency, so this
 # one names its version and its path here.
-aphid-colony = { version = "0.1.0", path = "../aphid-colony", default-features = false, features = ["client"], optional = true }
+aphid-colony = { version = "0.2.0", path = "../aphid-colony", default-features = false, features = ["client"], optional = true }
 aphid-core.workspace = true
 aphid-nostr = { workspace = true, optional = true }
 aphid-plugin.workspace = true

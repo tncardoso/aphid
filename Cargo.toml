@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 # Edition 2024 and resolver 3 need this much, so it is the floor the crates
 # state rather than a promise made on top of it.
@@ -29,13 +29,13 @@ categories = ["command-line-utilities", "development-tools"]
 [workspace.dependencies]
 # The crates of this workspace. Each one carries a version as well as a path:
 # a path alone is enough to build, and not enough to publish.
-aphid-agent = { version = "0.1.0", path = "crates/aphid-agent" }
-aphid-alate = { version = "0.1.0", path = "crates/aphid-alate" }
-aphid-code = { version = "0.1.0", path = "crates/aphid-code" }
-aphid-colony = { version = "0.1.0", path = "crates/aphid-colony" }
-aphid-core = { version = "0.1.0", path = "crates/aphid-core" }
-aphid-nostr = { version = "0.1.0", path = "crates/aphid-nostr" }
-aphid-plugin = { version = "0.1.0", path = "crates/aphid-plugin" }
+aphid-agent = { version = "0.2.0", path = "crates/aphid-agent" }
+aphid-alate = { version = "0.2.0", path = "crates/aphid-alate" }
+aphid-code = { version = "0.2.0", path = "crates/aphid-code" }
+aphid-colony = { version = "0.2.0", path = "crates/aphid-colony" }
+aphid-core = { version = "0.2.0", path = "crates/aphid-core" }
+aphid-nostr = { version = "0.2.0", path = "crates/aphid-nostr" }
+aphid-plugin = { version = "0.2.0", path = "crates/aphid-plugin" }
 
 clap = { version = "4.5", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }

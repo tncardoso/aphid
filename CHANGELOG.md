@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-16
+
 ### Added
 
 - The todo plugin gains a `todo_clear` tool that removes every pending and
@@ -47,9 +49,6 @@
   pane instead of running off the edge.
 - When you scroll up, new output no longer pushes the viewport off the text you
   were reading.
-- The `/todo` command now sends the prompt to the model in todo mode. Before,
-  the prompt prefix was a `global` constant that a command body could not see,
-  so the todo mode instructions never reached the model.
 
 ## [0.1.0] - 2026-08-13
 
@@ -80,5 +79,6 @@
 [kac]: https://keepachangelog.com/en/1.1.0/
 [semver]: https://semver.org/spec/v2.0.0.html
 [releasing]: https://aphid.embornal.com/docs/releasing.html
-[Unreleased]: https://github.com/tncardoso/aphid/compare/v0.1.0...main
+[Unreleased]: https://github.com/tncardoso/aphid/compare/v0.2.0...main
+[0.2.0]: https://github.com/tncardoso/aphid/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/tncardoso/aphid/releases/tag/v0.1.0
