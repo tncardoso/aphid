@@ -1,11 +1,10 @@
 //! The things that take over the screen: the model picker, the permission
 //! prompt and the process list.
 
-use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
-use aphid_agent::exec::{Process, Registry, Status};
+use aphid_agent::exec::{Process, Status};
 use aphid_core::Model;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
@@ -24,10 +23,11 @@ pub enum Modal {
         selected: usize,
     },
     Confirm(Confirm),
-    /// The process list holds the registry rather than a copy of it, so what it
-    /// draws is what is running at that moment.
+    /// The process list holds a snapshot, refreshed on the poll tick. Reading
+    /// the registry takes a lock, and a lock has no business being taken while
+    /// a frame is drawn.
     Processes {
-        registry: Arc<Registry>,
+        rows: Vec<Process>,
         selected: usize,
     },
 }
@@ -54,7 +54,7 @@ impl Modal {
             Modal::Models { models, selected } => (models.len(), selected),
             // Only the running ones can be selected: a finished process is a
             // report, with nothing left to do to it.
-            Modal::Processes { registry, selected } => (running(registry).len(), selected),
+            Modal::Processes { rows, selected } => (running(rows).len(), selected),
             Modal::Confirm(_) => return,
         };
         if len == 0 {
@@ -78,10 +78,10 @@ impl Modal {
     /// rather than trusted.
     #[must_use]
     pub fn selected_process(&self) -> Option<Process> {
-        let Modal::Processes { registry, selected } = self else {
+        let Modal::Processes { rows, selected } = self else {
             return None;
         };
-        let running = running(registry);
+        let running = running(rows);
         running.get(*selected).or_else(|| running.last()).cloned()
     }
 
@@ -89,20 +89,16 @@ impl Modal {
         match self {
             Modal::Models { models, selected } => render_models(frame, area, models, *selected),
             Modal::Confirm(confirm) => render_confirm(frame, area, confirm),
-            Modal::Processes { registry, selected } => {
-                render_processes(frame, area, registry, *selected);
+            Modal::Processes { rows, selected } => {
+                render_processes(frame, area, rows, *selected);
             }
         }
     }
 }
 
-/// What the registry has running, in the order it started.
-fn running(registry: &Registry) -> Vec<Process> {
-    registry
-        .snapshot()
-        .into_iter()
-        .filter(Process::running)
-        .collect()
+/// The running ones, in the order they started.
+fn running(rows: &[Process]) -> Vec<Process> {
+    rows.iter().filter(|p| p.running()).cloned().collect()
 }
 
 /// A centred box `width` columns wide and `height` rows tall, clamped to `area`.
@@ -169,9 +165,9 @@ fn render_models(frame: &mut Frame<'_>, area: Rect, models: &[Model], selected: 
 /// two read as one table.
 const COLUMNS: usize = 40;
 
-fn render_processes(frame: &mut Frame<'_>, area: Rect, registry: &Registry, selected: usize) {
-    let all = registry.snapshot();
-    let (live, done): (Vec<Process>, Vec<Process>) = all.into_iter().partition(Process::running);
+fn render_processes(frame: &mut Frame<'_>, area: Rect, rows: &[Process], selected: usize) {
+    let (live, done): (Vec<Process>, Vec<Process>) =
+        rows.iter().cloned().partition(Process::running);
 
     let width = area.width.saturating_sub(8).min(96);
     let room = (width as usize).saturating_sub(COLUMNS + 2);

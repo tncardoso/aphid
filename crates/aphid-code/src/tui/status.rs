@@ -71,8 +71,11 @@ impl Status {
     }
 
     /// Render the line.
+    ///
+    /// Reads no clock: the download meter holds its last reading, so drawing
+    /// the same status twice paints the same thing.
     #[must_use]
-    pub fn line(&mut self) -> Line<'static> {
+    pub fn line(&self) -> Line<'static> {
         let dim = Style::default().fg(Color::DarkGray);
         let mut spans = vec![Span::styled(" ", dim)];
 
@@ -111,7 +114,7 @@ impl Status {
             dim,
         ));
 
-        if let Some(kb_s) = self.download.rate_kb_s(Instant::now()) {
+        if let Some(kb_s) = self.download.rate_kb_s() {
             spans.push(Span::styled(format!(" · ↓ {kb_s:.1} KB/s"), dim));
         }
 
@@ -134,10 +137,16 @@ impl Status {
 /// Samples `(when, bytes)` are kept in a deque, dropped once they are older
 /// than [`DownloadSpeed::WINDOW`], and summed over the span they cover. The
 /// rate is KB/s, decimal: 1 KB = 1000 bytes.
+///
+/// The reading is computed when the samples change, not when the line is
+/// drawn. Drawing then needs no clock and no `&mut`, which is what lets the
+/// status line be a function of the state and nothing else.
 #[derive(Clone, Debug, Default)]
 pub struct DownloadSpeed {
     /// When each chunk landed and how many bytes it carried.
     samples: VecDeque<(Instant, u64)>,
+    /// The reading the samples last gave.
+    rate: Option<f64>,
 }
 
 impl DownloadSpeed {
@@ -149,20 +158,37 @@ impl DownloadSpeed {
     /// Record that `bytes` landed at `now`.
     pub fn note(&mut self, now: Instant, bytes: u64) {
         self.samples.push_back((now, bytes));
+        self.recompute(now);
+    }
+
+    /// Age the samples out at `now`, without adding any.
+    ///
+    /// A stream that goes quiet stops calling [`Self::note`], and the reading
+    /// has to fall away by itself rather than hold at the last burst.
+    pub fn prune(&mut self, now: Instant) {
+        self.recompute(now);
     }
 
     /// Forget every sample. Called when the turn ends, so a stale reading
     /// cannot sit on an idle line.
     pub fn clear(&mut self) {
         self.samples.clear();
+        self.rate = None;
     }
 
-    /// KB/s over the recent span, or `None` when nothing has arrived within
-    /// the window — that is, no stream is live.
-    pub fn rate_kb_s(&mut self, now: Instant) -> Option<f64> {
-        let (oldest, sum) = self.window_sum(now)?;
-        let span = now.saturating_duration_since(oldest).max(Self::MIN_SPAN);
-        Some(sum as f64 / span.as_secs_f64() / 1000.0)
+    /// KB/s over the recent span, or `None` when nothing arrived within the
+    /// window — that is, no stream is live.
+    #[must_use]
+    pub fn rate_kb_s(&self) -> Option<f64> {
+        self.rate
+    }
+
+    /// Drop what has aged out and read what is left.
+    fn recompute(&mut self, now: Instant) {
+        self.rate = self.window_sum(now).map(|(oldest, sum)| {
+            let span = now.saturating_duration_since(oldest).max(Self::MIN_SPAN);
+            sum as f64 / span.as_secs_f64() / 1000.0
+        });
     }
 
     /// Drop samples older than the window; return the oldest remaining sample
@@ -233,14 +259,14 @@ mod tests {
 
     #[test]
     fn context_use_counts_cached_tokens_too() {
-        let mut status = status(8_000, 4_400, 1_000_000);
+        let status = status(8_000, 4_400, 1_000_000);
         assert_eq!(status.context_used(), 12_400);
         assert!(status.line().to_string().contains("12k/1.0M"));
     }
 
     #[test]
     fn with_no_turn_yet_the_context_reads_zero() {
-        let mut status = Status {
+        let status = Status {
             context_window: 1_000_000,
             ..Status::default()
         };
@@ -250,13 +276,13 @@ mod tests {
 
     #[test]
     fn the_warning_appears_only_when_the_window_fills() {
-        let mut calm = status(500_000, 0, 1_000_000);
+        let calm = status(500_000, 0, 1_000_000);
         assert!(!calm.line().to_string().contains('⚠'));
 
-        let mut warned = status(780_000, 0, 1_000_000);
+        let warned = status(780_000, 0, 1_000_000);
         assert!(warned.line().to_string().contains("⚠ context 78%"));
 
-        let mut alarmed = status(950_000, 0, 1_000_000);
+        let alarmed = status(950_000, 0, 1_000_000);
         assert!(alarmed.line().to_string().contains("95%"));
     }
 
@@ -309,10 +335,10 @@ mod tests {
 
     #[test]
     fn no_samples_means_no_speed() {
-        let mut meter = DownloadSpeed::default();
-        assert_eq!(meter.rate_kb_s(Instant::now()), None);
+        let meter = DownloadSpeed::default();
+        assert_eq!(meter.rate_kb_s(), None);
 
-        let mut status = status(100, 0, 1_000);
+        let status = status(100, 0, 1_000);
         let rendered = status.line().to_string();
         assert!(!rendered.contains("KB/s"));
     }
@@ -325,7 +351,8 @@ mod tests {
         meter.note(t0 + Duration::from_millis(250), 1_000);
 
         // 2000 bytes over 0.5 s, in decimal KB/s.
-        let rate = meter.rate_kb_s(t0 + Duration::from_millis(500)).unwrap();
+        meter.prune(t0 + Duration::from_millis(500));
+        let rate = meter.rate_kb_s().unwrap();
         assert!((rate - 4.0).abs() < 1e-9);
     }
 
@@ -337,8 +364,8 @@ mod tests {
         meter.note(t0 + Duration::from_millis(250), 1_000);
 
         // Everything has aged out of the 2 s window.
-        let now = t0 + DownloadSpeed::WINDOW + Duration::from_millis(251);
-        assert_eq!(meter.rate_kb_s(now), None);
+        meter.prune(t0 + DownloadSpeed::WINDOW + Duration::from_millis(251));
+        assert_eq!(meter.rate_kb_s(), None);
         assert_eq!(meter.bytes(), 0, "expired samples are popped");
     }
 
@@ -350,7 +377,8 @@ mod tests {
 
         // 1 ms after the first chunk the span is clamped to MIN_SPAN, so a
         // single burst cannot read as an absurd speed.
-        let rate = meter.rate_kb_s(t0 + Duration::from_millis(1)).unwrap();
+        meter.prune(t0 + Duration::from_millis(1));
+        let rate = meter.rate_kb_s().unwrap();
         assert!((rate - 10.0).abs() < 1e-9, "clamped to {rate} KB/s");
     }
 
@@ -362,5 +390,20 @@ mod tests {
 
         let rendered = status.line().to_string();
         assert!(rendered.contains("KB/s"), "{rendered:?}");
+    }
+
+    #[test]
+    fn a_stream_that_goes_quiet_stops_reading() {
+        let t0 = Instant::now();
+        let mut status = status(100, 0, 1_000);
+        status.download.note(t0, 2_000);
+
+        // Nothing more arrives. The meter is aged rather than fed, and the
+        // reading has to go away by itself.
+        status
+            .download
+            .prune(t0 + DownloadSpeed::WINDOW + Duration::from_millis(1));
+
+        assert!(!status.line().to_string().contains("KB/s"));
     }
 }

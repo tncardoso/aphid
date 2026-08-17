@@ -294,7 +294,7 @@ async fn the_process_list_separates_what_is_running_from_what_just_ran() {
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     let modal = Modal::Processes {
-        registry: Arc::clone(&processes),
+        rows: processes.snapshot(),
         selected: 0,
     };
     let rendered = draw(90, 14, |frame| {
@@ -325,11 +325,10 @@ async fn the_process_list_separates_what_is_running_from_what_just_ran() {
     running.await.expect("the sleep");
 }
 
-#[tokio::test]
-async fn an_empty_process_list_says_so() {
-    let processes = std::sync::Arc::new(exec::Registry::new());
+#[test]
+fn an_empty_process_list_says_so() {
     let modal = Modal::Processes {
-        registry: processes,
+        rows: Vec::new(),
         selected: 0,
     };
 

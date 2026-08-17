@@ -578,7 +578,7 @@ impl App {
         match name {
             "ps" => {
                 self.modal = Some(Modal::Processes {
-                    registry: Arc::clone(&self.processes),
+                    rows: self.processes.snapshot(),
                     selected: 0,
                 });
                 true
@@ -1005,12 +1005,24 @@ async fn drive(
                 }
             }
             // A repaint tick, so a streaming reply animates rather than
-            // redrawing once per token.
-            () = tokio::time::sleep(FRAME), if app.status.running => dirty = true,
+            // redrawing once per token. It is also when the download meter
+            // ages: the status line reads the meter and never the clock.
+            () = tokio::time::sleep(FRAME), if app.status.running => {
+                app.status.download.prune(Instant::now());
+                dirty = true;
+            }
             // The process list counts elapsed time, which has to keep moving
-            // even with an idle agent and nothing else arriving.
+            // even with an idle agent and nothing else arriving. The snapshot
+            // is taken here rather than while drawing: reading the registry
+            // takes a lock, and a frame must not wait on one.
             () = tokio::time::sleep(PS_REFRESH),
-                if matches!(app.modal, Some(Modal::Processes { .. })) => dirty = true,
+                if matches!(app.modal, Some(Modal::Processes { .. })) =>
+            {
+                if let Some(Modal::Processes { rows, .. }) = &mut app.modal {
+                    *rows = app.processes.snapshot();
+                }
+                dirty = true;
+            }
             // The plugins' tick. Dispatched off the loop, because a hook that
             // reaches for `exec` or `http` blocks on the plugin worker and the
             // loop that draws the screen must never wait on that.
@@ -1499,7 +1511,7 @@ mod tests {
         // The meter counts the chunk bytes: prose, reasoning and tool-call
         // argument deltas alike.
         assert_eq!(app.status.download.bytes(), 5 + 8 + 40);
-        assert!(app.status.download.rate_kb_s(Instant::now()).is_some());
+        assert!(app.status.download.rate_kb_s().is_some());
     }
 
     #[test]
@@ -1516,7 +1528,7 @@ mod tests {
             error: None,
         });
         assert_eq!(app.status.download.bytes(), 0);
-        assert!(app.status.download.rate_kb_s(Instant::now()).is_none());
+        assert!(app.status.download.rate_kb_s().is_none());
     }
 
     /// The whole streaming path, from protocol events to the transcript: a
