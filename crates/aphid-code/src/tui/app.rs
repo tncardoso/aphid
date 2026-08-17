@@ -62,6 +62,9 @@ const PS_REFRESH: Duration = Duration::from_millis(250);
 /// keyboard page step because a wheel sends many events in quick succession.
 const MOUSE_SCROLL_LINES: usize = 3;
 
+/// How many transcript lines PageUp and PageDown move.
+const PAGE_LINES: usize = 10;
+
 type Screen = Terminal<CrosstermBackend<Stdout>>;
 
 /// A run in flight, plus the agent it borrowed.
@@ -307,9 +310,9 @@ impl App {
                     };
                     self.surface_mouse(button, mouse.column, mouse.row, None);
                 } else if mouse.kind == MouseEventKind::ScrollUp {
-                    self.view.scroll = self.view.scroll.saturating_add(MOUSE_SCROLL_LINES);
+                    self.view.scroll_up(MOUSE_SCROLL_LINES);
                 } else {
-                    self.view.scroll = self.view.scroll.saturating_sub(MOUSE_SCROLL_LINES);
+                    self.view.scroll_down(MOUSE_SCROLL_LINES);
                 }
             }
             MouseEventKind::Down(_) => {
@@ -1108,8 +1111,8 @@ fn handle_key(app: &mut App, key: KeyEvent, agent: Option<&mut Agent>) {
                 app.input.clear();
             }
         }
-        Action::ScrollUp => app.view.scroll = app.view.scroll.saturating_add(10),
-        Action::ScrollDown => app.view.scroll = app.view.scroll.saturating_sub(10),
+        Action::ScrollUp => app.view.scroll_up(PAGE_LINES),
+        Action::ScrollDown => app.view.scroll_down(PAGE_LINES),
         Action::ToggleThinking => app.view.show_thinking = !app.view.show_thinking,
         Action::Bang(command) => {
             // No agent involved, so a `!` command works mid-run too, like
@@ -1597,35 +1600,48 @@ mod tests {
         );
     }
 
+    /// A transcript long enough to have somewhere to scroll to, already laid
+    /// out once: a wheel step means nothing until the pane has a size.
+    fn scrollable(app: &mut App) -> usize {
+        for number in 0..40 {
+            app.view.push_notice(format!("notice {number}"));
+        }
+        app.view.layout(40, 10).top
+    }
+
     #[test]
     fn mouse_wheel_scrolls_the_transcript() {
         let agent = agent_with(vec![Turn::text("unused")]);
         let mut app = app_for(&agent);
+        let bottom = scrollable(&mut app);
 
         app.apply(UiEvent::Mouse(mouse(MouseEventKind::ScrollUp)));
-        assert_eq!(app.view.scroll, MOUSE_SCROLL_LINES);
+        assert_eq!(app.view.layout(40, 10).top, bottom - MOUSE_SCROLL_LINES);
 
         app.apply(UiEvent::Mouse(mouse(MouseEventKind::ScrollDown)));
-        assert_eq!(app.view.scroll, 0);
+        assert_eq!(app.view.layout(40, 10).top, bottom);
     }
 
     #[test]
     fn mouse_wheel_down_saturates_at_the_newest_message() {
         let agent = agent_with(vec![Turn::text("unused")]);
         let mut app = app_for(&agent);
+        let bottom = scrollable(&mut app);
 
         app.apply(UiEvent::Mouse(mouse(MouseEventKind::ScrollDown)));
         app.apply(UiEvent::Mouse(mouse(MouseEventKind::ScrollDown)));
-        assert_eq!(app.view.scroll, 0);
+        assert_eq!(app.view.layout(40, 10).top, bottom);
+        assert!(!app.view.scrolled());
     }
 
     #[test]
     fn non_wheel_mouse_events_do_not_scroll() {
         let agent = agent_with(vec![Turn::text("unused")]);
         let mut app = app_for(&agent);
+        scrollable(&mut app);
 
         app.apply(UiEvent::Mouse(mouse(MouseEventKind::Moved)));
-        assert_eq!(app.view.scroll, 0);
+        assert!(!app.view.scrolled());
     }
 
     #[test]

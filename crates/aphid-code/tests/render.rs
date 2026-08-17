@@ -460,7 +460,7 @@ fn scrolling_up_holds_the_viewport_while_content_arrives_below() {
     }
     let _ = view.visible_lines(40, 10);
 
-    view.scroll = 12;
+    view.scroll_up(12);
     let parked = painted(&mut view, 40, 10);
 
     for number in 40..46 {

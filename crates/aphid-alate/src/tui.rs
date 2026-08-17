@@ -46,6 +46,9 @@ const FRAME: Duration = Duration::from_millis(33);
 /// The input box grows to this many rows, then scrolls.
 const MAX_INPUT_ROWS: u16 = 4;
 
+/// How many transcript lines PageUp and PageDown move.
+const PAGE_LINES: usize = 10;
+
 const HELP: &str = "\
 /sessions      what conversations there are, running and stored
 /session <id>  look at one of them
@@ -392,14 +395,8 @@ async fn handle_key(app: &mut App, key: KeyEvent, client: &mut Client) -> std::i
                 app.input.clear();
             }
         }
-        Action::ScrollUp => {
-            let view = app.view();
-            view.scroll = view.scroll.saturating_add(10);
-        }
-        Action::ScrollDown => {
-            let view = app.view();
-            view.scroll = view.scroll.saturating_sub(10);
-        }
+        Action::ScrollUp => app.view().scroll_up(PAGE_LINES),
+        Action::ScrollDown => app.view().scroll_down(PAGE_LINES),
         Action::ToggleThinking => {
             let view = app.view();
             view.show_thinking = !view.show_thinking;
