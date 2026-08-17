@@ -15,35 +15,18 @@
 //! one colony and closing any of them leaves it alone.
 //!
 //! [`Input`]: aphid_code::tui::input::Input
-//! [`spawn_input_thread`]: aphid_code::tui::event::spawn_input_thread
+//! [`spawn_input_thread`]: aphid_code::tui::runtime::spawn_input_thread
 
 pub mod app;
 pub mod chats;
 pub mod log;
 mod render;
 
-use std::io::Stdout;
-
-use aphid_code::tui::event::{UiEvent, spawn_input_thread};
-use aphid_code::tui::input::{Action, Input};
+use aphid_code::tui::runtime::{self, Draw, Effects, Hub, restore, setup};
 use aphid_nostr::nostr::key::Keys;
-use ratatui::crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, KeyCode, KeyEvent, KeyModifiers,
-};
-use ratatui::crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
-use ratatui::crossterm::{ExecutableCommand, cursor};
-use ratatui::prelude::CrosstermBackend;
-use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::client::Client;
-use app::{App, Send};
-
-type Screen = ratatui::Terminal<CrosstermBackend<Stdout>>;
-
-/// How many rows a page moves the log by.
-const PAGE: usize = 10;
+use app::{App, Effect, Msg};
 
 /// What to open a terminal on.
 pub struct Options {
@@ -86,161 +69,85 @@ pub async fn run(options: Options) -> std::io::Result<()> {
         post(&client, message).await;
     }
 
-    let (events, mut keys) = aphid_code::tui::runtime::channel();
-    spawn_input_thread(&events);
+    let client = std::sync::Arc::new(client);
+    let (hub, mut inbox) = runtime::channel();
+    // A colony has no panels and nothing to click, so a mouse event is nothing
+    // it can answer.
+    runtime::spawn_input_thread(hub.clone(), |event| match event {
+        ratatui::crossterm::event::Event::Key(key) => Some(Msg::Key(key)),
+        ratatui::crossterm::event::Event::Paste(text) => Some(Msg::Paste(text)),
+        ratatui::crossterm::event::Event::Resize(_, _) => Some(Msg::Resize),
+        _ => None,
+    });
+    spawn_reader(std::sync::Arc::clone(&client), hub.clone());
 
-    let mut input = Input::default();
-    input.set_prompt(false);
-
-    let (mut terminal, ()) = setup()?;
-    let result = drive(&mut terminal, &mut app, &mut input, &client, &mut keys).await;
-    restore(&mut terminal)?;
+    let mut effects = Relay::spawn(client);
+    let (mut terminal, kitty) = setup()?;
+    let result = runtime::run(&mut app, &mut effects, &mut terminal, &hub, &mut inbox).await;
+    restore(&mut terminal, kitty)?;
     result
 }
 
-async fn drive(
-    terminal: &mut Screen,
-    app: &mut App,
-    input: &mut Input,
-    client: &Client,
-    keys: &mut UnboundedReceiver<UiEvent>,
-) -> std::io::Result<()> {
-    terminal.draw(|frame| render::draw(frame, app, input))?;
-
-    // Whether the colony has hung up. A closed connection answers `None` at
-    // once and for ever, so the arm has to be turned off rather than left to
-    // spin. The terminal stays open on what it already has: the person reads
-    // the last of it and leaves when they are ready, instead of the window
-    // going out at the moment it has something to say.
-    let mut gone = false;
-
-    loop {
-        let mut sending = Vec::new();
-
-        tokio::select! {
-            message = client.recv(), if !gone => match message {
-                Some(message) => sending = app.apply(&message),
-                None => {
-                    gone = true;
-                    app.note("── the colony stopped ──");
-                }
-            },
-            event = keys.recv() => match event {
-                None => break,
-                Some(UiEvent::Key(key)) => sending = key_pressed(app, input, key),
-                Some(UiEvent::Paste(text)) => input.paste(&text),
-                Some(_) => {}
-            },
+/// Turn everything the colony says into messages, until it stops saying it.
+fn spawn_reader(client: std::sync::Arc<Client>, hub: Hub<Msg>) {
+    tokio::spawn(async move {
+        loop {
+            let Some(message) = client.recv().await else {
+                // A closed connection answers `None` at once and for ever, so
+                // this says so once and stops rather than spinning.
+                hub.send(Msg::Gone);
+                return;
+            };
+            if !hub.send(Msg::Relay(Box::new(message))) {
+                return;
+            }
         }
+    });
+}
 
-        for message in sending {
-            post(client, message).await;
-        }
-        if app.quit {
-            break;
-        }
-        terminal.draw(|frame| render::draw(frame, app, input))?;
+/// The connection, and the task that writes to it.
+///
+/// Queued rather than awaited: publishing is waiting, and the loop that draws
+/// the screen does not wait for anything.
+struct Relay {
+    sending: tokio::sync::mpsc::UnboundedSender<Effect>,
+}
+
+impl Relay {
+    fn spawn(client: std::sync::Arc<Client>) -> Self {
+        let (sending, mut inbox) = tokio::sync::mpsc::unbounded_channel::<Effect>();
+        tokio::spawn(async move {
+            while let Some(message) = inbox.recv().await {
+                post(&client, message).await;
+            }
+        });
+        Self { sending }
     }
-    Ok(())
+}
+
+impl Effects for Relay {
+    type Program = App;
+
+    fn perform(&mut self, effect: Effect, _hub: &Hub<Msg>) {
+        let _ = self.sending.send(effect);
+    }
+}
+
+impl Draw for App {
+    // Nothing here is wrapped or cached: a chat log is short lines that are
+    // already lines, so there is nothing a frame could usefully remember.
+    type Cache = ();
+
+    fn draw(&self, frame: &mut ratatui::Frame<'_>, (): &mut ()) {
+        render::draw(frame, self, &self.input);
+    }
 }
 
 /// Send one thing, and say so in the log if it will not go.
-async fn post(client: &Client, message: Send) {
+async fn post(client: &Client, message: Effect) {
     let _ = match message {
-        Send::Publish(event) => client.publish(*event).await,
-        Send::Subscribe(id, filters) => client.subscribe(&id, filters).await,
-        Send::Unsubscribe(id) => client.unsubscribe(&id).await,
+        Effect::Publish(event) => client.publish(*event).await,
+        Effect::Subscribe(id, filters) => client.subscribe(&id, filters).await,
+        Effect::Unsubscribe(id) => client.unsubscribe(&id).await,
     };
-}
-
-/// One keypress.
-///
-/// Tab and BackTab move in the nav and are taken **before** the editor sees
-/// them, so typing never moves the selection. Everything else is the editor's,
-/// which is what makes this feel like the rest of aphid.
-fn key_pressed(app: &mut App, input: &mut Input, key: KeyEvent) -> Vec<Send> {
-    match key.code {
-        KeyCode::Tab => {
-            app.chats.step(1);
-            return Vec::new();
-        }
-        KeyCode::BackTab => {
-            app.chats.step(-1);
-            return Vec::new();
-        }
-        // Shift and an arrow moves in the nav too, for anybody whose terminal
-        // eats BackTab.
-        KeyCode::Down | KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            app.chats
-                .step(if key.code == KeyCode::Down { 1 } else { -1 });
-            return Vec::new();
-        }
-        _ => {}
-    }
-
-    match input.handle(key) {
-        Action::Submit(line) => app.typed(&line),
-        // A colony has no shell, so a `!` line goes into the chat as a
-        // message, exactly as it did before `!` meant something to the coding
-        // agent's terminal.
-        Action::Bang(command) => app.typed(&format!("!{command}")),
-        Action::Quit => {
-            app.quit = true;
-            Vec::new()
-        }
-        Action::ScrollUp => {
-            if let Some(id) = app.chats.selected().cloned() {
-                app.logs.entry(id).or_default().scroll_up(PAGE);
-            }
-            // At the top of a log there may be more behind it.
-            app.backfill().into_iter().collect()
-        }
-        Action::ScrollDown => {
-            if let Some(id) = app.chats.selected().cloned() {
-                app.logs.entry(id).or_default().scroll_down(PAGE);
-            }
-            Vec::new()
-        }
-        // Ctrl-T means "show the working" in the coding agent. The nearest
-        // thing a chat has is the times.
-        Action::ToggleThinking => {
-            app.show_time = !app.show_time;
-            Vec::new()
-        }
-        // Ctrl-P cycles models where there are models. A colony has none, and
-        // saying so is better than doing nothing.
-        Action::CycleModel => {
-            app.note("a colony runs no model; Ctrl-T shows or hides the times");
-            Vec::new()
-        }
-        Action::Cancel | Action::None => Vec::new(),
-    }
-}
-
-fn setup() -> std::io::Result<(Screen, ())> {
-    // Restore the terminal even when something panics, so a crash does not
-    // leave the shell in raw mode.
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let _ = disable_raw_mode();
-        let _ = std::io::stdout().execute(LeaveAlternateScreen);
-        previous(info);
-    }));
-
-    enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    stdout.execute(EnterAlternateScreen)?;
-    // So a pasted block lands in the input box whole, rather than as one
-    // submitted line per newline. Not every console has the mode; the ones
-    // that refuse it behave as they always did.
-    let _ = stdout.execute(EnableBracketedPaste);
-    Ok((ratatui::Terminal::new(CrosstermBackend::new(stdout))?, ()))
-}
-
-fn restore(terminal: &mut Screen) -> std::io::Result<()> {
-    let _ = terminal.backend_mut().execute(DisableBracketedPaste);
-    disable_raw_mode()?;
-    terminal.backend_mut().execute(LeaveAlternateScreen)?;
-    terminal.backend_mut().execute(cursor::Show)?;
-    Ok(())
 }

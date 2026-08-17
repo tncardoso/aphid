@@ -7,7 +7,7 @@
 
 #![cfg(feature = "tui")]
 
-use aphid_colony::tui::app::{App, Send};
+use aphid_colony::tui::app::{App, Effect};
 use aphid_colony::tui::chats::Kind as ChatKind;
 use aphid_nostr::nostr::event::{Event, EventBuilder, FinalizeEvent, Kind, Tag};
 use aphid_nostr::nostr::key::Keys;
@@ -56,11 +56,11 @@ fn named(keys: &Keys, name: &str) -> Event {
 }
 
 /// The single event a batch of sends published, insisting there was one.
-fn published(sending: Vec<Send>) -> Event {
+fn published(sending: Vec<Effect>) -> Event {
     let mut events: Vec<Event> = sending
         .into_iter()
         .filter_map(|send| match send {
-            Send::Publish(event) => Some(*event),
+            Effect::Publish(event) => Some(*event),
             _ => None,
         })
         .collect();
@@ -71,7 +71,7 @@ fn published(sending: Vec<Send>) -> Event {
 #[test]
 fn the_opening_request_asks_for_everything_it_draws() {
     let me = Keys::generate();
-    let Send::Subscribe(id, filters) = app(&me).opening() else {
+    let Effect::Subscribe(id, filters) = app(&me).opening() else {
         panic!("the terminal opens with a REQ");
     };
     assert_eq!(id, "colony");
@@ -397,7 +397,7 @@ fn a_closed_subscription_is_asked_for_again() {
         SubscriptionId::new("colony"),
         "error: the colony fell behind by 4; ask again",
     ));
-    assert!(matches!(again.as_slice(), [Send::Subscribe(id, _)] if id == "colony"));
+    assert!(matches!(again.as_slice(), [Effect::Subscribe(id, _)] if id == "colony"));
 }
 
 #[test]
@@ -432,7 +432,7 @@ fn a_backfill_asks_for_what_came_before_the_top() {
     app.apply(&arriving(said(&other, &id("general"), "oldest", 100)));
     app.apply(&arriving(said(&other, &id("general"), "newest", 200)));
 
-    let Some(Send::Subscribe(id, filters)) = app.backfill() else {
+    let Some(Effect::Subscribe(id, filters)) = app.backfill() else {
         panic!("there is more behind it");
     };
     assert_eq!(id, "backfill");
@@ -454,4 +454,119 @@ fn a_group_metadata_event_is_enough_to_draw_a_row() {
 
     app.apply(&arriving(metadata));
     assert_eq!(app.chats.rows()[0].id, id("design"));
+}
+
+// ---------------------------------------------------------------------------
+// Keys, now that the editor is part of the model.
+//
+// A keypress used to be handled by a free function that took the app and the
+// editor apart, so a test could not press one. It goes through `update` now,
+// which is the same road everything else takes.
+// ---------------------------------------------------------------------------
+
+use aphid_code::tui::runtime::Program;
+use aphid_colony::tui::app::Msg;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+fn press(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Vec<Effect> {
+    app.update(Msg::Key(KeyEvent::new(code, modifiers)))
+        .into_effects()
+}
+
+fn type_line(app: &mut App, line: &str) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    for c in line.chars() {
+        effects.extend(press(app, KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    effects.extend(press(app, KeyCode::Enter, KeyModifiers::NONE));
+    effects
+}
+
+/// A colony with two groups to move between.
+fn with_two_groups(me: &Keys) -> App {
+    let relay = Keys::generate();
+    let mut app = app(me);
+    for name in ["design", "general"] {
+        let group = aphid_nostr::Group::create(id(name), relay.public_key(), Timestamp::now());
+        let metadata = group::metadata(&group).finalize(&relay).expect("signs");
+        app.apply(&arriving(metadata));
+    }
+    app
+}
+
+#[test]
+fn tab_moves_in_the_nav_and_typing_does_not() {
+    let me = Keys::generate();
+    let mut app = with_two_groups(&me);
+    let first = app.chats.selected().cloned();
+
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    let after_tab = app.chats.selected().cloned();
+    assert_ne!(first, after_tab, "Tab moves the selection");
+
+    for c in "hello".chars() {
+        press(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
+    }
+    assert_eq!(
+        app.chats.selected().cloned(),
+        after_tab,
+        "typing leaves the selection where it was"
+    );
+}
+
+#[test]
+fn shift_and_an_arrow_moves_in_the_nav_too() {
+    let me = Keys::generate();
+    let mut app = with_two_groups(&me);
+    let first = app.chats.selected().cloned();
+
+    // For anybody whose terminal eats BackTab.
+    press(&mut app, KeyCode::Down, KeyModifiers::SHIFT);
+
+    assert_ne!(app.chats.selected().cloned(), first);
+}
+
+#[test]
+fn a_typed_line_is_published_and_nothing_else() {
+    let me = Keys::generate();
+    let mut app = with_two_groups(&me);
+
+    let effects = type_line(&mut app, "hello everyone");
+
+    assert!(
+        matches!(effects.as_slice(), [Effect::Publish(_)]),
+        "{effects:?}"
+    );
+}
+
+#[test]
+fn ctrl_t_shows_and_hides_the_times() {
+    let me = Keys::generate();
+    let mut app = with_two_groups(&me);
+    let before = app.show_time;
+
+    assert!(press(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL).is_empty());
+
+    assert_ne!(app.show_time, before);
+}
+
+#[test]
+fn ctrl_c_closes_the_terminal() {
+    let me = Keys::generate();
+    let mut app = with_two_groups(&me);
+
+    press(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+
+    assert!(app.done());
+}
+
+#[test]
+fn the_colony_hanging_up_is_said_rather_than_silent() {
+    let me = Keys::generate();
+    let mut app = with_two_groups(&me);
+
+    app.update(Msg::Gone);
+
+    // It stays open on what it already has, with a line saying why.
+    assert!(!app.done(), "the reader leaves when they are ready");
 }
