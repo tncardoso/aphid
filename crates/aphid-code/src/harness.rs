@@ -23,6 +23,10 @@ pub struct HarnessOptions {
     pub workspace: Workspace,
     /// Where the user actually is, which may be below the workspace root.
     pub cwd: PathBuf,
+    /// Where the global `AGENTS.md` and skills live. `None` skips them, which
+    /// is what a test wants: discovery then sees only the workspace, whatever
+    /// the machine holds.
+    pub home: Option<PathBuf>,
     pub model: Model,
     pub thinking: Option<ThinkingLevel>,
     /// Replaces the built-in instructions.
@@ -58,6 +62,7 @@ impl HarnessOptions {
         Self {
             workspace,
             cwd,
+            home: context::home_dir(),
             model,
             thinking: Some(ThinkingLevel::Medium),
             system: None,
@@ -94,6 +99,7 @@ pub fn build(options: HarnessOptions) -> Harness {
     let HarnessOptions {
         workspace,
         cwd,
+        home,
         model,
         thinking,
         system,
@@ -113,7 +119,6 @@ pub fn build(options: HarnessOptions) -> Harness {
     let mut notes = Vec::new();
 
     let (context_files, skills, diagnostics) = if load_context {
-        let home = context::home_dir();
         let files = context::discover(&workspace, &cwd, home.as_deref());
         let (skills, diagnostics) = skills::discover(&workspace, home.as_deref());
         (files, skills, diagnostics)

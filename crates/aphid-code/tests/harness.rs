@@ -56,6 +56,9 @@ impl Temp {
     fn options(&self) -> HarnessOptions {
         let mut options = HarnessOptions::new(Workspace::new(&self.root), test_model("test-model"));
         options.cwd = self.root.clone();
+        // Discovery must see this workspace and nothing else. With the real home
+        // directory the result changes with whatever the machine holds.
+        options.home = None;
         options
     }
 }
@@ -176,6 +179,48 @@ async fn the_system_prompt_carries_the_project_context_and_skills() {
 
     let system = harness.agent.transcript().get(0).expect("system message");
     assert_eq!(system.role(), Role::System);
+}
+
+#[tokio::test]
+async fn the_home_directory_is_the_one_the_caller_names() {
+    let temp = Temp::new();
+    temp.write(
+        "project/.aphid/skills/release/SKILL.md",
+        "---\ndescription: How to cut a release\n---\nbody\n",
+    );
+    temp.write(
+        "home/.aphid/AGENTS.md",
+        "Global rules the caller asked for.",
+    );
+    temp.write(
+        "home/.agents/skills/grilling.md",
+        "---\ndescription: How to grill\n---\nbody\n",
+    );
+
+    let (backend, _script) = scripted([Turn::text("ok")]);
+    let mut options = HarnessOptions::new(
+        Workspace::new(temp.root.join("project")),
+        test_model("test-model"),
+    );
+    options.cwd = temp.root.join("project");
+    options.home = Some(temp.root.join("home"));
+    options.stream_fn = Some(backend);
+    let harness = harness::build(options);
+
+    // The named home was read, and only it: nothing came from the machine the
+    // test runs on.
+    let names: Vec<&str> = harness
+        .skills
+        .iter()
+        .map(|skill| skill.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["grilling", "release"]);
+    let contents: Vec<&str> = harness
+        .context_files
+        .iter()
+        .map(|file| file.content.as_str())
+        .collect();
+    assert_eq!(contents, vec!["Global rules the caller asked for."]);
 }
 
 #[tokio::test]
