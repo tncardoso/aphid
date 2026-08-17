@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use aphid_agent::{Agent, AgentHandle, RunOutcome, exec};
+use aphid_agent::{Agent, AgentHandle, exec};
 use aphid_core::{Model, ThinkingLevel, Transcript};
 use aphid_plugin::{
     Action as PluginAction, Job as PluginJob, Placement, PluginHub, Report as PluginReport,
@@ -57,9 +57,6 @@ const MOUSE_SCROLL_LINES: usize = 3;
 
 /// How many transcript lines PageUp and PageDown move.
 const PAGE_LINES: usize = 10;
-
-/// A run in flight, plus the agent it borrowed.
-type Running = tokio::task::JoinHandle<(Agent, RunOutcome)>;
 
 /// Everything the UI holds.
 pub struct App {
@@ -1157,8 +1154,13 @@ pub async fn run(
 /// run's own task while one is in flight, which is why no update can reach for
 /// it and why every use of it is an effect.
 struct Executor {
-    idle: Option<Agent>,
-    running: Option<Running>,
+    /// The agent, parked between runs.
+    ///
+    /// Behind a lock because the run's own task is what puts it back: nothing
+    /// else can, and `perform` cannot wait for it.
+    idle: Arc<Mutex<Option<Agent>>>,
+    /// The task watching the run, kept so shutdown can stop watching.
+    running: Option<tokio::task::JoinHandle<()>>,
     /// What was asked for while the agent was away, applied when it comes
     /// back. A `/model` chosen mid-run used to be dropped outright, and a
     /// `/clear` was sent to the model as the word `/clear`.
@@ -1178,7 +1180,7 @@ impl Executor {
     fn new(agent: Agent, app: &App, hub: Hub<Msg>) -> Self {
         Self {
             handle: agent.handle(),
-            idle: Some(agent),
+            idle: Arc::new(Mutex::new(Some(agent))),
             running: None,
             pending: Vec::new(),
             processes: Arc::clone(&app.processes),
@@ -1200,7 +1202,13 @@ impl Executor {
             // The three that need the agent itself. Each is held when it is
             // away and applied the moment it is back, so nothing is lost.
             held @ (Effect::SetModel(_) | Effect::SetThinking(_) | Effect::ClearTranscript) => {
-                match self.idle.as_mut() {
+                match self
+                    .idle
+                    .lock()
+                    .ok()
+                    .as_deref_mut()
+                    .and_then(Option::as_mut)
+                {
                     Some(agent) => apply_to_agent(agent, held, &self.hub),
                     None => self.pending.push(held),
                 }
@@ -1251,16 +1259,45 @@ impl Executor {
     }
 
     fn start_run(&mut self, prompt: String) {
-        let Some(mut agent) = self.idle.take() else {
+        let Some(mut agent) = self.idle.lock().ok().and_then(|mut idle| idle.take()) else {
+            // Still away with the last run. The queue is pumped again when it
+            // reports back, so the prompt is not lost.
             return;
         };
         // Whatever arrived while the last run held it.
         for held in std::mem::take(&mut self.pending) {
             apply_to_agent(&mut agent, held, &self.hub);
         }
-        self.running = Some(tokio::spawn(async move {
+
+        let work = tokio::spawn(async move {
             let outcome = agent.prompt(&prompt).await;
             (agent, outcome)
+        });
+
+        // A task of its own, because `perform` cannot wait and the agent has
+        // to come back: without this it goes into the run and stays there, and
+        // every later prompt is accepted and never sent.
+        let slot = Arc::clone(&self.idle);
+        let hub = self.hub.clone();
+        self.running = Some(tokio::spawn(async move {
+            match work.await {
+                Ok((agent, outcome)) => {
+                    // Back in the slot *before* the news goes out, so a
+                    // `RunEnded` handled on the very next pass finds an idle
+                    // agent to start the queue with.
+                    if let Ok(mut slot) = slot.lock() {
+                        *slot = Some(agent);
+                    }
+                    hub.send(Msg::RunEnded {
+                        stop: outcome.stop,
+                        turns: outcome.turns,
+                        error: outcome.error,
+                    });
+                }
+                Err(error) => {
+                    hub.send(Msg::RunFailed(error.to_string()));
+                }
+            }
         }));
     }
 }
@@ -1497,12 +1534,34 @@ mod tests {
         }
     }
 
+    /// The agent, when it is not away with a run.
+    fn parked(ex: &Executor) -> Option<std::sync::MutexGuard<'_, Option<Agent>>> {
+        let slot = ex.idle.lock().expect("the slot");
+        slot.is_some().then_some(slot)
+    }
+
+    /// Wait for the run to report back, and apply what it said.
+    async fn settle(
+        app: &mut App,
+        ex: &mut Executor,
+        inbox: &mut tokio::sync::mpsc::UnboundedReceiver<Msg>,
+    ) -> Msg {
+        let msg = tokio::time::timeout(Duration::from_secs(5), inbox.recv())
+            .await
+            .expect("the run should report back")
+            .expect("a message");
+        for effect in app.update(msg.clone()).into_effects() {
+            ex.perform(effect);
+        }
+        msg
+    }
+
     /// An executor with nothing but the agent in it, for the few tests that
     /// are about the hand-off rather than about the model.
     fn executor(agent: Agent, hub: Hub<Msg>) -> Executor {
         Executor {
             handle: agent.handle(),
-            idle: Some(agent),
+            idle: Arc::new(Mutex::new(Some(agent))),
             running: None,
             pending: Vec::new(),
             processes: Arc::new(exec::Registry::new()),
@@ -1530,50 +1589,55 @@ mod tests {
     async fn a_run_the_update_asked_for_actually_happens() {
         let agent = agent_with(vec![Turn::text("hello back")]);
         let mut app = app_for(&agent);
-        let (hub, _inbox) = crate::tui::runtime::channel();
-        let mut ex = executor(agent_with(vec![Turn::text("hello back")]), hub);
+        let (hub, mut inbox) = crate::tui::runtime::channel();
+        let mut ex = executor(agent, hub);
 
         for effect in type_line(&mut app, "hello") {
             ex.perform(effect);
         }
+        settle(&mut app, &mut ex, &mut inbox).await;
 
-        let (agent, outcome) = ex.running.expect("a run").await.expect("no panic");
-        assert_eq!(outcome.turns, 1);
+        let parked = parked(&ex).expect("the agent came back");
+        let agent = parked.as_ref().expect("the agent");
         // system, user, assistant
         assert_eq!(agent.transcript().len(), 3);
         assert_eq!(agent.transcript().get(1).unwrap().role(), Role::User);
     }
 
+    /// The regression: the agent went into the run's task and nothing ever
+    /// took it back out, so the second line typed in a session was accepted,
+    /// marked as running, and never sent.
     #[tokio::test]
-    async fn the_agent_comes_back_for_the_next_run() {
+    async fn a_second_line_is_sent_without_anybody_handing_the_agent_back() {
         let agent = agent_with(vec![Turn::text("first"), Turn::text("second")]);
         let mut app = app_for(&agent);
-        let (hub, _inbox) = crate::tui::runtime::channel();
+        let (hub, mut inbox) = crate::tui::runtime::channel();
         let mut ex = executor(agent, hub);
 
         for effect in type_line(&mut app, "one") {
             ex.perform(effect);
         }
-        let (agent, _) = ex.running.take().expect("a run").await.expect("no panic");
-        ex.idle = Some(agent);
 
-        for effect in app
-            .update(Msg::RunEnded {
-                stop: aphid_core::StopReason::Stop,
-                turns: 1,
-                error: None,
-            })
-            .into_effects()
-        {
+        // Nothing here puts the agent back: the executor has to, and has to
+        // say so, or the queue is stuck for the rest of the session.
+        let ended = settle(&mut app, &mut ex, &mut inbox).await;
+        assert!(matches!(ended, Msg::RunEnded { .. }), "{ended:?}");
+
+        let asked = type_line(&mut app, "two");
+        assert_eq!(
+            asked,
+            [Effect::StartRun("two".to_owned())],
+            "the second line asks for a run"
+        );
+        for effect in asked {
             ex.perform(effect);
         }
-        for effect in type_line(&mut app, "two") {
-            ex.perform(effect);
-        }
+        settle(&mut app, &mut ex, &mut inbox).await;
 
-        let (agent, _) = ex.running.expect("a second run").await.expect("no panic");
+        let parked = parked(&ex).expect("the agent came back a second time");
+        let agent = parked.as_ref().expect("the agent");
         // system, user, assistant, user, assistant
-        assert_eq!(agent.transcript().len(), 5);
+        assert_eq!(agent.transcript().len(), 5, "both lines reached the model");
     }
 
     #[test]
@@ -2025,7 +2089,7 @@ mod tests {
         let mut ex = executor(agent, hub);
 
         // Away with a run.
-        let held = ex.idle.take().expect("the agent");
+        let held = ex.idle.lock().expect("the slot").take().expect("the agent");
         app.status.running = true;
 
         let asked = type_line(&mut app, "/think high");
@@ -2039,13 +2103,12 @@ mod tests {
         assert_eq!(ex.pending.len(), 1, "held for the agent, not dropped");
 
         // It comes back, and what was waiting is applied before the next run.
-        ex.idle = Some(held);
+        *ex.idle.lock().expect("the slot") = Some(held);
         app.status.running = false;
         for effect in type_line(&mut app, "hello") {
             ex.perform(effect);
         }
         assert!(ex.pending.is_empty(), "the wait is over");
-        let _ = ex.running.expect("a run").await;
     }
 
     #[tokio::test]

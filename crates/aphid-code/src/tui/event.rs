@@ -6,8 +6,7 @@
 //! `crossterm::event::read` blocks.
 
 use aphid_agent::{
-    Cx, Flow, Guard, Interest, PendingCall, Plugin, ResultCx, RunOutcome, StreamCx, ToolOutcome,
-    TurnSummary,
+    Cx, Flow, Guard, Interest, PendingCall, Plugin, ResultCx, StreamCx, ToolOutcome, TurnSummary,
 };
 use aphid_core::{BlockKind, ContentRef, Event};
 use ratatui::crossterm::event;
@@ -43,6 +42,10 @@ impl aphid_plugin::Sink for UiSink {
 }
 
 /// Forwards the run to the app loop.
+///
+/// Not the end of it, though: the run's own task says that, because only it
+/// knows that the agent has been handed back. A hook cannot know, because it
+/// runs inside the run.
 pub struct UiPlugin {
     events: Hub<Msg>,
 }
@@ -72,7 +75,6 @@ impl Plugin for UiPlugin {
             | Interest::TOOL_PROGRESS
             | Interest::TOOL_RESULT
             | Interest::TURN_END
-            | Interest::RUN_END
     }
 
     fn on_turn_start(&self, _cx: &mut Cx<'_>) {
@@ -147,14 +149,6 @@ impl Plugin for UiPlugin {
             error: turn.error.clone(),
         });
         Flow::Continue
-    }
-
-    fn on_run_end(&self, _cx: &mut Cx<'_>, outcome: &RunOutcome) {
-        self.send(Msg::RunEnded {
-            stop: outcome.stop,
-            turns: outcome.turns,
-            error: outcome.error.clone(),
-        });
     }
 }
 
