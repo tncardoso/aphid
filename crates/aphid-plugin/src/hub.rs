@@ -186,7 +186,21 @@ fn coalesce(queue: Vec<Job>) -> Vec<Job> {
 
 fn run(job: Job, host: &Arc<PluginHost>, panels: &mut Panels, report: &impl Fn(Report)) {
     match job {
-        Job::Tick => host.tick(),
+        Job::Tick => {
+            host.tick();
+            // And the surfaces that asked to hear it, each as a step of its
+            // own loop rather than a hook that reaches around it.
+            for (plugin, name) in host.ticking_surfaces() {
+                let actions = host.surface_event(&plugin, &name, SurfaceEvent::Tick);
+                if actions.as_ref().is_some_and(|actions| !actions.is_empty()) {
+                    report(Report::Surface {
+                        plugin,
+                        name,
+                        actions,
+                    });
+                }
+            }
+        }
         Job::Notice(text) => host.notice(&text),
         Job::Command { name, args } => {
             if let Some(actions) = host.run_command(&name, &args) {

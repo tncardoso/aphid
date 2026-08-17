@@ -13,19 +13,15 @@ before you start, add tasks as you identify them, mark each done as you finish \
 it, and clear it when you start over. Keep your answer short."
 }
 
-/// The whole state, with defaults filled in.
+/// The panel's own model. Its defaults come from the surface's `init`, so
+/// there is nothing to fill in here.
 fn store() {
-    let s = state();
-    #{
-        items: if "items" in s { s.items } else { [] },
-        next:  if "next"  in s { s.next }  else { 1 },
-        open:  if "open"  in s { s.open }  else { false }
-    }
+    surface_state("todo")
 }
 
-/// Replace the in-memory state. Nothing here is written to disk.
+/// Replace the panel's model. Nothing here is written to disk.
 fn remember(s) {
-    state(s);
+    surface_state("todo", s);
 }
 
 /// The list as markdown, pending first.
@@ -67,11 +63,10 @@ fn trimmed(text) {
 register_surface(#{
     name: "todo",
     placement: #{ kind: "side", side: "right" },
-    render: |s| {
-        let open = if "open" in s { s.open } else { false };
-        if !open { return (); }
-        let items = if "items" in s { s.items } else { [] };
-        #{ type: "text", text: format_todos(items) }
+    init: || #{ items: [], next: 1, open: false },
+    view: |s| {
+        if !s.open { return (); }
+        #{ type: "text", text: format_todos(s.items) }
     }
 });
 

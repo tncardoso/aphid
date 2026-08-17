@@ -89,7 +89,7 @@ fn two_calls_into_one_plugin_never_overlap() {
         register_surface(#{
             name: "panel",
             placement: #{ kind: "side", side: "right" },
-            render: |s| { enter(); leave(); #{ type: "text", text: "panel" } }
+            view: |s| { enter(); leave(); #{ type: "text", text: "panel" } }
         });
         register_command(#{ name: "poke", run: |args| { enter(); leave(); notice("poked") } });
         "#,
@@ -136,8 +136,14 @@ fn a_change_one_job_makes_is_what_the_next_one_reads() {
         register_surface(#{
             name: "panel",
             placement: #{ kind: "side", side: "right" },
-            render: |s| #{ type: "text", text: "count " + (if "count" in s { s.count } else { 0 }) }
+            // The count lives in the plugin's own state, which is what the
+            // tick writes; the panel reads it rather than holding its own.
+            view: |s| #{ type: "text", text: "count " + count() }
         });
+        fn count() {
+            let s = state();
+            if "count" in s { s.count } else { 0 }
+        }
         "#,
     );
     let (hub, reports) = hub(Arc::clone(&host));

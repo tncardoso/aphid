@@ -34,6 +34,14 @@ struct Inner {
     version: u64,
 }
 
+/// Where a surface's own model lives inside the plugin's state.
+///
+/// Under the plugin's map rather than beside it: a plugin's tools have to be
+/// able to read what its panel shows — the todo tool writes the very list the
+/// panel draws — and persistence, the atomic write and the version counter
+/// already work for the one map.
+const SURFACES: &str = "surfaces";
+
 impl Store {
     /// Load a plugin's state, if it has any on disk.
     ///
@@ -85,6 +93,47 @@ impl Store {
             inner.state = state;
             inner.version = inner.version.wrapping_add(1);
         }
+    }
+
+    /// One surface's own model.
+    #[must_use]
+    pub fn surface_get(&self, name: &str) -> Map {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|inner| {
+                inner
+                    .state
+                    .get(SURFACES)?
+                    .clone()
+                    .try_cast::<Map>()?
+                    .get(name)
+                    .cloned()
+            })
+            .and_then(|value| value.try_cast::<Map>())
+            .unwrap_or_default()
+    }
+
+    /// Replace one surface's model, keeping the rest of the plugin's state.
+    ///
+    /// In memory only, as [`Self::set_memory`] is. A panel that wants its
+    /// model to outlive the session says so with `save_state`, the same as
+    /// anything else: writing every panel's model to disk because it happens
+    /// to be a panel's would surprise the plugins that never asked.
+    pub fn surface_set(&self, name: &str, state: Map) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        let mut surfaces = inner
+            .state
+            .get(SURFACES)
+            .and_then(|value| value.clone().try_cast::<Map>())
+            .unwrap_or_default();
+        surfaces.insert(name.into(), rhai::Dynamic::from_map(state));
+        inner
+            .state
+            .insert(SURFACES.into(), rhai::Dynamic::from_map(surfaces));
+        inner.version = inner.version.wrapping_add(1);
     }
 
     /// The current state version.

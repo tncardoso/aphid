@@ -407,6 +407,22 @@ impl App {
                         SurfaceAction::Notice(text) => {
                             cmd.extend(self.notice(format!("{plugin}: {text}")));
                         }
+                        SurfaceAction::Prompt(text) => {
+                            self.scrollback.push_user(text.clone());
+                            cmd.extend(self.enqueue(text));
+                        }
+                        // A surface talking to itself. It goes back round the
+                        // same way anything else reaches a surface, so there
+                        // is no second path for a plugin to be reached by.
+                        SurfaceAction::Send { name, payload } => {
+                            if let Some((_, surface)) = self.surfaces.focus() {
+                                cmd.push(Effect::Surface {
+                                    plugin: plugin.clone(),
+                                    name: surface,
+                                    event: SurfaceEvent::Msg { name, payload },
+                                });
+                            }
+                        }
                     }
                 }
                 cmd.push(Effect::RefreshSurfaces);
@@ -2310,30 +2326,29 @@ mod plugin_tests {
                 name: "panel",
                 description: "Open the panel.",
                 run: |args| {
-                    let s = state();
+                    let s = surface_state("panel");
                     s.open = true;
-                    state(s);
+                    surface_state("panel", s);
                     notice("panel on")
                 }
             });
             register_surface(#{
                 name: "panel",
                 placement: #{ kind: "side", side: "right" },
-                render: |s| {
-                    let open = if "open" in s { s.open } else { false };
-                    if !open { return (); }
+                init: || #{ open: false, count: 0 },
+                view: |s| {
+                    if !s.open { return (); }
                     #{ type: "text", text: "panel" }
                 },
-                on_event: |event| {
-                    if event.kind == "key" && event.code == "down" {
-                        let s = state();
-                        s.count = if "count" in s { s.count + 1 } else { 1 };
-                        state(s);
-                        return "consume";
+                update: |s, msg| {
+                    if msg.kind == "key" && msg.code == "down" {
+                        s.count += 1;
+                        return s;
                     }
-                    if event.kind == "key" && event.code == "esc" {
+                    if msg.kind == "key" && msg.code == "esc" {
                         return "release_focus";
                     }
+                    s
                 }
             });
             "#,
@@ -2366,9 +2381,9 @@ mod plugin_tests {
         host.surface_event(plugin, name, event.clone())
             .expect("the surface took it");
 
-        let count = host
-            .state_of("kit")
-            .and_then(|state| state.get("count").cloned())
+        let count = host.plugins()[0]
+            .surface_state("panel")
+            .get("count")
             .and_then(|value| value.as_int().ok())
             .expect("the event ran");
         assert_eq!(count, 1);

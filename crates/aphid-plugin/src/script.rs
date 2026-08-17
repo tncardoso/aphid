@@ -125,7 +125,7 @@ impl ScriptPlugin {
             .map(|specs| specs.clone())
             .unwrap_or_default();
 
-        Ok(Self {
+        let plugin = Self {
             name: file.name.clone(),
             description: file.description.clone(),
             path: file.path.clone(),
@@ -140,7 +140,38 @@ impl ScriptPlugin {
             tools,
             commands,
             surfaces,
-        })
+        };
+        plugin.seed_surfaces();
+        Ok(plugin)
+    }
+
+    /// Fill in each surface's defaults under whatever was persisted.
+    ///
+    /// Persisted values win: `init` says what a key means when nothing has set
+    /// it yet, which is what saves every surface from writing out the
+    /// `if "open" in s { s.open } else { false }` dance.
+    fn seed_surfaces(&self) {
+        for spec in &self.surfaces {
+            let Some(init) = &spec.init else { continue };
+            let Ok(defaults) = self.call_fn(init, ()) else {
+                continue;
+            };
+            let Some(defaults) = defaults.try_cast::<Map>() else {
+                continue;
+            };
+
+            let mut state = self.store.surface_get(&spec.name);
+            let mut seeded = false;
+            for (key, value) in defaults {
+                state.entry(key).or_insert_with(|| {
+                    seeded = true;
+                    value
+                });
+            }
+            if seeded {
+                self.store.surface_set(&spec.name, state);
+            }
+        }
     }
 
     #[must_use]
@@ -213,6 +244,17 @@ impl ScriptPlugin {
     #[must_use]
     pub fn state(&self) -> Map {
         self.store.get()
+    }
+
+    /// One surface's own model, as a copy.
+    #[must_use]
+    pub fn surface_state(&self, name: &str) -> Map {
+        self.store.surface_get(name)
+    }
+
+    /// Replace one surface's model.
+    pub fn set_surface_state(&self, name: &str, state: Map) {
+        self.store.surface_set(name, state);
     }
 
     /// The current state version, used to invalidate cached renders.

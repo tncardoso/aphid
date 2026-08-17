@@ -4,11 +4,26 @@
 
 ### Changed
 
+- **Plugin surfaces are now written as three parts.** A surface declares
+  `init` for what its model starts as, `update(state, msg)` for how a message
+  changes it, and `view(state)` for what it looks like. The old `render` and
+  `on_event` are refused at load, with a message saying what to rename. A
+  surface can also ask for the background tick with `tick: true`, send itself a
+  message with `send`, and send text to the model with `prompt_with`.
+- A surface keeps its own model, reachable from the rest of the plugin with
+  `surface_state(name)`. A tool that fills a panel no longer shares one map
+  with every other part of the plugin.
 - In the terminal, a permission question that nobody answers refuses the tool
   call after five minutes, as it already did for an alate. A run left waiting
   on a prompt no longer holds for the rest of the day.
 - Quitting the terminal while a permission question is on screen refuses the
   call immediately, instead of leaving it to time out.
+
+### Added
+
+- A plugin surface gets its defaults from `init`, and a value already stored
+  wins over its default. A panel no longer has to write
+  `if "open" in s { s.open } else { false }` for each of its keys.
 
 ### Fixed
 
