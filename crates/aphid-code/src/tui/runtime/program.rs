@@ -11,6 +11,10 @@ use super::{Cmd, Hub};
 /// Three slots and not a list, because these are the three cadences a terminal
 /// wants and a fixed set needs no allocation and no boxed closure. What each
 /// one means is the program's own business; the names say how often, not what.
+///
+/// A program that has to wait on something other than a clock — a task
+/// finishing, a socket — does not say so here. It spawns whatever waits and
+/// has it send a message, which is what every producer already does.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Timer {
     /// The fast one, for something that animates while it happens.
@@ -75,8 +79,9 @@ pub trait Program {
 
 /// The half that draws.
 ///
-/// Separate from [`Program`] so a headless driver — an alate daemon — can
-/// implement one and not the other.
+/// Separate from [`Program`] so that what changes the state and what shows it
+/// are two answers and not one. Everything in the tree implements both today;
+/// the split is what keeps `update` from reaching for a `Frame`.
 pub trait Draw: Program {
     /// A scratchpad the runtime owns.
     ///
