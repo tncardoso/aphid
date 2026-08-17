@@ -68,6 +68,21 @@ impl Client {
         self.writer.write_all(line.as_bytes()).await
     }
 
+    /// Take the two halves apart.
+    ///
+    /// The reading half becomes a task that turns envelopes into messages, and
+    /// the writing half becomes what an effect sends on. One `&mut Client` for
+    /// both would mean holding it across a `recv` that waits for ever.
+    #[must_use]
+    pub fn split(self) -> (Reader, Writer) {
+        (
+            Reader { lines: self.lines },
+            Writer {
+                writer: self.writer,
+            },
+        )
+    }
+
     /// The next envelope, or `None` when the daemon closed the connection.
     ///
     /// A line that does not parse is skipped rather than fatal: a daemon one
@@ -86,6 +101,47 @@ impl Client {
                 return Ok(Some(envelope));
             }
         }
+    }
+}
+
+/// The reading half of a connection.
+pub struct Reader {
+    lines: Lines<BufReader<OwnedReadHalf>>,
+}
+
+impl Reader {
+    /// The next envelope, or `None` when the daemon closed the connection.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the connection cannot be read.
+    pub async fn recv(&mut self) -> std::io::Result<Option<Envelope>> {
+        loop {
+            let Some(line) = self.lines.next_line().await? else {
+                return Ok(None);
+            };
+            if let Ok(envelope) = serde_json::from_str::<Envelope>(&line) {
+                return Ok(Some(envelope));
+            }
+        }
+    }
+}
+
+/// The writing half of a connection.
+pub struct Writer {
+    writer: OwnedWriteHalf,
+}
+
+impl Writer {
+    /// Ask the daemon for something.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the daemon has gone.
+    pub async fn send(&mut self, request: &Request) -> std::io::Result<()> {
+        let mut line = serde_json::to_string(request)?;
+        line.push('\n');
+        self.writer.write_all(line.as_bytes()).await
     }
 }
 

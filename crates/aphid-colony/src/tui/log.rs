@@ -1,6 +1,6 @@
 //! One chat, drawn.
 //!
-//! Not [`aphid_code::tui::view::View`], although it was tempting. That type's
+//! Not [`aphid_code::tui::scrollback::Scrollback`], although it was tempting. That type's
 //! entries are `User`, `Assistant`, `Thinking` and `Tool`, and putting a group
 //! chat through it would mean deciding that everything anybody else said is
 //! "user" — which throws the author away, and the author is the one thing a

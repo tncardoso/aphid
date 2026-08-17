@@ -5,23 +5,34 @@
 //!
 //! # How it fits together
 //!
-//! The agent runs on **its own task**, not inside the app's `select!`. That is
-//! what lets a permission prompt block the agent while the UI keeps drawing —
+//! [`runtime`] holds the loop all three aphid terminals share: a model, one
+//! message type, one place that changes the model, and one place that does
+//! anything the model asked for. It knows nothing about agents or plugins,
+//! which is what makes it shareable.
+//!
+//! The agent runs on **its own task**, not inside the loop. That is what lets a
+//! permission prompt block the agent while the UI keeps drawing —
 //! [`UiConfirmer`](event::UiConfirmer) blocks on a channel until the app answers,
 //! and if both lived on one task that would deadlock. It also means the UI never
 //! touches the agent while a run is in flight: everything it draws comes from
-//! [`UiEvent`](event::UiEvent)s, and the agent comes back when the run ends.
+//! [`Msg`](msg::Msg)s, and the agent comes back when the run ends.
 
 pub mod app;
+pub mod effect;
 pub mod event;
 pub mod input;
 pub mod logo;
 pub mod modal;
+pub mod msg;
+pub mod render;
+pub mod runtime;
+pub mod scrollback;
 pub mod status;
 pub mod surface;
-pub mod view;
 
 pub use app::{App, run};
-pub use event::{UiConfirmer, UiEvent, UiPlugin, UiSink};
+pub use effect::Effect;
+pub use event::{UiConfirmer, UiPlugin, UiSink};
+pub use msg::Msg;
+pub use scrollback::Scrollback;
 pub use status::Status;
-pub use view::View;

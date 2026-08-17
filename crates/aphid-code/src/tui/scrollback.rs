@@ -1,6 +1,6 @@
 //! The transcript the UI shows, and how it is drawn.
 //!
-//! This model is built from [`UiEvent`](super::event::UiEvent)s, not from the
+//! This model is built from [`Msg`](super::msg::Msg)s, not from the
 //! agent's arena. Collapsing, scrolling and diff rendering are presentation
 //! state, and the transcript on disk should not carry any of it.
 
@@ -17,7 +17,7 @@ pub const COLLAPSE_AFTER: usize = 15;
 ///
 /// The agent transcript is not touched; this only bounds what the TUI can
 /// render and scroll back through.
-const MAX_ENTRIES: usize = 300;
+pub(crate) const MAX_ENTRIES: usize = 300;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum ToolState {
@@ -56,46 +56,77 @@ pub enum Entry {
     Logo,
 }
 
+/// Where the transcript is parked.
+///
+/// The bottom is the common case and costs nothing to hold. Once the reader
+/// scrolls up, the position is held against an *entry* rather than a line
+/// number, so a block that grows or shrinks does not move what is under the
+/// cursor. That is what the renderer used to work out by hand, from line
+/// counts only it could see — and it had to write the answer back.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum Scroll {
+    /// Pinned to the newest line.
+    #[default]
+    Bottom,
+    /// The first visible line is `offset` lines into `entry`'s block.
+    Anchored { entry: usize, offset: usize },
+}
+
+/// What a draw laid the pane out as.
+///
+/// A position in lines is only meaningful against a wrapping, and only the
+/// draw knows the wrapping. So the page keys say how far to move and this
+/// comes back saying where that landed.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Viewport {
+    /// The first visible line.
+    pub top: usize,
+    /// Lines in the whole transcript.
+    pub total: usize,
+    pub height: usize,
+    /// Where the pane ended up, once the move was resolved and clamped.
+    pub scroll: Scroll,
+}
+
 /// The transcript pane's state.
 #[derive(Default)]
-pub struct View {
+pub struct Scrollback {
     entries: Vec<Entry>,
-    /// Told about every notice, so a plugin can watch what the user is shown.
-    /// One field here beats a call at each of the fifteen places that push one.
-    host: Option<std::sync::Arc<aphid_plugin::PluginHost>>,
     /// Call id to entry index, so progress and results find their call.
     by_call: HashMap<String, usize>,
     /// Streaming block index to entry index, so a delta finds its placeholder.
     /// Block indices restart with each turn, so this is cleared at every one.
     streams: HashMap<u32, usize>,
-    /// Lines scrolled up from the bottom. Zero means pinned to the newest.
-    pub scroll: usize,
+    scroll: Scroll,
+    /// Lines the reader asked to move but no draw has resolved yet.
+    ///
+    /// A key says "up ten"; only the draw knows what ten lines is, because
+    /// only it knows the wrapping. It resolves this into an anchor and says
+    /// so, and two keys pressed before one frame move twenty lines and not
+    /// ten.
+    pending: isize,
+    /// What the last draw laid out.
+    viewport: Viewport,
     pub show_thinking: bool,
     /// The entry index where the current turn starts. Entries before this are
     /// settled history and may be evicted by [`MAX_ENTRIES`]. `None` means no
     /// user turn has started yet, so every entry is evictable.
     turn_start: Option<usize>,
-    /// Flattened rendered lines, in transcript order.
-    lines: Vec<Line<'static>>,
-    /// Where each entry's rendered block starts in [`Self::lines`].
-    starts: Vec<usize>,
-    /// Entries whose rendered block is stale.
-    dirty: Vec<bool>,
-    /// How many entries are already represented in [`Self::lines`].
-    rendered_entries: usize,
-    /// The width and thinking state [`Self::lines`] was built for.
-    cache_width: usize,
-    cache_show_thinking: bool,
+    /// A number for each entry, raised whenever the entry changes.
+    ///
+    /// A number and not a staleness flag, because a flag has to be cleared by
+    /// whoever drew it: the cache mirrors the numbers it drew, and drawing
+    /// writes to the cache alone.
+    revs: Vec<u64>,
+    next_rev: u64,
+    /// How many entries the history cap has dropped, ever.
+    ///
+    /// The cache drains the same prefix by comparing this: it holds rendered
+    /// blocks by entry index, and the indices move when the front goes.
+    evicted: usize,
 }
 
-impl View {
-    /// Report notices to these plugins.
-    pub fn watch(&mut self, host: std::sync::Arc<aphid_plugin::PluginHost>) {
-        if host.any_defines("on_notify") {
-            self.host = Some(host);
-        }
-    }
-
+impl Scrollback {
     #[must_use]
     pub fn entries(&self) -> &[Entry] {
         &self.entries
@@ -103,11 +134,52 @@ impl View {
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.revs.clear();
         self.by_call.clear();
         self.streams.clear();
-        self.scroll = 0;
+        self.scroll = Scroll::Bottom;
+        self.pending = 0;
         self.turn_start = None;
-        self.invalidate_cache();
+        // Everything the cache holds is about entries that no longer exist,
+        // and the count says so.
+        self.evicted += self.entries.len();
+    }
+
+    /// Where the pane is parked.
+    #[must_use]
+    pub fn scroll(&self) -> Scroll {
+        self.scroll
+    }
+
+    /// Whether the reader has scrolled back through the transcript.
+    #[must_use]
+    pub fn scrolled(&self) -> bool {
+        self.scroll != Scroll::Bottom
+    }
+
+    /// Park the pane back on the newest line.
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll = Scroll::Bottom;
+    }
+
+    /// Ask to move `lines` lines towards the start of the transcript.
+    ///
+    /// Asks rather than moves: only the draw knows what a line is, because
+    /// only it knows the wrapping. Two keys pressed before one frame add up.
+    pub fn scroll_up(&mut self, lines: usize) {
+        self.pending -= lines as isize;
+    }
+
+    /// Ask to move `lines` lines towards the newest entry. Parks at the bottom
+    /// once it gets there.
+    pub fn scroll_down(&mut self, lines: usize) {
+        self.pending += lines as isize;
+    }
+
+    /// What the last draw laid out.
+    #[must_use]
+    pub fn viewport(&self) -> Viewport {
+        self.viewport
     }
 
     pub fn push_user(&mut self, text: impl Into<String>) {
@@ -119,11 +191,7 @@ impl View {
     }
 
     pub fn push_notice(&mut self, text: impl Into<String>) {
-        let text = text.into();
-        if let Some(host) = &self.host {
-            host.notice(&text);
-        }
-        self.push_entry(Entry::Notice(text));
+        self.push_entry(Entry::Notice(text.into()));
     }
 
     pub fn push_logo(&mut self) {
@@ -285,27 +353,19 @@ impl View {
     }
 
     fn push_entry(&mut self, entry: Entry) {
+        self.next_rev += 1;
         self.entries.push(entry);
-        self.starts.push(self.lines.len());
-        self.dirty.push(true);
+        self.revs.push(self.next_rev);
         self.trim_to_cap();
     }
 
+    /// Say that entry `index` is not what it was.
     fn mark_dirty(&mut self, index: usize) {
-        if let Some(dirty) = self.dirty.get_mut(index) {
-            *dirty = true;
+        self.next_rev += 1;
+        if let Some(rev) = self.revs.get_mut(index) {
+            *rev = self.next_rev;
         }
     }
-
-    fn invalidate_cache(&mut self) {
-        self.lines.clear();
-        self.starts.clear();
-        self.dirty.clear();
-        self.rendered_entries = 0;
-        self.cache_width = 0;
-        self.cache_show_thinking = self.show_thinking;
-    }
-
     fn trim_to_cap(&mut self) {
         let removable = match self.turn_start {
             Some(start) => self.entries.len().saturating_sub(MAX_ENTRIES).min(start),
@@ -315,34 +375,21 @@ impl View {
             return;
         }
 
-        // A cache that is not current for the view cannot be spliced safely.
-        // Drop it; the next render rebuilds from the remaining entries.
-        if self.cache_width == 0
-            || self.cache_show_thinking != self.show_thinking
-            || self.starts.len() != self.entries.len()
-            || self.dirty.len() != self.entries.len()
-        {
-            self.entries.drain(0..removable);
-            self.adjust_maps(removable);
-            if let Some(start) = &mut self.turn_start {
-                *start -= removable;
-            }
-            self.invalidate_cache();
-            return;
-        }
-
-        let removed_lines = self.starts[removable];
         self.entries.drain(0..removable);
-        self.starts.drain(0..removable);
-        self.dirty.drain(0..removable);
-        self.lines.drain(0..removed_lines);
-        for start in &mut self.starts {
-            *start -= removed_lines;
-        }
-        self.rendered_entries = self.rendered_entries.saturating_sub(removable);
+        self.revs.drain(0..removable);
+        self.evicted += removable;
         self.adjust_maps(removable);
         if let Some(start) = &mut self.turn_start {
             *start -= removable;
+        }
+        // An anchor whose own entry was evicted has nothing left to hold: the
+        // content it named is gone, so the pane goes back to the newest line
+        // rather than to some arbitrary neighbour.
+        if let Scroll::Anchored { entry, offset } = self.scroll {
+            self.scroll = match entry.checked_sub(removable) {
+                Some(entry) => Scroll::Anchored { entry, offset },
+                None => Scroll::Bottom,
+            };
         }
     }
 
@@ -365,127 +412,32 @@ impl View {
             .collect();
     }
 
-    /// Rebuild every rendered block for `width`.
-    fn rebuild_all(&mut self, width: usize) {
-        self.lines.clear();
-        self.starts.clear();
-        self.dirty.clear();
-
-        for index in 0..self.entries.len() {
-            let rendered = render_entry(&self.entries[index], width, self.show_thinking);
-            self.starts.push(self.lines.len());
-            self.lines.extend(rendered);
-            self.dirty.push(false);
-        }
-
-        self.rendered_entries = self.entries.len();
-        self.cache_width = width;
-        self.cache_show_thinking = self.show_thinking;
+    /// What the cache renders from: each entry and the revision it is at.
+    pub fn blocks(&self) -> impl Iterator<Item = (&Entry, u64)> {
+        self.entries.iter().zip(self.revs.iter().copied())
     }
 
-    /// Re-render only entries marked dirty, splicing their new blocks into the
-    /// flattened line buffer.
-    fn rebuild_dirty(&mut self, width: usize, old_top: usize) -> (usize, isize) {
-        let old_rendered = self.rendered_entries;
-        let mut appended_lines = 0usize;
-        let mut shifted_delta = 0isize;
-
-        for index in 0..self.entries.len() {
-            if !self.dirty.get(index).copied().unwrap_or(false) {
-                continue;
-            }
-
-            let rendered = render_entry(&self.entries[index], width, self.show_thinking);
-            let rendered_len = rendered.len();
-
-            if index >= old_rendered {
-                let start = self.lines.len();
-                self.lines.extend(rendered);
-                self.starts[index] = start;
-                appended_lines += rendered_len;
-            } else {
-                let old_start = self.starts[index];
-                let old_len = if index + 1 < self.starts.len() {
-                    self.starts[index + 1] - old_start
-                } else {
-                    self.lines.len() - old_start
-                };
-                let delta = rendered_len as isize - old_len as isize;
-                self.lines.splice(old_start..old_start + old_len, rendered);
-                if delta != 0 {
-                    for start in &mut self.starts[index + 1..] {
-                        *start = (*start as isize + delta) as usize;
-                    }
-                }
-
-                // Only content at or below the old viewport moves the viewport
-                // when it grows or shrinks.
-                if self.scroll > 0 && old_start >= old_top {
-                    shifted_delta += delta;
-                }
-            }
-
-            self.dirty[index] = false;
-        }
-
-        (appended_lines, shifted_delta)
-    }
-
-    /// Render every entry to wrapped lines at `width`, keeping the result in
-    /// the view's cache.
+    /// How many entries the cap has dropped, ever.
     #[must_use]
-    pub fn lines(&mut self, width: usize) -> &[Line<'static>] {
-        self.lines_for(width, 0)
+    pub fn evicted(&self) -> usize {
+        self.evicted
     }
 
-    /// The visible transcript lines for a viewport, cloned from the cache.
-    ///
-    /// Ratatui's `Paragraph` owns its text, so the visible slice is the only
-    /// copy. The cache means the full transcript is not re-wrapped or copied
-    /// on every frame.
-    pub fn visible_lines(&mut self, width: usize, height: usize) -> Vec<Line<'static>> {
-        self.lines_for(width, height);
-        let max_scroll = self.lines.len().saturating_sub(height);
-        self.scroll = self.scroll.min(max_scroll);
-        let top = max_scroll - self.scroll;
-        self.lines.iter().skip(top).take(height).cloned().collect()
+    /// Lines the reader asked to move that no draw has resolved yet.
+    #[must_use]
+    pub fn pending(&self) -> isize {
+        self.pending
     }
 
-    /// Ensure the cache is current for `width`, then return it.
-    ///
-    /// `height` is the transcript viewport height. It is used only for scroll
-    /// anchoring: when a block at or below the old viewport changes size, the
-    /// scroll offset moves with it so the same content stays under the cursor.
-    fn lines_for(&mut self, width: usize, height: usize) -> &[Line<'static>] {
-        let width = width.max(8);
-
-        if self.cache_width != width || self.cache_show_thinking != self.show_thinking {
-            self.rebuild_all(width);
-            self.trim_to_cap();
-            return &self.lines;
-        }
-
-        let old_total = self.lines.len();
-        let old_scroll = self.scroll;
-        let old_top = old_total.saturating_sub(height).saturating_sub(old_scroll);
-        let (appended_lines, shifted_delta) = self.rebuild_dirty(width, old_top);
-        self.trim_to_cap();
-        self.rendered_entries = self.entries.len();
-
-        if old_scroll > 0 {
-            let delta = appended_lines as isize + shifted_delta;
-            if delta > 0 {
-                self.scroll = self.scroll.saturating_add(delta as usize);
-            } else if delta < 0 {
-                self.scroll = self.scroll.saturating_sub((-delta) as usize);
-            }
-        }
-
-        &self.lines
+    /// Take on what a draw resolved.
+    pub fn laid_out(&mut self, viewport: Viewport) {
+        self.viewport = viewport;
+        self.scroll = viewport.scroll;
+        self.pending = 0;
     }
 }
 
-fn render_entry(entry: &Entry, width: usize, show_thinking: bool) -> Vec<Line<'static>> {
+pub(crate) fn render_entry(entry: &Entry, width: usize, show_thinking: bool) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
     match entry {
@@ -850,6 +802,21 @@ fn chunks(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::render::ScrollbackCache;
+
+    /// Every line the pane comes to at `width`, as text.
+    ///
+    /// The wrapping lives in the cache now, so a test that is about what the
+    /// pane says has to go through one.
+    fn painted(pane: &Scrollback, width: usize) -> Vec<String> {
+        let mut cache = ScrollbackCache::default();
+        let view = cache.layout(pane, width, usize::MAX);
+        cache
+            .visible(view)
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
 
     #[test]
     fn wrapping_breaks_at_whitespace() {
@@ -894,9 +861,9 @@ mod tests {
 
     #[test]
     fn a_multiline_message_keeps_its_shape() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.push_user("one\ntwo".to_owned());
-        let rendered: Vec<String> = view.lines(40).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 40);
 
         assert_eq!(rendered.first().map(String::as_str), Some("> one"));
         assert_eq!(rendered.get(1).map(String::as_str), Some("  two"));
@@ -954,21 +921,21 @@ mod tests {
 
     #[test]
     fn thinking_is_hidden_until_it_is_asked_for() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.push_thinking("weighing it up");
-        assert!(view.lines(40).is_empty());
+        assert!(painted(&view, 40).is_empty());
 
         view.show_thinking = true;
-        let rendered: Vec<String> = view.lines(40).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 40);
         assert!(rendered.iter().any(|line| line.contains("weighing it up")));
     }
 
     #[test]
     fn a_shell_command_renders_a_header_and_its_output() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.push_shell("ls".to_owned(), "a.rs\nb.rs".to_owned());
 
-        let rendered: Vec<String> = view.lines(40).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 40);
         assert_eq!(rendered[0].trim(), "$ ls");
         assert_eq!(rendered[1].trim(), "a.rs");
         assert_eq!(rendered[2].trim(), "b.rs");
@@ -976,10 +943,10 @@ mod tests {
 
     #[test]
     fn a_shell_command_wraps_long_output() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.push_shell("ls".to_owned(), "some very long output line".to_owned());
 
-        let rendered: Vec<String> = view.lines(12).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 12);
         assert_eq!(rendered[0].trim(), "$ ls");
         assert!(
             rendered
@@ -992,12 +959,12 @@ mod tests {
 
     #[test]
     fn streamed_text_accumulates_into_one_entry() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.push_text("Hello");
         view.push_text(", world");
         assert_eq!(view.entries().len(), 1);
 
-        let rendered: Vec<String> = view.lines(40).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 40);
         assert!(rendered.iter().any(|line| line.contains("Hello, world")));
     }
 
@@ -1012,42 +979,42 @@ mod tests {
 
     #[test]
     fn a_streaming_call_shows_its_name_and_a_growing_count() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.begin_tool_stream(0, "bash");
         view.push_tool_stream(0, 300);
 
-        let rendered: Vec<String> = view.lines(60).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 60);
         assert!(rendered[0].starts_with("◌ bash"), "{}", rendered[0]);
         assert!(rendered[0].contains("receiving arguments… 300 B"));
 
         view.push_tool_stream(0, 112);
-        let rendered: Vec<String> = view.lines(60).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 60);
         assert!(rendered[0].contains("412 B"), "{}", rendered[0]);
     }
 
     #[test]
     fn an_announced_call_claims_its_placeholder() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.begin_tool_stream(0, "bash");
         view.push_tool_stream(0, 24);
         view.push_tool_call("c1", "bash", r#"{"command":"cargo test"}"#);
 
         assert_eq!(view.entries().len(), 1, "the placeholder became the card");
 
-        let rendered: Vec<String> = view.lines(60).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 60);
         assert!(rendered[0].starts_with("⋯ bash"), "{}", rendered[0]);
         assert!(rendered[0].contains("cargo test"));
         assert!(!rendered[0].contains("receiving"));
 
         // The claim registered the id, so results still find their card.
         view.finish_tool("c1", "ok", false, None);
-        let rendered: Vec<String> = view.lines(60).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 60);
         assert!(rendered[0].starts_with("→ bash"), "{}", rendered[0]);
     }
 
     #[test]
     fn two_streamed_calls_are_claimed_in_source_order() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.begin_tool_stream(0, "read");
         view.begin_tool_stream(1, "bash");
         view.push_tool_call("c1", "read", r#"{"path":"a.rs"}"#);
@@ -1056,7 +1023,7 @@ mod tests {
         assert_eq!(view.entries().len(), 2);
         view.finish_tool("c2", "a.rs b.rs", false, None);
 
-        let rendered: Vec<String> = view.lines(60).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 60);
         assert!(rendered[0].starts_with("⋯ read"), "{}", rendered[0]);
         // The second card is the one that finished, not the first.
         assert!(
@@ -1067,35 +1034,35 @@ mod tests {
 
     #[test]
     fn a_placeholder_whose_call_never_arrives_is_settled() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.begin_tool_stream(0, "edit");
         view.push_tool_stream(0, 90);
         view.settle_tool_streams();
 
-        let rendered: Vec<String> = view.lines(60).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 60);
         assert!(rendered[0].starts_with("✗ edit"), "{}", rendered[0]);
         assert!(rendered[1].contains("before the call was complete"));
     }
 
     #[test]
     fn settling_leaves_a_call_that_did_arrive_alone() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.begin_tool_stream(0, "bash");
         view.push_tool_call("c1", "bash", r#"{"command":"ls"}"#);
         view.settle_tool_streams();
 
-        let rendered: Vec<String> = view.lines(60).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 60);
         assert!(rendered[0].starts_with("⋯ bash"), "{}", rendered[0]);
     }
 
     #[test]
     fn a_tool_result_replaces_its_streamed_preview() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.push_tool_call("c1", "bash", r#"{"command":"ls"}"#);
         view.push_tool_progress("c1", "partial");
         view.finish_tool("c1", "final output", false, None);
 
-        let rendered: Vec<String> = view.lines(60).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 60);
         assert!(rendered.iter().any(|line| line.contains("final output")));
         assert!(!rendered.iter().any(|line| line.contains("partial")));
         assert!(rendered.iter().any(|line| line.contains("bash")));
@@ -1103,7 +1070,7 @@ mod tests {
 
     #[test]
     fn old_entries_are_evicted_at_the_cap() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         for number in 0..MAX_ENTRIES + 50 {
             view.push_notice(format!("notice {number}"));
         }
@@ -1117,7 +1084,7 @@ mod tests {
 
     #[test]
     fn the_current_turn_is_never_evicted() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         for number in 0..10 {
             view.push_notice(format!("notice {number}"));
         }
@@ -1134,46 +1101,11 @@ mod tests {
     }
 
     #[test]
-    fn only_changed_blocks_are_marked_dirty() {
-        let mut view = View::default();
-        view.push_user("hello");
-        view.push_text("an answer");
-        let _ = view.lines(40);
-
-        assert!(view.dirty.iter().all(|dirty| !dirty));
-
-        view.push_text(" with more");
-        assert_eq!(view.dirty.iter().filter(|dirty| **dirty).count(), 1);
-        assert!(view.dirty.last().copied().unwrap_or(false));
-
-        let _ = view.lines(40);
-        assert!(view.dirty.iter().all(|dirty| !dirty));
-    }
-
-    #[test]
-    fn new_lines_below_the_viewport_anchor_the_scroll() {
-        let mut view = View::default();
-        for number in 0..10 {
-            view.push_notice(format!("line {number}"));
-        }
-        view.lines_for(20, 5);
-
-        let old_total = view.lines.len();
-        view.scroll = 2;
-        view.push_notice("fresh content");
-        view.lines_for(20, 5);
-
-        let added = view.lines.len() - old_total;
-        assert!(added > 0);
-        assert_eq!(view.scroll, 2 + added);
-    }
-
-    #[test]
     fn assistant_code_blocks_wrap_long_lines() {
-        let mut view = View::default();
+        let mut view = Scrollback::default();
         view.push_text("```\n012345678901234567890123456789\n```");
 
-        let rendered: Vec<String> = view.lines(12).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 12);
         assert!(
             rendered.iter().all(|line| line.chars().count() <= 12),
             "code lines are wrapped to the pane: {rendered:?}"

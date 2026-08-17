@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use aphid_code::plugins::permissions::{Confirmer, Decision, Risk};
+use aphid_code::tui::runtime::Answers;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
@@ -84,8 +85,7 @@ struct Shared {
     connections: Mutex<HashMap<u64, Arc<Connection>>>,
     next_connection: AtomicU64,
     /// Tools waiting on an answer, by the id their frame carried.
-    waiting: Mutex<HashMap<u64, std::sync::mpsc::Sender<Decision>>>,
-    next_id: AtomicU64,
+    answers: Answers<Decision>,
     log: Mutex<Option<File>>,
     envelopes: broadcast::Sender<Envelope>,
 }
@@ -133,8 +133,7 @@ impl Server {
         let shared = Arc::new(Shared {
             connections: Mutex::new(HashMap::new()),
             next_connection: AtomicU64::new(1),
-            waiting: Mutex::new(HashMap::new()),
-            next_id: AtomicU64::new(1),
+            answers: Answers::default(),
             log: Mutex::new(log.and_then(open_log)),
             envelopes,
         });
@@ -316,12 +315,7 @@ impl Confirmer for GatewayConfirmer {
             return Decision::Deny;
         }
 
-        let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
-        let (reply, answer) = std::sync::mpsc::channel();
-        match self.shared.waiting.lock() {
-            Ok(mut waiting) => waiting.insert(id, reply),
-            Err(_) => return Decision::Deny,
-        };
+        let (id, answer) = self.shared.answers.open();
 
         self.shared.publish(Envelope::daemon(Frame::Confirm {
             id,
@@ -335,10 +329,7 @@ impl Confirmer for GatewayConfirmer {
         let decision = answer
             .recv_timeout(ANSWER_TIMEOUT)
             .unwrap_or(Decision::Deny);
-
-        if let Ok(mut waiting) = self.shared.waiting.lock() {
-            waiting.remove(&id);
-        }
+        self.shared.answers.abandon(id);
         decision
     }
 }
@@ -433,11 +424,7 @@ async fn serve(
                         continue;
                     }
                     if let Request::Answer { id: call, decision } = request {
-                        if let Ok(mut waiting) = shared.waiting.lock()
-                            && let Some(reply) = waiting.remove(&call)
-                        {
-                            let _ = reply.send(decision.into());
-                        }
+                        shared.answers.answer(call, decision.into());
                         continue;
                     }
                     let asked = Event::Asked {

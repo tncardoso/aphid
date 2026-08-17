@@ -125,9 +125,12 @@ fn todo_status_toggles_the_open_flag() {
     let fixture = Fixture::new();
     let host = fixture.host();
 
+    // The flag is the panel's own, not the plugin's: a surface keeps its model
+    // beside the rest of what the plugin remembers.
     let open = |host: &PluginHost| {
-        host.state_of("todo")
-            .and_then(|state| state.get("open").cloned())
+        host.plugins()[0]
+            .surface_state("todo")
+            .get("open")
             .and_then(|value| value.as_bool().ok())
             .unwrap_or(false)
     };

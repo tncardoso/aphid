@@ -51,6 +51,12 @@ pub struct Input {
     browsing: usize,
     /// The live line, parked while browsing history.
     parked: Option<String>,
+    /// What the border was last built for: whether a run is in flight, and
+    /// whether the line is a `!` command.
+    prompt: Option<(bool, bool)>,
+    /// How many borders have been built. One per change, not one per message.
+    #[cfg(test)]
+    built: usize,
 }
 
 impl Default for Input {
@@ -65,6 +71,9 @@ impl Default for Input {
             history: Vec::new(),
             browsing: 0,
             parked: None,
+            prompt: None,
+            #[cfg(test)]
+            built: 0,
         }
     }
 }
@@ -90,11 +99,26 @@ impl Input {
         self.scroll_top
     }
 
-    /// Draw the border and the running/idle indicator as its title. Called
-    /// each frame, since the title depends on `Status::running`.
+    /// Draw the border and the running/idle indicator as its title.
+    ///
+    /// Called after every message, not every frame, because the model is what
+    /// the drawing reads and the model is what a message changes. The border
+    /// depends on two booleans, so a call that would build the same one again
+    /// does nothing: a reply arriving as two hundred deltas must not build two
+    /// hundred identical blocks.
     pub fn set_prompt(&mut self, running: bool) {
+        let bang = self.bang();
+        if self.prompt == Some((running, bang)) {
+            return;
+        }
+        self.prompt = Some((running, bang));
+        #[cfg(test)]
+        {
+            self.built += 1;
+        }
+
         let title = if running { " … " } else { " > " };
-        let border = if self.bang() { BANG_BORDER } else { BORDER };
+        let border = if bang { BANG_BORDER } else { BORDER };
         self.textarea.set_block(
             Block::default()
                 .borders(Borders::ALL)
@@ -102,6 +126,14 @@ impl Input {
                 .padding(Padding::horizontal(1))
                 .title(title),
         );
+    }
+
+    /// How many borders have been built. Test-only: a stream must not build
+    /// one per delta.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn borders_built(&self) -> usize {
+        self.built
     }
 
     /// The first non-blank character of the buffer is `!`: the line is a

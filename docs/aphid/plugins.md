@@ -106,6 +106,11 @@ while the user is at the prompt, and `exec` and the http functions stop it until
 they are complete. Aphid does not start a tick while the last one runs. There
 are no ticks in headless mode.
 
+Every call into a plugin — a hook, a tick, a command, a panel — runs on one
+thread, one at a time. So a change a tick makes to the state is what the next
+panel render reads, and two calls can never both read the state, change it, and
+write it back over each other.
+
 Each hook gets a map. These are the fields:
 
 - `on_prompt`: `text`
@@ -234,8 +239,13 @@ fn on_session_start(session) {
 }
 ```
 
-Use `state(map)` for memory-only data, such as an open panel or the selected
-row in a list. That data lives for the session and is never written to disk.
+Use `state(map)` for memory-only data. That data lives for the session and is
+never written to disk.
+
+A surface keeps its own model beside the plugin's, under a `surfaces` key.
+`surface_state(name)` reads it and `surface_state(name, map)` replaces it, in
+memory. A tool or a hook uses those to reach what a panel is showing; the panel
+itself is given the model and returns the new one, and never calls either.
 
 ## Tools
 
@@ -278,27 +288,84 @@ A plugin adds an interactive terminal surface with `register_surface`. A surface
 is a named region that the plugin fills with a declarative widget tree. The
 first cut renders side panels on the right and the left of the transcript.
 
+A surface is a small app of its own, with three parts: a model, a function that
+changes it, and a function that draws it.
+
 ```rhai
 register_surface(#{
     name: "todos",
     placement: #{ kind: "side", side: "right" },
-    render: |s| {
+
+    init: || #{ items: [], selected: 0, open: false },
+
+    update: |s, msg| {
+        if msg.kind == "key" && msg.code == "down" {
+            s.selected = (s.selected + 1) % s.items.len();
+        }
+        s
+    },
+
+    view: |s| {
         if !s.open { return (); }
         #{ type: "list", items: s.items, selected: s.selected }
-    },
-    on_event: |event| {
-        if event.kind == "key" && event.code == "down" {
-            let s = state();
-            s.selected = (s.selected + 1) % s.items.len();
-            state(s);
-            return "consume";
-        }
     }
 });
 ```
 
-`render` receives the plugin state. Return `()` to close the surface, or a
-widget tree to open it. The first cut knows these widgets:
+### The model
+
+`init` runs once, when the plugin loads, and its keys are the defaults. A value
+that is already in the surface's state wins over its default, so `init` says
+what a key means and not what it is. Nothing has to write `if "open" in s`.
+
+The model is the surface's own, under the plugin's state. A hook, a tool or a
+command reaches it with `surface_state(name)`, and replaces it with
+`surface_state(name, map)`. That is how a tool writes what its panel draws: the
+todo plugin's `todo_add` tool adds to the very list the todo panel shows.
+
+Like `state(map)`, this is in memory for the session. Use `save_state` to keep
+something across sessions.
+
+### The update
+
+`update` takes the model and a message and returns the new model. It is called
+with one message at a time and its answer is stored before anything is drawn,
+so what it returns is what `view` sees.
+
+A message is a map with a `kind`:
+
+| `kind` | Fields |
+| --- | --- |
+| `key` | `code`, `modifiers` |
+| `mouse` | `button`, `row`, `column`, `target` |
+| `paste` | `text` |
+| `tick` | none, and only with `tick: true` |
+| `msg` | `name`, `payload` |
+
+Return the new model, or a map of `#{ state: …, cmd: [ … ] }` to change the
+model and ask the host for something as well. To ask for something without
+changing the model, return the ask alone.
+
+The asks are:
+
+| Ask | What it does |
+| --- | --- |
+| `"consume"` | The message was handled |
+| `"release_focus"` | Return focus to the input box |
+| `notice("text")` | Show a notice |
+| `prompt_with("text")` | Send text to the model, as a typed line |
+| `send("name")`, `send("name", payload)` | Send the surface a message of its own |
+
+`send` is how a surface asks for its next step: the update says what should
+happen and returns, rather than doing it in the middle of working out the new
+model. The message comes back as `kind: "msg"`.
+
+Add `tick: true` to hear the background tick as a `kind: "tick"` message.
+
+### The view
+
+`view` takes the model and returns `()` to close the surface, or a widget tree
+to open it. It changes nothing. The first cut knows these widgets:
 
 | Type | Fields |
 | --- | --- |
@@ -310,23 +377,32 @@ widget tree to open it. The first cut knows these widgets:
 | `button` | `id`, `label` |
 | `spacer` | none |
 
-`id` is for the widgets a click can hit. The event callback receives `target`
-with that id for mouse events.
+`id` is for the widgets a click can hit. A mouse message carries `target` with
+that id.
 
 In the terminal UI, `F6` gives focus to an open panel. `Esc` returns focus to
 the input box. Clicking a panel also focuses it. While a panel has focus, its
-`on_event` callback receives the keys, mouse events and pastes. `F6`, `Esc` and
-`Ctrl-C` stay with the app and are not sent to a plugin.
+`update` receives the keys, mouse messages and pastes. `F6`, `Esc` and `Ctrl-C`
+stay with the app and are not sent to a plugin.
 
-`on_event` receives a map. A key event has `kind`, `code` and `modifiers`. A
-mouse event has `kind`, `button`, `row`, `column` and `target`. A paste has
-`kind` and `text`.
+Render and event callbacks run on the same thread as every other script call,
+which is not the thread that draws the screen. Keep them short: a slow one
+delays the other plugins, but it does not hold the terminal.
 
-The callback returns `"consume"` to handle the event, `"release_focus"` to
-return focus to the input box, or `notice("text")` to show a notice. It may also
-call `state(map)`, `save_state(map)`, `notify` and `prompt` directly.
+### Moving a surface written for the older shape
 
-Render and event callbacks run on the UI thread. Keep them short, like `on_tick`.
+A surface used to have `render(state)` and `on_event(event)`, and kept its
+state in the plugin's own map. Aphid refuses such a surface at load, and says
+what to rename.
+
+| Before | Now |
+| --- | --- |
+| `render: \|s\| …` | `view: \|s\| …` |
+| `on_event: \|event\| …` | `update: \|s, msg\| …`, returning the new model |
+| `state()` inside a surface | the model `update` and `view` are given |
+| `state(map)` inside a surface | return the new model from `update` |
+| `state()` in a tool, for the panel | `surface_state("name")` |
+| defaults with `if "x" in s` | `init: \|\| #{ x: … }` |
 
 ## When a plugin fails
 

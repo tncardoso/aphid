@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rhai::{Engine, EvalAltResult, Map};
+use rhai::{Dynamic, Engine, EvalAltResult, Map};
 
 use crate::worker::{Job, Worker};
 
@@ -221,6 +221,18 @@ fn register_storage(
 
     let writer = Arc::clone(store);
     engine.register_fn("save_state", move |state: Map| writer.set(state));
+
+    // A surface's own model, by name. A tool or a hook reaches its panel's
+    // state this way: the todo tool writes the very list the panel draws.
+    let surfaces = Arc::clone(store);
+    engine.register_fn("surface_state", move |name: &str| {
+        surfaces.surface_get(name)
+    });
+
+    let surfaces = Arc::clone(store);
+    engine.register_fn("surface_state", move |name: &str, state: Map| {
+        surfaces.surface_set(name, state);
+    });
 }
 
 /// The values a hook returns to steer the run.
@@ -243,6 +255,16 @@ fn register_verdicts(engine: &mut Engine) {
     engine.register_fn("stop", || verdict("stop", ""));
     engine.register_fn("allow", || verdict("allow", ""));
     engine.register_fn("notice", |text: &str| verdict("notice", text));
+
+    // A surface's update says what should happen next rather than doing it,
+    // so that working out the new model stays a pure step.
+    engine.register_fn("prompt_with", |text: &str| verdict("prompt", text));
+    engine.register_fn("send", |name: &str| verdict("send", name));
+    engine.register_fn("send", |name: &str, payload: Dynamic| {
+        let mut map = verdict("send", name);
+        map.insert("payload".into(), payload);
+        map
+    });
 }
 
 fn register_output(engine: &mut Engine, plugin: &str, sink: &Arc<dyn Sink>) {

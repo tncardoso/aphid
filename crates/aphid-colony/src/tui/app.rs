@@ -6,12 +6,15 @@
 
 use std::collections::HashMap;
 
+use aphid_code::tui::input::{Action, Input};
+use aphid_code::tui::runtime::{Cmd, Program};
 use aphid_nostr::nostr::event::{Event, EventBuilder, Kind, Tag};
 use aphid_nostr::nostr::filter::{Filter, SingleLetterTag};
 use aphid_nostr::nostr::key::{Keys, PublicKey};
 use aphid_nostr::nostr::message::RelayMessage;
 use aphid_nostr::nostr::types::Timestamp;
 use aphid_nostr::{GroupId, chat, direct_id, group};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::chats::{Chats, Kind as ChatKind};
 use super::log::{Log, Names, name_of};
@@ -37,9 +40,9 @@ const HELP: &str = "\
 /clear           clear this log; the colony keeps it
 /help  /quit";
 
-/// One thing the terminal wants sent.
+/// One thing the terminal wants done.
 #[derive(Debug)]
-pub enum Send {
+pub enum Effect {
     Publish(Box<Event>),
     Subscribe(String, Vec<Filter>),
     Unsubscribe(String),
@@ -63,6 +66,9 @@ pub struct App {
     pub members: HashMap<GroupId, Vec<PublicKey>>,
     /// Where this colony is, for the status line.
     pub url: String,
+    /// What is being typed. In the model because a keypress changes it, and
+    /// the drawing only reads it.
+    pub input: Input,
     pub show_time: bool,
     pub quit: bool,
     /// A note with nowhere better to go, before any chat exists.
@@ -79,6 +85,11 @@ impl App {
             names: Names::new(),
             members: HashMap::new(),
             url,
+            input: {
+                let mut input = Input::default();
+                input.set_prompt(false);
+                input
+            },
             show_time: true,
             quit: false,
             notice: None,
@@ -91,8 +102,8 @@ impl App {
     /// the metadata builds the nav, the kind 0s name it, and the chat fills the
     /// logs.
     #[must_use]
-    pub fn opening(&self) -> Send {
-        Send::Subscribe(
+    pub fn opening(&self) -> Effect {
+        Effect::Subscribe(
             WATCHING.to_owned(),
             vec![
                 Filter::new()
@@ -106,7 +117,7 @@ impl App {
 
     /// Say what this terminal is called, if the configuration named it.
     #[must_use]
-    pub fn naming(&self, name: Option<&str>) -> Option<Send> {
+    pub fn naming(&self, name: Option<&str>) -> Option<Effect> {
         let name = name?;
         let content = serde_json::json!({ "name": name }).to_string();
         self.sign(EventBuilder::new(Kind::Metadata, content))
@@ -116,7 +127,7 @@ impl App {
     ///
     /// Answers with whatever has to go back — nothing, for everything except a
     /// backfill that has run out.
-    pub fn apply(&mut self, message: &RelayMessage<'_>) -> Vec<Send> {
+    pub fn apply(&mut self, message: &RelayMessage<'_>) -> Vec<Effect> {
         match message {
             RelayMessage::Event { event, .. } => {
                 self.arrived(event);
@@ -212,12 +223,12 @@ impl App {
     }
 
     /// Sign a builder with this terminal's key.
-    fn sign(&self, builder: EventBuilder) -> Option<Send> {
+    fn sign(&self, builder: EventBuilder) -> Option<Effect> {
         use aphid_nostr::nostr::event::FinalizeEvent;
         builder
             .finalize(&self.me)
             .ok()
-            .map(|event| Send::Publish(Box::new(event)))
+            .map(|event| Effect::Publish(Box::new(event)))
     }
 
     /// A line the person typed.
@@ -225,7 +236,7 @@ impl App {
     /// Plain text is a message in the chat on screen. Anything beginning with a
     /// slash is a command, because a chat that took `/join` as a sentence would
     /// be a chat nobody could join anything from.
-    pub fn typed(&mut self, line: &str) -> Vec<Send> {
+    pub fn typed(&mut self, line: &str) -> Vec<Effect> {
         let line = line.trim();
         if line.is_empty() {
             return Vec::new();
@@ -276,7 +287,7 @@ impl App {
         PublicKey::parse(who).ok()
     }
 
-    fn command(&mut self, line: &str) -> Vec<Send> {
+    fn command(&mut self, line: &str) -> Vec<Effect> {
         let (verb, rest) = line.split_once(' ').unwrap_or((line, ""));
         let rest = rest.trim();
 
@@ -353,7 +364,7 @@ impl App {
     }
 
     /// `/join <name>` — make the channel, or ask to be let into it.
-    fn join(&mut self, name: &str) -> Vec<Send> {
+    fn join(&mut self, name: &str) -> Vec<Effect> {
         let name = name.trim().trim_start_matches('#');
         let Ok(id) = GroupId::parse(name) else {
             self.note("a channel is named with letters, digits, dash, dot and underscore");
@@ -378,7 +389,7 @@ impl App {
     }
 
     /// `/dm <who>` — open the conversation with somebody.
-    fn dm(&mut self, who: &str) -> Vec<Send> {
+    fn dm(&mut self, who: &str) -> Vec<Effect> {
         let Some(other) = self.whois(who) else {
             self.note(&format!("nobody here is called {who}"));
             return Vec::new();
@@ -392,7 +403,7 @@ impl App {
     }
 
     /// A moderation event about somebody, in the chat on screen.
-    fn about(&mut self, kind: Kind, who: &str, usage: &str) -> Vec<Send> {
+    fn about(&mut self, kind: Kind, who: &str, usage: &str) -> Vec<Effect> {
         let Some(other) = self.whois(who) else {
             self.note(&format!("{usage} — nobody here is called {who}"));
             return Vec::new();
@@ -406,7 +417,7 @@ impl App {
     }
 
     /// A moderation event about the chat itself.
-    fn moderate(&mut self, kind: Kind, id: Option<GroupId>) -> Vec<Send> {
+    fn moderate(&mut self, kind: Kind, id: Option<GroupId>) -> Vec<Effect> {
         let Some(id) = id.or_else(|| self.chats.selected().cloned()) else {
             self.note("there is no chat on screen");
             return Vec::new();
@@ -418,11 +429,11 @@ impl App {
 
     /// Ask for what came before the top of this log.
     #[must_use]
-    pub fn backfill(&self) -> Option<Send> {
+    pub fn backfill(&self) -> Option<Effect> {
         let id = self.chats.selected()?;
         let oldest = self.logs.get(id)?.oldest()?;
         let letter = SingleLetterTag::from_char('h').ok()?;
-        Some(Send::Subscribe(
+        Some(Effect::Subscribe(
             "backfill".to_owned(),
             vec![
                 Filter::new()
@@ -447,6 +458,115 @@ pub fn heading(app: &App) -> String {
                 _ if !chat.joined => format!("{label} — /join to talk"),
                 _ => label,
             }
+        }
+    }
+}
+
+/// What the colony's terminal reacts to.
+pub enum Msg {
+    /// Something the colony said.
+    Relay(Box<RelayMessage<'static>>),
+    /// The colony hung up.
+    ///
+    /// The terminal stays open on what it already has: the person reads the
+    /// last of it and leaves when they are ready, instead of the window going
+    /// out at the moment it has something to say.
+    Gone,
+    Key(KeyEvent),
+    Paste(String),
+    Resize,
+}
+
+/// How many rows a page moves the log by.
+const PAGE: usize = 10;
+
+impl Program for App {
+    type Msg = Msg;
+    type Effect = Effect;
+
+    fn update(&mut self, msg: Msg) -> Cmd<Effect> {
+        match msg {
+            Msg::Relay(message) => Cmd::batch(self.apply(&message)),
+            Msg::Gone => {
+                self.note("── the colony stopped ──");
+                Cmd::none()
+            }
+            Msg::Key(key) => Cmd::batch(self.keyed(key)),
+            Msg::Paste(text) => {
+                self.input.paste(&text);
+                Cmd::none()
+            }
+            Msg::Resize => Cmd::none(),
+        }
+    }
+
+    fn done(&self) -> bool {
+        self.quit
+    }
+}
+
+impl App {
+    /// One keypress.
+    ///
+    /// Tab and BackTab move in the nav and are taken **before** the editor
+    /// sees them, so typing never moves the selection. Everything else is the
+    /// editor's, which is what makes this feel like the rest of aphid.
+    pub fn keyed(&mut self, key: KeyEvent) -> Vec<Effect> {
+        match key.code {
+            KeyCode::Tab => {
+                self.chats.step(1);
+                return Vec::new();
+            }
+            KeyCode::BackTab => {
+                self.chats.step(-1);
+                return Vec::new();
+            }
+            // Shift and an arrow moves in the nav too, for anybody whose
+            // terminal eats BackTab.
+            KeyCode::Down | KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.chats
+                    .step(if key.code == KeyCode::Down { 1 } else { -1 });
+                return Vec::new();
+            }
+            _ => {}
+        }
+
+        match self.input.handle(key) {
+            Action::Submit(line) => self.typed(&line),
+            // A colony has no shell, so a `!` line goes into the chat as a
+            // message, exactly as it did before `!` meant something to the
+            // coding agent's terminal.
+            Action::Bang(command) => self.typed(&format!("!{command}")),
+            Action::Quit => {
+                self.quit = true;
+                Vec::new()
+            }
+            Action::ScrollUp => {
+                if let Some(id) = self.chats.selected().cloned() {
+                    self.logs.entry(id).or_default().scroll_up(PAGE);
+                }
+                // At the top of a log there may be more behind it.
+                self.backfill().into_iter().collect()
+            }
+            Action::ScrollDown => {
+                if let Some(id) = self.chats.selected().cloned() {
+                    self.logs.entry(id).or_default().scroll_down(PAGE);
+                }
+                Vec::new()
+            }
+            // Ctrl-T means "show the working" in the coding agent. The nearest
+            // thing a chat has is the times.
+            Action::ToggleThinking => {
+                self.show_time = !self.show_time;
+                Vec::new()
+            }
+            // Ctrl-P cycles models where there are models. A colony has none,
+            // and saying so is better than doing nothing.
+            Action::CycleModel => {
+                self.note("a colony runs no model; Ctrl-T shows or hides the times");
+                Vec::new()
+            }
+            Action::Cancel | Action::None => Vec::new(),
         }
     }
 }

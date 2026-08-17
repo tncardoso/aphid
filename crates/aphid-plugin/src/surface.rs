@@ -1,25 +1,40 @@
 //! Interactive surfaces a plugin registers, written in Rhai.
 //!
-//! A script registers one while its body runs at load time:
+//! A surface is a small app of its own: a model, a function that changes it,
+//! and a function that draws it. A script registers one while its body runs at
+//! load time:
 //!
 //! ```rhai
 //! register_surface(#{
 //!     name: "todos",
 //!     placement: #{ kind: "side", side: "right" },
-//!     render: |state| {
-//!         if !state.open { return (); }
-//!         #{ type: "text", text: "todos" }
+//!     init: || #{ items: [], open: false },
+//!     update: |state, msg| {
+//!         if msg.kind == "key" && msg.code == "down" { state.chosen += 1; }
+//!         state
 //!     },
-//!     on_event: |event| { "consume" }
+//!     view: |state| {
+//!         if !state.open { return (); }
+//!         #{ type: "list", items: state.items, selected: state.chosen }
+//!     }
 //! });
 //! ```
 //!
-//! The plugin owns the surface's content and behavior. The host owns where the
-//! surface is placed and how its widget tree is drawn. `render` returns unit to
-//! close the surface, or a widget tree to open it.
+//! `init` runs once, at load, and its keys are the defaults: whatever was
+//! persisted wins over them, so a surface never has to write out the `if "x" in
+//! s` dance that reading a bare map needs.
+//!
+//! `update` is pure. It takes the model and a message and returns the new
+//! model, or `#{ state: …, cmd: [ … ] }` to ask the host for something as well.
+//! `view` is pure too: it takes the model and returns a widget tree, or unit to
+//! close the surface.
+//!
+//! The plugin owns the surface's content and behaviour. The host owns where the
+//! surface is placed and how its widget tree is drawn.
 
 use std::sync::{Arc, Mutex};
 
+use aphid_core::Json;
 use rhai::{Dynamic, FnPtr, Map};
 
 use crate::widget::{self, Widget};
@@ -56,8 +71,14 @@ pub enum Placement {
 pub struct SurfaceSpec {
     pub name: String,
     pub placement: Placement,
-    pub render: FnPtr,
-    pub on_event: Option<FnPtr>,
+    /// The model's defaults, run once at load.
+    pub init: Option<FnPtr>,
+    /// The model and a message in, the new model out.
+    pub update: Option<FnPtr>,
+    /// The model in, a widget tree out.
+    pub view: FnPtr,
+    /// Whether the surface asked to hear the background tick.
+    pub tick: bool,
 }
 
 /// Where `register_surface` puts what it is given.
@@ -75,6 +96,14 @@ pub enum SurfaceAction {
     ReleaseFocus,
     /// Show a notice to the user.
     Notice(String),
+    /// Send text to the model, as a typed line would be.
+    Prompt(String),
+    /// Send the surface a message of its own.
+    ///
+    /// What a command is in this architecture: an update decides what should
+    /// happen next and says so, rather than doing it in the middle of working
+    /// out the new model.
+    Send { name: String, payload: Json },
 }
 
 /// The result of asking a surface to render.
@@ -95,6 +124,13 @@ pub enum SurfaceEvent {
     Key {
         code: String,
         modifiers: Vec<String>,
+    },
+    /// The background tick, for a surface that asked for it with `tick: true`.
+    Tick,
+    /// A message the surface sent itself.
+    Msg {
+        name: String,
+        payload: Json,
     },
     Mouse {
         button: String,
@@ -144,6 +180,18 @@ impl SurfaceEvent {
                 map.insert("text".into(), text.into());
                 map
             }
+            Self::Tick => {
+                let mut map = Map::new();
+                map.insert("kind".into(), "tick".into());
+                map
+            }
+            Self::Msg { name, payload } => {
+                let mut map = Map::new();
+                map.insert("kind".into(), "msg".into());
+                map.insert("name".into(), name.into());
+                map.insert("payload".into(), crate::convert::to_dynamic(&payload));
+                map
+            }
         }
     }
 }
@@ -179,28 +227,53 @@ pub(crate) fn spec(declaration: &Map) -> Result<SurfaceSpec, String> {
 
     let placement = placement(declaration.get("placement"), &name)?;
 
-    let render = declaration
-        .get("render")
-        .and_then(|value| value.clone().try_cast::<FnPtr>())
-        .ok_or_else(|| format!("surface `{name}` needs a `render` function"))?;
+    // Named rather than reported as missing: a surface written for the older
+    // shape says exactly what to rename, instead of "needs a `view`".
+    if declaration.contains_key("render") {
+        return Err(format!(
+            "surface `{name}` has a `render`; the name for it is now `view`, \
+             and `on_event` is now `update(state, msg)`"
+        ));
+    }
+    if declaration.contains_key("on_event") {
+        return Err(format!(
+            "surface `{name}` has an `on_event`; it is now `update(state, msg)`, \
+             which returns the new state"
+        ));
+    }
 
-    let on_event = match declaration.get("on_event") {
-        None => None,
-        Some(value) if value.is_unit() => None,
-        Some(value) => Some(
-            value
-                .clone()
-                .try_cast::<FnPtr>()
-                .ok_or_else(|| format!("surface `{name}` needs `on_event` as a function"))?,
-        ),
-    };
+    let view = declaration
+        .get("view")
+        .and_then(|value| value.clone().try_cast::<FnPtr>())
+        .ok_or_else(|| format!("surface `{name}` needs a `view` function"))?;
+
+    let init = function(declaration, "init", &name)?;
+    let update = function(declaration, "update", &name)?;
+    let tick = declaration
+        .get("tick")
+        .is_some_and(|value| value.as_bool().unwrap_or(false));
 
     Ok(SurfaceSpec {
         name,
         placement,
-        render,
-        on_event,
+        init,
+        update,
+        view,
+        tick,
     })
+}
+
+/// An optional function in a declaration.
+fn function(declaration: &Map, key: &str, surface: &str) -> Result<Option<FnPtr>, String> {
+    match declaration.get(key) {
+        None => Ok(None),
+        Some(value) if value.is_unit() => Ok(None),
+        Some(value) => value
+            .clone()
+            .try_cast::<FnPtr>()
+            .map(Some)
+            .ok_or_else(|| format!("surface `{surface}` needs `{key}` as a function")),
+    }
 }
 
 fn placement(value: Option<&Dynamic>, surface: &str) -> Result<Placement, String> {
@@ -270,6 +343,13 @@ pub fn actions(value: &Dynamic) -> Vec<SurfaceAction> {
             Some("notice") => vec![SurfaceAction::Notice(text)],
             Some("consume") => vec![SurfaceAction::Consume],
             Some("release_focus") => vec![SurfaceAction::ReleaseFocus],
+            Some("prompt") => vec![SurfaceAction::Prompt(text)],
+            Some("send") => vec![SurfaceAction::Send {
+                name: text,
+                payload: map
+                    .get("payload")
+                    .map_or(Json::Null, crate::convert::to_json),
+            }],
             _ => Vec::new(),
         };
     }
@@ -296,8 +376,23 @@ impl crate::host::PluginHost {
                     plugin: plugin.name().to_owned(),
                     name: spec.name.clone(),
                     placement: spec.placement.clone(),
-                    interactive: spec.on_event.is_some(),
+                    interactive: spec.update.is_some(),
                 })
+            })
+            .collect()
+    }
+
+    /// The surfaces that asked to hear the background tick.
+    #[must_use]
+    pub fn ticking_surfaces(&self) -> Vec<(String, String)> {
+        self.plugins()
+            .iter()
+            .flat_map(|plugin| {
+                plugin
+                    .surfaces()
+                    .iter()
+                    .filter(|spec| spec.tick)
+                    .map(|spec| (plugin.name().to_owned(), spec.name.clone()))
             })
             .collect()
     }
@@ -331,17 +426,16 @@ impl crate::host::PluginHost {
             .map(|p| p.state())
     }
 
-    /// Render one surface by calling its `render` with the plugin's state.
+    /// Draw one surface by calling its `view` with its own model.
     ///
     /// `None` when no plugin owns that surface. Runs the script on the calling
-    /// thread, so a caller that holds a UI lock must not hold it across this
-    /// call.
+    /// thread, which is the script thread and nothing else.
     #[must_use]
     pub fn render_surface(&self, plugin: &str, name: &str) -> Option<SurfaceRender> {
         let found = self.plugins().iter().find(|p| p.name() == plugin)?;
         let spec = found.surfaces().iter().find(|d| d.name == name)?;
 
-        match found.call_fn(&spec.render, (found.state(),)) {
+        match found.call_fn(&spec.view, (found.surface_state(name),)) {
             Ok(value) if value.is_unit() => Some(SurfaceRender::Closed),
             Ok(value) => Some(match widget::parse(&value) {
                 Ok(widget) => SurfaceRender::Widget(widget),
@@ -357,10 +451,11 @@ impl crate::host::PluginHost {
         }
     }
 
-    /// Deliver one UI event to a surface's `on_event` callback.
+    /// One whole step of a surface's own loop: model and message in, new model
+    /// stored, actions out.
     ///
-    /// `None` when no plugin owns that surface. A surface without `on_event`
-    /// yields no actions.
+    /// `None` when no plugin owns that surface. A surface without an `update`
+    /// has nothing to say to a message and keeps the model it had.
     #[must_use]
     pub fn surface_event(
         &self,
@@ -370,17 +465,50 @@ impl crate::host::PluginHost {
     ) -> Option<Vec<SurfaceAction>> {
         let found = self.plugins().iter().find(|p| p.name() == plugin)?;
         let spec = found.surfaces().iter().find(|d| d.name == name)?;
-        let Some(body) = &spec.on_event else {
+        let Some(body) = spec.update.clone() else {
             return Some(Vec::new());
         };
 
-        let event = event.into_map();
-        match found.call_fn(body, (event,)) {
-            Ok(value) => Some(actions(&value)),
+        let state = found.surface_state(name);
+        match found.call_fn(&body, (state, event.into_map())) {
+            Ok(value) => {
+                let (state, cmd) = step(&value);
+                if let Some(state) = state {
+                    found.set_surface_state(name, state);
+                }
+                Some(cmd)
+            }
             Err(error) => {
-                found.report(&format!("surface `{name}` event failed: {error}"));
+                found.report(&format!("surface `{name}` update failed: {error}"));
                 Some(Vec::new())
             }
         }
+    }
+}
+
+/// Read what an `update` returned.
+///
+/// A bare map is the new model. A map with a `state` key is the new model and
+/// what to ask the host for. Anything else changed nothing.
+fn step(value: &Dynamic) -> (Option<Map>, Vec<SurfaceAction>) {
+    // A string or a list is actions alone: `"consume"` and
+    // `["consume", notice("…")]` say what to do and leave the model be.
+    if value.is_string() || value.is_array() {
+        return (None, actions(value));
+    }
+
+    let Some(map) = value.clone().try_cast::<Map>() else {
+        return (None, Vec::new());
+    };
+
+    match map.get("state") {
+        Some(state) => {
+            let cmd = map.get("cmd").map(actions).unwrap_or_default();
+            (state.clone().try_cast::<Map>(), cmd)
+        }
+        // A `verdict` map is one action, not a model with a key called
+        // `verdict`: returning `notice("…")` alone has to keep working.
+        None if map.contains_key("verdict") => (None, actions(value)),
+        None => (Some(map), Vec::new()),
     }
 }
