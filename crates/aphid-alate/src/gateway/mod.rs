@@ -22,7 +22,7 @@ pub mod client;
 pub mod server;
 pub mod wire;
 
-pub use client::{Client, is_listening};
+pub use client::{Client, Reader, Writer, is_listening};
 pub use server::{Event, Publisher, Server};
 pub use wire::{Answer, Envelope, Frame, Request};
 
