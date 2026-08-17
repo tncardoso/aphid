@@ -16,10 +16,6 @@ use ratatui::Frame;
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use ratatui::layout::{Constraint, Layout, Margin};
-use ratatui::style::{Color, Style};
-use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
-use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::harness::{self, Harness, HarnessOptions};
 use crate::model::{Catalog, ResolveError, clamp_thinking};
@@ -33,10 +29,13 @@ use crate::tui::event::{UiConfirmer, UiPlugin, UiSink, spawn_input_thread};
 use crate::tui::input::{Action, Input};
 use crate::tui::modal::{Confirm, Modal};
 use crate::tui::msg::Msg;
-use crate::tui::runtime::{self, Answers, Cmd, Hub, Subs, Tty, restore, setup};
+use crate::tui::render;
+use crate::tui::runtime::{
+    self, Answers, Cmd, Draw, Effects, Hub, Program, Subs, Timer, restore, setup,
+};
 use crate::tui::scrollback::{Scrollback, one_line};
 use crate::tui::status::Status;
-use crate::tui::surface::SurfaceLayer;
+use crate::tui::surface::{SurfaceLayer, SurfaceSource};
 
 /// How often the screen is repainted while something is happening.
 const FRAME: Duration = Duration::from_millis(33);
@@ -90,6 +89,8 @@ pub struct App {
     plugins_watch_notices: bool,
     /// Whether any plugin wants the background tick.
     plugins_tick: bool,
+    /// Whether any plugin has a panel at all.
+    plugins_draw: bool,
     session: Option<Arc<SessionPlugin>>,
     /// Waiting for the agent, in the order it arrived. A queue and not one slot
     /// because a plugin can send while the user types, and neither should lose.
@@ -102,7 +103,6 @@ pub struct App {
     skills: Vec<Skill>,
     /// Skill files that did not load, for the same list.
     skill_diagnostics: Vec<skills::Diagnostic>,
-    handle: AgentHandle,
     /// The reply channels for questions on screen. Runtime state, held here
     /// until the executor exists to own it.
     answers: Answers<Decision>,
@@ -138,13 +138,13 @@ impl App {
             plugin_commands: Vec::new(),
             plugins_watch_notices: false,
             plugins_tick: false,
+            plugins_draw: false,
             session: None,
             queued: VecDeque::new(),
             processes: Arc::clone(processes),
             workspace: harness.workspace.clone(),
             skills: harness.skills.clone(),
             skill_diagnostics: harness.diagnostics.clone(),
-            handle: harness.agent.handle(),
             host: None,
             answers: Answers::default(),
             quit: false,
@@ -167,13 +167,13 @@ impl App {
             plugin_commands: Vec::new(),
             plugins_watch_notices: false,
             plugins_tick: false,
+            plugins_draw: false,
             session: None,
             queued: VecDeque::new(),
             processes: Arc::new(exec::Registry::new()),
             workspace: Workspace::new(std::env::temp_dir()),
             skills: Vec::new(),
             skill_diagnostics: Vec::new(),
-            handle: agent.handle(),
             host: None,
             answers: Answers::default(),
             quit: false,
@@ -235,6 +235,17 @@ impl App {
     /// no script, no task, no terminal. What it wants done comes back as a
     /// [`Cmd`], which the executor performs and reports on with more messages.
     pub fn update(&mut self, msg: Msg) -> Cmd<Effect> {
+        let cmd = self.apply(msg);
+        // The input box's border and its scroll window both follow from state
+        // the model holds. Settling them here is what lets the drawing take
+        // the model by shared reference.
+        self.input.set_prompt(self.status.running);
+        self.input
+            .sync_scroll((self.input.line_count()).clamp(1, MAX_INPUT_ROWS as usize));
+        cmd
+    }
+
+    fn apply(&mut self, msg: Msg) -> Cmd<Effect> {
         match msg {
             Msg::TurnStarted => {
                 self.status.running = true;
@@ -371,7 +382,23 @@ impl App {
                 self.scrollback.push_shell(command, output);
                 Cmd::none()
             }
+            Msg::LaidOut(laid) => {
+                // Idempotent on purpose: it arrives after every frame, and
+                // most frames lay out exactly what the last one did.
+                self.scrollback.laid_out(laid.viewport);
+                self.surfaces.laid_out(laid.hits);
+                Cmd::none()
+            }
+            Msg::Tick => Cmd::batch([Effect::PluginTick, Effect::RefreshSurfaces]),
+            Msg::Panes(panes) => {
+                self.surfaces.show(panes);
+                Cmd::none()
+            }
             Msg::SurfaceDone { plugin, actions } => {
+                // Nothing to say means the surface is gone; the focus with it.
+                if actions.is_empty() {
+                    self.surfaces.release_focus();
+                }
                 let mut cmd = Cmd::none();
                 for action in actions {
                     match action {
@@ -1032,7 +1059,7 @@ pub async fn run(
         .collect();
     app.plugins_watch_notices = host.any_defines("on_notify");
     app.plugins_tick = host.any_defines("on_tick") || host.has_surfaces();
-    app.surfaces.refresh(&host);
+    app.plugins_draw = host.has_surfaces();
 
     if resumed.is_none() {
         app.scrollback.push_logo();
@@ -1075,12 +1102,14 @@ pub async fn run(
         workspace.root().display()
     ));
 
+    let mut executor = Executor::new(harness.agent, &app, events.clone());
+
     let (mut terminal, kitty) = setup()?;
     spawn_input_thread(&events);
-    let result = drive(
-        &mut terminal,
+    let result = runtime::run(
         &mut app,
-        harness.agent,
+        &mut executor,
+        &mut terminal,
         &events,
         &mut receiver,
     )
@@ -1117,16 +1146,34 @@ struct Executor {
     workspace: Workspace,
     host: Option<Arc<aphid_plugin::PluginHost>>,
     answers: Answers<Decision>,
+    /// Renders the panels, keeping what it last drew against each plugin's
+    /// state version.
+    surfaces: SurfaceSource,
     hub: Hub<Msg>,
 }
 
 impl Executor {
+    /// Everything the loop will need that the model must not hold.
+    fn new(agent: Agent, app: &App, hub: Hub<Msg>) -> Self {
+        Self {
+            handle: agent.handle(),
+            idle: Some(agent),
+            running: None,
+            pending: Vec::new(),
+            processes: Arc::clone(&app.processes),
+            workspace: app.workspace.clone(),
+            host: app.host.clone(),
+            answers: app.answers.clone(),
+            surfaces: SurfaceSource::default(),
+            hub,
+        }
+    }
+
     /// Do one thing, and report back with messages.
     ///
-    /// Takes the model only for the surfaces, whose rendering still runs
-    /// inline; everything else here never reads it. That last thread is cut
-    /// when the plugin hub arrives.
-    fn perform(&mut self, app: &mut App, effect: Effect) {
+    /// Reads nothing of the model and writes nothing to it. Everything it
+    /// learns goes back on the hub.
+    fn perform(&mut self, effect: Effect) {
         match effect {
             Effect::StartRun(prompt) => self.start_run(prompt),
             Effect::Cancel => self.handle.cancel(),
@@ -1174,16 +1221,18 @@ impl Executor {
                 let Some(host) = self.host.clone() else {
                     return;
                 };
-                match host.surface_event(&plugin, &name, event) {
-                    Some(actions) => {
-                        self.hub.send(Msg::SurfaceDone { plugin, actions });
-                    }
-                    None => app.surfaces.release_focus(),
-                }
+                // No surface by that name any more: an empty answer, which
+                // the update reads as "it is gone, take the focus back".
+                let actions = host.surface_event(&plugin, &name, event);
+                self.hub.send(Msg::SurfaceDone {
+                    plugin,
+                    actions: actions.unwrap_or_default(),
+                });
             }
             Effect::RefreshSurfaces => {
                 if let Some(host) = self.host.clone() {
-                    app.surfaces.refresh(&host);
+                    let panes = self.surfaces.refresh(&host);
+                    self.hub.send(Msg::Panes(panes));
                 }
             }
             Effect::PluginTick => {
@@ -1246,85 +1295,60 @@ fn apply_to_agent(agent: &mut Agent, effect: Effect, hub: &Hub<Msg>) {
     }
 }
 
-async fn drive(
-    terminal: &mut Tty,
-    app: &mut App,
-    agent: Agent,
-    hub: &Hub<Msg>,
-    receiver: &mut UnboundedReceiver<Msg>,
-) -> std::io::Result<()> {
-    let mut ex = Executor {
-        idle: Some(agent),
-        running: None,
-        pending: Vec::new(),
-        handle: app.handle.clone(),
-        processes: Arc::clone(&app.processes),
-        workspace: app.workspace.clone(),
-        host: app.host.clone(),
-        answers: app.answers.clone(),
-        hub: hub.clone(),
-    };
+impl Program for App {
+    type Msg = Msg;
+    type Effect = Effect;
 
-    // An `interval` and not a fresh `sleep` per pass: a sleep built inside
-    // `select!` restarts whenever any other branch wins, which a busy loop
-    // would starve for ever.
-    let mut ticker = tokio::time::interval(TICK);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let wants_tick = app.wanted_subs().tick.is_some();
-
-    while !app.quitting() {
-        terminal.draw(|frame| render(frame, app))?;
-
-        let msg = tokio::select! {
-            // A finished run hands the agent back.
-            finished = async { ex.running.as_mut().expect("only polled while running").await },
-                if ex.running.is_some() =>
-            {
-                ex.running = None;
-                match finished {
-                    Ok((agent, outcome)) => {
-                        ex.idle = Some(agent);
-                        Some(Msg::RunEnded {
-                            stop: outcome.stop,
-                            turns: outcome.turns,
-                            error: outcome.error,
-                        })
-                    }
-                    Err(error) => Some(Msg::RunFailed(error.to_string())),
-                }
-            }
-            msg = receiver.recv() => match msg {
-                Some(msg) => Some(msg),
-                None => break,
-            },
-            () = tokio::time::sleep(FRAME), if app.wanted_subs().frame.is_some() => Some(Msg::Frame),
-            () = tokio::time::sleep(PS_REFRESH),
-                if app.wanted_subs().poll.is_some() => Some(Msg::Poll),
-            _ = ticker.tick(), if wants_tick => {
-                ex.perform(app, Effect::PluginTick);
-                ex.perform(app, Effect::RefreshSurfaces);
-                None
-            }
-        };
-
-        if let Some(msg) = msg {
-            for effect in app.update(msg).into_effects() {
-                ex.perform(app, effect);
-            }
-        }
-        // Whatever else is already waiting goes into the same frame.
-        while let Ok(msg) = receiver.try_recv() {
-            for effect in app.update(msg).into_effects() {
-                ex.perform(app, effect);
-            }
-        }
+    fn update(&mut self, msg: Msg) -> Cmd<Effect> {
+        App::update(self, msg)
     }
 
-    ex.perform(app, Effect::Quit);
-    if let Some(running) = ex.running {
-        running.abort();
+    fn timer(&self, timer: Timer) -> Option<Msg> {
+        Some(match timer {
+            Timer::Frame => Msg::Frame,
+            Timer::Poll => Msg::Poll,
+            Timer::Tick => Msg::Tick,
+        })
     }
-    Ok(())
+
+    fn subs(&self) -> Subs {
+        self.wanted_subs()
+    }
+
+    fn done(&self) -> bool {
+        self.quitting()
+    }
+}
+
+impl Draw for App {
+    type Cache = render::CodeCache;
+
+    fn draw(&self, frame: &mut Frame<'_>, cache: &mut Self::Cache) {
+        render::draw(self, frame, cache);
+    }
+
+    fn laid_out(cache: &Self::Cache) -> Option<Msg> {
+        render::laid_out(cache)
+    }
+}
+
+impl Effects for Executor {
+    type Program = App;
+
+    fn perform(&mut self, effect: Effect, _hub: &Hub<Msg>) {
+        Executor::perform(self, effect);
+    }
+
+    fn start(&mut self, _hub: &Hub<Msg>) {
+        // The panels want drawing before the first frame, not after it.
+        self.perform(Effect::RefreshSurfaces);
+    }
+
+    fn stop(&mut self) {
+        if let Some(running) = self.running.take() {
+            running.abort();
+        }
+    }
 }
 
 /// Split `/name rest` into its two halves. `None` when the line is a prompt.
@@ -1379,57 +1403,7 @@ async fn run_bang(
 }
 
 /// The input box grows with content up to this many rows, then scrolls.
-const MAX_INPUT_ROWS: u16 = 4;
-
-fn render(frame: &mut Frame<'_>, app: &mut App) {
-    let content_height = (app.input.line_count() as u16).clamp(1, MAX_INPUT_ROWS);
-    // +2 for the border's top and bottom rows.
-    let input_height = content_height + 2;
-
-    let [transcript, input_row, status] = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(input_height),
-        Constraint::Length(1),
-    ])
-    .areas(frame.area());
-
-    let main = app.surfaces.render(frame, transcript);
-    let visible = app
-        .scrollback
-        .visible_lines(main.width as usize, main.height as usize);
-    frame.render_widget(Paragraph::new(visible), main);
-
-    app.input.set_prompt(app.status.running);
-    frame.render_widget(app.input.textarea(), input_row);
-    app.input.sync_scroll(content_height as usize);
-
-    if app.input.line_count() > content_height as usize {
-        let mut state =
-            ScrollbarState::new(app.input.line_count()).position(app.input.scroll_top());
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .track_symbol(None)
-                .thumb_style(Style::default().fg(Color::DarkGray)),
-            // Trim the border's top/bottom rows so the thumb only ever
-            // covers the content rows it actually represents.
-            input_row.inner(Margin {
-                vertical: 1,
-                horizontal: 0,
-            }),
-            &mut state,
-        );
-    }
-
-    frame.render_widget(Paragraph::new(app.status.line()), status);
-
-    // The textarea draws its own cursor cell during render; there is no
-    // manual `set_cursor_position` to do here.
-    if let Some(modal) = &app.modal {
-        modal.render(frame, frame.area());
-    }
-}
+pub(crate) const MAX_INPUT_ROWS: u16 = 4;
 
 /// The key for a model, from the variable the model itself names.
 ///
@@ -1450,6 +1424,7 @@ fn api_key(model: &Model) -> Result<CompactString, String> {
 mod tests {
     use super::*;
     use crate::plugins::permissions::{Confirmer, Risk};
+    use crate::tui::render::ScrollbackCache;
     use aphid_agent::testing::{Turn, scripted};
     use aphid_core::{Role, providers::deepseek};
     use ratatui::crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
@@ -1505,6 +1480,7 @@ mod tests {
             workspace: Workspace::new(std::env::temp_dir()),
             host: None,
             answers: Answers::default(),
+            surfaces: SurfaceSource::default(),
             hub,
         }
     }
@@ -1530,7 +1506,7 @@ mod tests {
         let mut ex = executor(agent_with(vec![Turn::text("hello back")]), hub);
 
         for effect in type_line(&mut app, "hello") {
-            ex.perform(&mut app, effect);
+            ex.perform(effect);
         }
 
         let (agent, outcome) = ex.running.expect("a run").await.expect("no panic");
@@ -1548,7 +1524,7 @@ mod tests {
         let mut ex = executor(agent, hub);
 
         for effect in type_line(&mut app, "one") {
-            ex.perform(&mut app, effect);
+            ex.perform(effect);
         }
         let (agent, _) = ex.running.take().expect("a run").await.expect("no panic");
         ex.idle = Some(agent);
@@ -1561,10 +1537,10 @@ mod tests {
             })
             .into_effects()
         {
-            ex.perform(&mut app, effect);
+            ex.perform(effect);
         }
         for effect in type_line(&mut app, "two") {
-            ex.perform(&mut app, effect);
+            ex.perform(effect);
         }
 
         let (agent, _) = ex.running.expect("a second run").await.expect("no panic");
@@ -1736,11 +1712,21 @@ mod tests {
 
     /// A transcript long enough to have somewhere to scroll to, already laid
     /// out once: a wheel step means nothing until the pane has a size.
-    fn scrollable(app: &mut App) -> usize {
+    fn scrollable(app: &mut App, cache: &mut ScrollbackCache) -> usize {
         for number in 0..40 {
             app.scrollback.push_notice(format!("notice {number}"));
         }
-        app.scrollback.layout(40, 10).top
+        drawn(app, cache)
+    }
+
+    /// One frame's worth of laying out, and telling the model about it.
+    fn drawn(app: &mut App, cache: &mut ScrollbackCache) -> usize {
+        let view = cache.layout(&app.scrollback, 40, 10);
+        app.update(Msg::LaidOut(crate::tui::render::Laid {
+            viewport: view,
+            hits: Vec::new(),
+        }));
+        view.top
     }
 
     /// A gated call is a question with a task blocked behind it. These say
@@ -1830,27 +1816,26 @@ mod tests {
     fn mouse_wheel_scrolls_the_transcript() {
         let agent = agent_with(vec![Turn::text("unused")]);
         let mut app = app_for(&agent);
-        let bottom = scrollable(&mut app);
+        let mut cache = ScrollbackCache::default();
+        let bottom = scrollable(&mut app, &mut cache);
 
         app.update(Msg::Mouse(mouse(MouseEventKind::ScrollUp)));
-        assert_eq!(
-            app.scrollback.layout(40, 10).top,
-            bottom - MOUSE_SCROLL_LINES
-        );
+        assert_eq!(drawn(&mut app, &mut cache), bottom - MOUSE_SCROLL_LINES);
 
         app.update(Msg::Mouse(mouse(MouseEventKind::ScrollDown)));
-        assert_eq!(app.scrollback.layout(40, 10).top, bottom);
+        assert_eq!(drawn(&mut app, &mut cache), bottom);
     }
 
     #[test]
     fn mouse_wheel_down_saturates_at_the_newest_message() {
         let agent = agent_with(vec![Turn::text("unused")]);
         let mut app = app_for(&agent);
-        let bottom = scrollable(&mut app);
+        let mut cache = ScrollbackCache::default();
+        let bottom = scrollable(&mut app, &mut cache);
 
         app.update(Msg::Mouse(mouse(MouseEventKind::ScrollDown)));
         app.update(Msg::Mouse(mouse(MouseEventKind::ScrollDown)));
-        assert_eq!(app.scrollback.layout(40, 10).top, bottom);
+        assert_eq!(drawn(&mut app, &mut cache), bottom);
         assert!(!app.scrollback.scrolled());
     }
 
@@ -1858,7 +1843,7 @@ mod tests {
     fn non_wheel_mouse_events_do_not_scroll() {
         let agent = agent_with(vec![Turn::text("unused")]);
         let mut app = app_for(&agent);
-        scrollable(&mut app);
+        scrollable(&mut app, &mut ScrollbackCache::default());
 
         app.update(Msg::Mouse(mouse(MouseEventKind::Moved)));
         assert!(!app.scrollback.scrolled());
@@ -2021,7 +2006,7 @@ mod tests {
             "{asked:?}"
         );
         for effect in asked {
-            ex.perform(&mut app, effect);
+            ex.perform(effect);
         }
         assert_eq!(ex.pending.len(), 1, "held for the agent, not dropped");
 
@@ -2029,7 +2014,7 @@ mod tests {
         ex.idle = Some(held);
         app.status.running = false;
         for effect in type_line(&mut app, "hello") {
-            ex.perform(&mut app, effect);
+            ex.perform(effect);
         }
         assert!(ex.pending.is_empty(), "the wait is over");
         let _ = ex.running.expect("a run").await;
@@ -2158,6 +2143,7 @@ mod plugin_tests {
 
     use crate::tui::effect::Effect;
     use crate::tui::msg::Msg;
+    use crate::tui::surface::SurfaceSource;
 
     use aphid_agent::{Agent, exec};
     use aphid_core::providers::deepseek;
@@ -2222,6 +2208,12 @@ mod plugin_tests {
             .collect();
         app.host = Some(host);
         (app, agent)
+    }
+
+    /// Render the panels and hand them to the model, as the executor does.
+    fn refresh(app: &mut App, panels: &mut SurfaceSource, host: &Arc<PluginHost>) {
+        let panes = panels.refresh(host);
+        app.update(Msg::Panes(panes));
     }
 
     fn notices(app: &App) -> Vec<String> {
@@ -2318,11 +2310,12 @@ mod plugin_tests {
         );
         let host = fixture.host();
         let (mut app, _agent) = app_with(host.clone());
-        app.surfaces.refresh(&host);
+        let mut panels = SurfaceSource::default();
+        refresh(&mut app, &mut panels, &host);
         assert!(!app.surfaces.any_open(), "the panel starts closed");
 
         let _ = host.run_command("panel", "");
-        app.surfaces.refresh(&host);
+        refresh(&mut app, &mut panels, &host);
         assert!(app.surfaces.any_open(), "the panel is now open");
 
         app.surfaces.focus_first();

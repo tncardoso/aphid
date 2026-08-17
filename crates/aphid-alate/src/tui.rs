@@ -20,6 +20,7 @@ use aphid_code::plugins::permissions::Decision;
 use aphid_code::tui::event::{UiEvent, spawn_input_thread};
 use aphid_code::tui::input::{Action, Input};
 use aphid_code::tui::modal::{Confirm, Modal};
+use aphid_code::tui::render::ScrollbackCache;
 use aphid_code::tui::scrollback::Scrollback;
 use aphid_code::tui::status::Status;
 use ratatui::crossterm::event::{DisableBracketedPaste, EnableBracketedPaste, KeyCode, KeyEvent};
@@ -66,6 +67,9 @@ struct App {
     /// One for each session looked at. Switching draws a different one rather
     /// than fetching the same history twice.
     views: HashMap<String, Scrollback>,
+    /// What the last draw of each session wrapped, kept so switching back to
+    /// one does not re-wrap its whole history.
+    caches: HashMap<String, ScrollbackCache>,
     /// The session being drawn and typed into.
     current: String,
     /// The session being filled from a replay, if one is arriving.
@@ -127,6 +131,7 @@ pub async fn run(home: &Home) -> std::io::Result<()> {
 
     let mut app = App {
         views: HashMap::new(),
+        caches: HashMap::new(),
         current: String::new(),
         filling: None,
         input: Input::default(),
@@ -476,7 +481,10 @@ fn render(frame: &mut Frame<'_>, app: &mut App) {
     .areas(frame.area());
 
     let view = app.views.entry(app.current.clone()).or_default();
-    let visible = view.visible_lines(transcript.width as usize, transcript.height as usize);
+    let cache = app.caches.entry(app.current.clone()).or_default();
+    let laid = cache.layout(view, transcript.width as usize, transcript.height as usize);
+    view.laid_out(laid);
+    let visible = cache.visible(laid);
     frame.render_widget(Paragraph::new(visible), transcript);
 
     app.input.set_prompt(app.status.running);

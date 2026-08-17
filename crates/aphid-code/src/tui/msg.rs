@@ -100,6 +100,14 @@ pub enum Msg {
         command: String,
         output: String,
     },
+    /// What the last draw settled: how the pane was wrapped and where the
+    /// panels put their clickable regions. The one road from the screen back
+    /// into the model, and it is a message like everything else.
+    LaidOut(crate::tui::render::Laid),
+    /// The background tick.
+    Tick,
+    /// The panels, freshly rendered by the plugins that own them.
+    Panes(crate::tui::surface::Panes),
     /// A surface handled an event and asked for these.
     SurfaceDone {
         plugin: String,

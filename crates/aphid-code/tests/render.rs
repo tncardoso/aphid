@@ -5,6 +5,7 @@
 use aphid_agent::exec;
 use aphid_code::plugins::permissions::Risk;
 use aphid_code::tui::modal::{Confirm, Modal};
+use aphid_code::tui::render::ScrollbackCache;
 use aphid_code::tui::scrollback::Scrollback;
 use aphid_code::tui::status::Status;
 use aphid_core::{Cost, Usage, providers::deepseek};
@@ -26,6 +27,13 @@ fn rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
                 .to_owned()
         })
         .collect()
+}
+
+/// Every line the pane comes to at `width`, whatever the viewport.
+fn all_lines(view: &Scrollback, width: usize) -> Vec<ratatui::text::Line<'static>> {
+    let mut cache = ScrollbackCache::default();
+    let laid = cache.layout(view, width, usize::MAX);
+    cache.visible(laid)
 }
 
 fn draw(width: u16, height: u16, f: impl FnOnce(&mut ratatui::Frame<'_>)) -> Vec<String> {
@@ -85,7 +93,7 @@ fn a_tool_call_renders_as_a_header_and_collapsed_output() {
     view.finish_tool("c1", &output, false, None);
 
     let rendered = draw(50, 20, |frame| {
-        frame.render_widget(Paragraph::new(view.lines(50)), frame.area());
+        frame.render_widget(Paragraph::new(all_lines(&view, 50)), frame.area());
     });
 
     assert!(rendered[0].starts_with("→ bash"), "{}", rendered[0]);
@@ -105,7 +113,7 @@ fn a_streaming_call_counts_up_then_becomes_the_call() {
     view.push_tool_stream(0, 412);
 
     let rendered = draw(50, 4, |frame| {
-        frame.render_widget(Paragraph::new(view.lines(50)), frame.area());
+        frame.render_widget(Paragraph::new(all_lines(&view, 50)), frame.area());
     });
     assert!(rendered[0].starts_with("◌ bash"), "{}", rendered[0]);
     assert!(
@@ -117,7 +125,7 @@ fn a_streaming_call_counts_up_then_becomes_the_call() {
     view.push_tool_call("c1", "bash", r#"{"command":"cargo test --all"}"#);
 
     let rendered = draw(50, 4, |frame| {
-        frame.render_widget(Paragraph::new(view.lines(50)), frame.area());
+        frame.render_widget(Paragraph::new(all_lines(&view, 50)), frame.area());
     });
     assert!(rendered[0].starts_with("⋯ bash"), "{}", rendered[0]);
     assert!(rendered[0].contains("cargo test --all"), "{}", rendered[0]);
@@ -138,7 +146,7 @@ fn an_edit_renders_as_a_diff() {
     );
 
     let rendered = draw(60, 10, |frame| {
-        frame.render_widget(Paragraph::new(view.lines(60)), frame.area());
+        frame.render_widget(Paragraph::new(all_lines(&view, 60)), frame.area());
     });
 
     assert!(rendered[0].starts_with("→ edit"));
@@ -154,7 +162,7 @@ fn a_failed_tool_is_marked_and_keeps_its_message() {
     view.finish_tool("c1", "edit 1: old_text does not appear in a.rs", true, None);
 
     let rendered = draw(60, 6, |frame| {
-        frame.render_widget(Paragraph::new(view.lines(60)), frame.area());
+        frame.render_widget(Paragraph::new(all_lines(&view, 60)), frame.area());
     });
 
     assert!(rendered[0].starts_with("✗ edit"), "{}", rendered[0]);
@@ -170,7 +178,7 @@ fn a_running_tool_shows_its_latest_output() {
     }
 
     let rendered = draw(60, 20, |frame| {
-        frame.render_widget(Paragraph::new(view.lines(60)), frame.area());
+        frame.render_widget(Paragraph::new(all_lines(&view, 60)), frame.area());
     });
 
     assert!(rendered[0].starts_with("⋯ bash"), "{}", rendered[0]);
@@ -192,7 +200,7 @@ fn the_conversation_reads_in_order() {
     view.push_text("The assertion on line 42 is wrong.");
 
     let rendered = draw(50, 12, |frame| {
-        frame.render_widget(Paragraph::new(view.lines(50)), frame.area());
+        frame.render_widget(Paragraph::new(all_lines(&view, 50)), frame.area());
     });
 
     let joined = rendered.join("\n");
@@ -209,7 +217,7 @@ fn long_text_wraps_to_the_pane_width() {
     view.push_text("the quick brown fox jumps over the lazy dog and keeps going");
 
     let rendered = draw(20, 8, |frame| {
-        frame.render_widget(Paragraph::new(view.lines(20)), frame.area());
+        frame.render_widget(Paragraph::new(all_lines(&view, 20)), frame.area());
     });
 
     for row in &rendered {
@@ -358,8 +366,23 @@ fn transcript() -> Scrollback {
 }
 
 /// What the pane paints into a `width` by `height` viewport.
+///
+/// A whole frame's worth: lay out, draw, and tell the pane what was laid out,
+/// which is what a page key needs to know before the next one.
 fn painted(view: &mut Scrollback, width: u16, height: u16) -> Vec<String> {
-    let lines = view.visible_lines(width as usize, height as usize);
+    let mut cache = ScrollbackCache::default();
+    paint(view, &mut cache, width, height)
+}
+
+fn paint(
+    view: &mut Scrollback,
+    cache: &mut ScrollbackCache,
+    width: u16,
+    height: u16,
+) -> Vec<String> {
+    let laid = cache.layout(view, width as usize, height as usize);
+    view.laid_out(laid);
+    let lines = cache.visible(laid);
     draw(width, height, |frame| {
         frame.render_widget(Paragraph::new(lines), frame.area());
     })
@@ -457,18 +480,53 @@ fn scrolling_up_holds_the_viewport_while_content_arrives_below() {
     for number in 0..40 {
         view.push_notice(format!("notice {number}"));
     }
-    let _ = view.visible_lines(40, 10);
+    let mut cache = ScrollbackCache::default();
+    let _ = paint(&mut view, &mut cache, 40, 10);
 
     view.scroll_up(12);
-    let parked = painted(&mut view, 40, 10);
+    let parked = paint(&mut view, &mut cache, 40, 10);
 
     for number in 40..46 {
         view.push_notice(format!("notice {number}"));
     }
 
     assert_eq!(
-        painted(&mut view, 40, 10),
+        paint(&mut view, &mut cache, 40, 10),
         parked,
         "reading back through the transcript is not disturbed by what arrives"
     );
+}
+
+/// The cache is a memo of a pure function of the pane, so a warm one and a
+/// cold one have to paint the same picture. If they ever differ, the cache is
+/// holding state rather than remembering work.
+#[test]
+fn a_warm_cache_paints_what_a_cold_one_paints() {
+    let mut view = transcript();
+    for number in 0..40 {
+        view.push_notice(format!("notice {number}"));
+    }
+
+    let mut warm = ScrollbackCache::default();
+    let _ = paint(&mut view, &mut warm, 40, 12);
+    // Something changes, so the warm cache splices rather than rebuilds.
+    view.push_text(" and a little more");
+    let after_splice = paint(&mut view, &mut warm, 40, 12);
+
+    let cold = painted(&mut view, 40, 12);
+
+    assert_eq!(after_splice, cold);
+}
+
+/// Drawing must not change what is drawn. Painting the same pane twice with
+/// no message in between has to give the same answer.
+#[test]
+fn drawing_twice_paints_the_same_thing() {
+    let mut view = transcript();
+    let mut cache = ScrollbackCache::default();
+
+    let first = paint(&mut view, &mut cache, 40, 12);
+    let second = paint(&mut view, &mut cache, 40, 12);
+
+    assert_eq!(first, second);
 }

@@ -21,42 +21,65 @@ pub type SurfaceKey = (String, String);
 /// The width a side column asks for.
 const SURFACE_WIDTH: u16 = 40;
 
+/// What the panels look like, as the model holds them.
 #[derive(Default)]
 pub struct SurfaceLayer {
-    cache: HashMap<SurfaceKey, Cached>,
-    left: Vec<SurfaceView>,
-    right: Vec<SurfaceView>,
+    left: Vec<Pane>,
+    right: Vec<Pane>,
     focus: Option<SurfaceKey>,
+    /// The clickable regions the last draw reported back.
     hits: Vec<Hit>,
+}
+
+/// One open panel: a finished widget tree and what to say about it.
+///
+/// Plain data. It is made by running a plugin's `render`, which happens on the
+/// executor's side of the line, and arrives here as a message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pane {
+    pub key: SurfaceKey,
+    pub title: String,
+    pub interactive: bool,
+    pub widget: Widget,
+}
+
+/// The panels as a whole, left column and right.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Panes {
+    pub left: Vec<Pane>,
+    pub right: Vec<Pane>,
+}
+
+/// Renders the panels by asking the plugins. The executor's half.
+///
+/// Keeps what it last rendered against the plugin's state version, so a panel
+/// whose plugin has not moved is not re-rendered.
+#[derive(Default)]
+pub struct SurfaceSource {
+    cache: HashMap<SurfaceKey, Cached>,
 }
 
 struct Cached {
     version: u64,
-    view: Option<SurfaceView>,
+    view: Option<Pane>,
 }
 
-#[derive(Clone)]
-struct SurfaceView {
-    key: SurfaceKey,
-    title: String,
-    interactive: bool,
-    widget: Widget,
-}
-
-#[derive(Clone)]
-struct Hit {
+/// One clickable region a panel drew.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hit {
     surface: SurfaceKey,
     target: Option<String>,
     interactive: bool,
     area: Rect,
 }
 
-impl SurfaceLayer {
-    /// Poll the host for open surfaces and their widget trees.
+impl SurfaceSource {
+    /// Ask the host for the open surfaces and their widget trees.
     ///
     /// Runs plugin `render` functions on the calling thread. They are expected
     /// to be cheap, the same bargain slash commands make.
-    pub fn refresh(&mut self, host: &Arc<PluginHost>) {
+    #[must_use]
+    pub fn refresh(&mut self, host: &Arc<PluginHost>) -> Panes {
         let mut left = Vec::new();
         let mut right = Vec::new();
 
@@ -83,9 +106,17 @@ impl SurfaceLayer {
             }
         }
 
-        self.left = left;
-        self.right = right;
+        Panes { left, right }
+    }
+}
 
+impl SurfaceLayer {
+    /// Take on the panels a refresh produced.
+    pub fn show(&mut self, panes: Panes) {
+        self.left = panes.left;
+        self.right = panes.right;
+
+        // A panel that closed, or stopped listening, cannot keep the focus.
         if self
             .focus
             .as_ref()
@@ -166,11 +197,18 @@ impl SurfaceLayer {
         Some(hit)
     }
 
-    /// Render the side columns inside the transcript area, and return the area
-    /// left for the transcript itself.
-    pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect) -> Rect {
-        self.hits.clear();
+    /// Take on what the last draw laid out.
+    pub fn laid_out(&mut self, hits: Vec<Hit>) {
+        self.hits = hits;
+    }
 
+    /// Draw the side columns inside the transcript area, and return the area
+    /// left for the transcript itself.
+    ///
+    /// Collects the clickable regions into `hits` rather than keeping them:
+    /// what a click lands on is the model's business, and it hears about it
+    /// as a message like everything else.
+    pub fn draw(&self, frame: &mut Frame<'_>, area: Rect, hits: &mut Vec<Hit>) -> Rect {
         let left_width = self.side_width(area.width, !self.left.is_empty());
         let right_width = self.side_width(area.width, !self.right.is_empty());
 
@@ -191,13 +229,13 @@ impl SurfaceLayer {
         let mut index = 0;
 
         if left_width > 0 {
-            self.render_side(frame, cells[index], Side::Left);
+            self.render_side(frame, cells[index], Side::Left, hits);
             index += 1;
         }
         let main = cells[index];
         index += 1;
         if right_width > 0 {
-            self.render_side(frame, cells[index], Side::Right);
+            self.render_side(frame, cells[index], Side::Right, hits);
         }
 
         main
@@ -210,8 +248,8 @@ impl SurfaceLayer {
         SURFACE_WIDTH.min(terminal / 3).max(1)
     }
 
-    fn render_side(&mut self, frame: &mut Frame<'_>, column: Rect, side: Side) {
-        let views: &[SurfaceView] = match side {
+    fn render_side(&self, frame: &mut Frame<'_>, column: Rect, side: Side, hits: &mut Vec<Hit>) {
+        let views: &[Pane] = match side {
             Side::Left => &self.left,
             Side::Right => &self.right,
         };
@@ -236,7 +274,7 @@ impl SurfaceLayer {
                 inner,
                 &view.key,
                 view.interactive,
-                &mut self.hits,
+                hits,
             );
         }
     }
@@ -258,19 +296,16 @@ impl SurfaceLayer {
     }
 }
 
-fn render_view(
-    host: &Arc<PluginHost>,
-    surface: &aphid_plugin::RegisteredSurface,
-) -> Option<SurfaceView> {
+fn render_view(host: &Arc<PluginHost>, surface: &aphid_plugin::RegisteredSurface) -> Option<Pane> {
     match host.render_surface(&surface.plugin, &surface.name) {
-        Some(SurfaceRender::Widget(widget)) => Some(SurfaceView {
+        Some(SurfaceRender::Widget(widget)) => Some(Pane {
             key: (surface.plugin.clone(), surface.name.clone()),
             title: surface.name.clone(),
             interactive: surface.interactive,
             widget,
         }),
         Some(SurfaceRender::Closed) | None => None,
-        Some(SurfaceRender::Failed(error)) => Some(SurfaceView {
+        Some(SurfaceRender::Failed(error)) => Some(Pane {
             key: (surface.plugin.clone(), surface.name.clone()),
             title: surface.name.clone(),
             interactive: surface.interactive,

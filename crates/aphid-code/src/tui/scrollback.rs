@@ -17,7 +17,7 @@ pub const COLLAPSE_AFTER: usize = 15;
 ///
 /// The agent transcript is not touched; this only bounds what the TUI can
 /// render and scroll back through.
-const MAX_ENTRIES: usize = 300;
+pub(crate) const MAX_ENTRIES: usize = 300;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum ToolState {
@@ -72,12 +72,11 @@ pub enum Scroll {
     Anchored { entry: usize, offset: usize },
 }
 
-/// What a viewport shows, worked out from the scroll position and the lines
-/// there are.
+/// What a draw laid the pane out as.
 ///
-/// Derived at each draw. The pane keeps the last one so a page key knows how
-/// far a page is: a position in lines is only meaningful against a wrapping,
-/// and the wrapping is only known once the pane has a width.
+/// A position in lines is only meaningful against a wrapping, and only the
+/// draw knows the wrapping. So the page keys say how far to move and this
+/// comes back saying where that landed.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Viewport {
     /// The first visible line.
@@ -85,6 +84,8 @@ pub struct Viewport {
     /// Lines in the whole transcript.
     pub total: usize,
     pub height: usize,
+    /// Where the pane ended up, once the move was resolved and clamped.
+    pub scroll: Scroll,
 }
 
 /// The transcript pane's state.
@@ -97,8 +98,14 @@ pub struct Scrollback {
     /// Block indices restart with each turn, so this is cleared at every one.
     streams: HashMap<u32, usize>,
     scroll: Scroll,
-    /// What the last draw laid out. Read by the page keys, written by
-    /// [`Self::layout`] and by a scroll that moves it on.
+    /// Lines the reader asked to move but no draw has resolved yet.
+    ///
+    /// A key says "up ten"; only the draw knows what ten lines is, because
+    /// only it knows the wrapping. It resolves this into an anchor and says
+    /// so, and two keys pressed before one frame move twenty lines and not
+    /// ten.
+    pending: isize,
+    /// What the last draw laid out.
     viewport: Viewport,
     pub show_thinking: bool,
     /// The entry index where the current turn starts. Entries before this are
@@ -112,21 +119,11 @@ pub struct Scrollback {
     /// writes to the cache alone.
     revs: Vec<u64>,
     next_rev: u64,
-    /// Flattened rendered lines, in transcript order.
-    lines: Vec<Line<'static>>,
-    /// Where each entry's rendered block starts in [`Self::lines`].
-    starts: Vec<usize>,
-    /// The revision each cached block was rendered from.
-    cached_revs: Vec<u64>,
-    /// The width and thinking state [`Self::lines`] was built for.
-    cache_width: usize,
-    cache_show_thinking: bool,
-    /// How many entry blocks the last cache pass rendered.
+    /// How many entries the history cap has dropped, ever.
     ///
-    /// The point of the per-entry cache is that one changed entry costs one
-    /// block, so a test asserts the work and not only the staleness flag.
-    #[cfg(test)]
-    rebuilt: usize,
+    /// The cache drains the same prefix by comparing this: it holds rendered
+    /// blocks by entry index, and the indices move when the front goes.
+    evicted: usize,
 }
 
 impl Scrollback {
@@ -141,8 +138,11 @@ impl Scrollback {
         self.by_call.clear();
         self.streams.clear();
         self.scroll = Scroll::Bottom;
+        self.pending = 0;
         self.turn_start = None;
-        self.invalidate_cache();
+        // Everything the cache holds is about entries that no longer exist,
+        // and the count says so.
+        self.evicted += self.entries.len();
     }
 
     /// Where the pane is parked.
@@ -162,36 +162,24 @@ impl Scrollback {
         self.scroll = Scroll::Bottom;
     }
 
-    /// Move the viewport `lines` lines towards the start of the transcript.
-    pub fn scroll_up(&mut self, lines: usize) {
-        self.anchor_at(self.viewport.top.saturating_sub(lines));
-    }
-
-    /// Move the viewport `lines` lines towards the newest entry, parking at
-    /// the bottom once it gets there.
-    pub fn scroll_down(&mut self, lines: usize) {
-        let bottom = self.viewport.total.saturating_sub(self.viewport.height);
-        let top = self.viewport.top + lines;
-        if top >= bottom {
-            self.scroll = Scroll::Bottom;
-            self.viewport.top = bottom;
-        } else {
-            self.anchor_at(top);
-        }
-    }
-
-    /// Hold `top` against the entry whose block contains it.
+    /// Ask to move `lines` lines towards the start of the transcript.
     ///
-    /// The remembered top moves with it, so two page keys in a row move two
-    /// pages even when no frame was drawn between them.
-    fn anchor_at(&mut self, top: usize) {
-        // The last block starting at or before `top` owns it. Starts rise, so
-        // the partition point is one past that block.
-        let entry = self.starts.partition_point(|start| *start <= top);
-        let entry = entry.saturating_sub(1);
-        let offset = top - self.starts.get(entry).copied().unwrap_or(0).min(top);
-        self.scroll = Scroll::Anchored { entry, offset };
-        self.viewport.top = top;
+    /// Asks rather than moves: only the draw knows what a line is, because
+    /// only it knows the wrapping. Two keys pressed before one frame add up.
+    pub fn scroll_up(&mut self, lines: usize) {
+        self.pending -= lines as isize;
+    }
+
+    /// Ask to move `lines` lines towards the newest entry. Parks at the bottom
+    /// once it gets there.
+    pub fn scroll_down(&mut self, lines: usize) {
+        self.pending += lines as isize;
+    }
+
+    /// What the last draw laid out.
+    #[must_use]
+    pub fn viewport(&self) -> Viewport {
+        self.viewport
     }
 
     pub fn push_user(&mut self, text: impl Into<String>) {
@@ -378,15 +366,6 @@ impl Scrollback {
             *rev = self.next_rev;
         }
     }
-
-    fn invalidate_cache(&mut self) {
-        self.lines.clear();
-        self.starts.clear();
-        self.cached_revs.clear();
-        self.cache_width = 0;
-        self.cache_show_thinking = self.show_thinking;
-    }
-
     fn trim_to_cap(&mut self) {
         let removable = match self.turn_start {
             Some(start) => self.entries.len().saturating_sub(MAX_ENTRIES).min(start),
@@ -396,51 +375,18 @@ impl Scrollback {
             return;
         }
 
-        // The cache covers a prefix of the entries: everything drawn so far,
-        // with anything pushed since this draw still to come. It can be
-        // drained in step only if it is current and reaches past what goes.
-        let spliceable = self.cache_width != 0
-            && self.cache_show_thinking == self.show_thinking
-            && self.starts.len() == self.cached_revs.len()
-            && removable <= self.cached_revs.len();
-
-        if !spliceable {
-            self.entries.drain(0..removable);
-            self.revs.drain(0..removable);
-            self.evict(removable);
-            self.invalidate_cache();
-            return;
-        }
-
-        // Where the first surviving block starts, or the whole buffer when
-        // every block the cache holds is going.
-        let removed_lines = self
-            .starts
-            .get(removable)
-            .copied()
-            .unwrap_or(self.lines.len());
         self.entries.drain(0..removable);
         self.revs.drain(0..removable);
-        self.starts.drain(0..removable);
-        self.cached_revs.drain(0..removable);
-        self.lines.drain(0..removed_lines);
-        for start in &mut self.starts {
-            *start -= removed_lines;
-        }
-        self.evict(removable);
-    }
-
-    /// Move every entry index down by `removed`, now that the front is gone.
-    fn evict(&mut self, removed: usize) {
-        self.adjust_maps(removed);
+        self.evicted += removable;
+        self.adjust_maps(removable);
         if let Some(start) = &mut self.turn_start {
-            *start -= removed;
+            *start -= removable;
         }
         // An anchor whose own entry was evicted has nothing left to hold: the
         // content it named is gone, so the pane goes back to the newest line
         // rather than to some arbitrary neighbour.
         if let Scroll::Anchored { entry, offset } = self.scroll {
-            self.scroll = match entry.checked_sub(removed) {
+            self.scroll = match entry.checked_sub(removable) {
                 Some(entry) => Scroll::Anchored { entry, offset },
                 None => Scroll::Bottom,
             };
@@ -466,132 +412,32 @@ impl Scrollback {
             .collect();
     }
 
-    /// Render one entry's block, counting the work the cache did not save.
-    fn render_block(&mut self, index: usize, width: usize) -> Vec<Line<'static>> {
-        #[cfg(test)]
-        {
-            self.rebuilt += 1;
-        }
-        render_entry(&self.entries[index], width, self.show_thinking)
+    /// What the cache renders from: each entry and the revision it is at.
+    pub fn blocks(&self) -> impl Iterator<Item = (&Entry, u64)> {
+        self.entries.iter().zip(self.revs.iter().copied())
     }
 
-    /// Rebuild every rendered block for `width`.
-    fn rebuild_all(&mut self, width: usize) {
-        self.lines.clear();
-        self.starts.clear();
-        self.cached_revs.clear();
-
-        for index in 0..self.entries.len() {
-            let rendered = self.render_block(index, width);
-            self.starts.push(self.lines.len());
-            self.lines.extend(rendered);
-            self.cached_revs.push(self.revs[index]);
-        }
-
-        self.cache_width = width;
-        self.cache_show_thinking = self.show_thinking;
-    }
-
-    /// Re-render the entries whose revision moved on, splicing their new
-    /// blocks into the flattened line buffer and leaving the rest alone.
-    fn rebuild_stale(&mut self, width: usize) {
-        for index in 0..self.entries.len() {
-            let rev = self.revs[index];
-            match self.cached_revs.get(index).copied() {
-                Some(cached) if cached == rev => continue,
-                // Drawn before, and changed since: splice the new block in
-                // where the old one was and shift what follows.
-                Some(_) => {
-                    let rendered = self.render_block(index, width);
-                    let start = self.starts[index];
-                    let old_len = self
-                        .starts
-                        .get(index + 1)
-                        .map_or(self.lines.len(), |next| *next)
-                        - start;
-                    let delta = rendered.len() as isize - old_len as isize;
-                    self.lines.splice(start..start + old_len, rendered);
-                    if delta != 0 {
-                        for start in &mut self.starts[index + 1..] {
-                            *start = (*start as isize + delta) as usize;
-                        }
-                    }
-                    self.cached_revs[index] = rev;
-                }
-                // Never drawn: it can only be at the end, so append.
-                None => {
-                    let rendered = self.render_block(index, width);
-                    self.starts.push(self.lines.len());
-                    self.lines.extend(rendered);
-                    self.cached_revs.push(rev);
-                }
-            }
-        }
-    }
-
-    /// Render every entry to wrapped lines at `width`, keeping the result in
-    /// the view's cache.
+    /// How many entries the cap has dropped, ever.
     #[must_use]
-    pub fn lines(&mut self, width: usize) -> &[Line<'static>] {
-        self.lines_for(width)
+    pub fn evicted(&self) -> usize {
+        self.evicted
     }
 
-    /// What the viewport shows, for a pane this size.
-    ///
-    /// The scroll position says which content to hold and the wrapping says
-    /// where that content sits, so neither alone is an answer. Nothing about
-    /// the position is written here: what is kept is the answer itself, for
-    /// the page keys to measure a page against.
-    pub fn layout(&mut self, width: usize, height: usize) -> Viewport {
-        self.lines_for(width);
-        let total = self.lines.len();
-        let bottom = total.saturating_sub(height);
-        let top = match self.scroll {
-            Scroll::Bottom => bottom,
-            Scroll::Anchored { entry, offset } => {
-                let start = self.starts.get(entry).copied().unwrap_or(0);
-                (start + offset).min(bottom)
-            }
-        };
-        self.viewport = Viewport { top, total, height };
-        self.viewport
+    /// Lines the reader asked to move that no draw has resolved yet.
+    #[must_use]
+    pub fn pending(&self) -> isize {
+        self.pending
     }
 
-    /// The visible transcript lines for a viewport, cloned from the cache.
-    ///
-    /// Ratatui's `Paragraph` owns its text, so the visible slice is the only
-    /// copy. The cache means the full transcript is not re-wrapped or copied
-    /// on every frame.
-    pub fn visible_lines(&mut self, width: usize, height: usize) -> Vec<Line<'static>> {
-        let view = self.layout(width, height);
-        self.lines
-            .iter()
-            .skip(view.top)
-            .take(height)
-            .cloned()
-            .collect()
-    }
-
-    /// Ensure the cache is current for `width`, then return it.
-    fn lines_for(&mut self, width: usize) -> &[Line<'static>] {
-        let width = width.max(8);
-        #[cfg(test)]
-        {
-            self.rebuilt = 0;
-        }
-
-        if self.cache_width != width || self.cache_show_thinking != self.show_thinking {
-            self.rebuild_all(width);
-        } else {
-            self.rebuild_stale(width);
-        }
-        self.trim_to_cap();
-
-        &self.lines
+    /// Take on what a draw resolved.
+    pub fn laid_out(&mut self, viewport: Viewport) {
+        self.viewport = viewport;
+        self.scroll = viewport.scroll;
+        self.pending = 0;
     }
 }
 
-fn render_entry(entry: &Entry, width: usize, show_thinking: bool) -> Vec<Line<'static>> {
+pub(crate) fn render_entry(entry: &Entry, width: usize, show_thinking: bool) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
     match entry {
@@ -956,6 +802,21 @@ fn chunks(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::render::ScrollbackCache;
+
+    /// Every line the pane comes to at `width`, as text.
+    ///
+    /// The wrapping lives in the cache now, so a test that is about what the
+    /// pane says has to go through one.
+    fn painted(pane: &Scrollback, width: usize) -> Vec<String> {
+        let mut cache = ScrollbackCache::default();
+        let view = cache.layout(pane, width, usize::MAX);
+        cache
+            .visible(view)
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
 
     #[test]
     fn wrapping_breaks_at_whitespace() {
@@ -1002,7 +863,7 @@ mod tests {
     fn a_multiline_message_keeps_its_shape() {
         let mut view = Scrollback::default();
         view.push_user("one\ntwo".to_owned());
-        let rendered: Vec<String> = view.lines(40).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 40);
 
         assert_eq!(rendered.first().map(String::as_str), Some("> one"));
         assert_eq!(rendered.get(1).map(String::as_str), Some("  two"));
@@ -1062,10 +923,10 @@ mod tests {
     fn thinking_is_hidden_until_it_is_asked_for() {
         let mut view = Scrollback::default();
         view.push_thinking("weighing it up");
-        assert!(view.lines(40).is_empty());
+        assert!(painted(&view, 40).is_empty());
 
         view.show_thinking = true;
-        let rendered: Vec<String> = view.lines(40).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 40);
         assert!(rendered.iter().any(|line| line.contains("weighing it up")));
     }
 
@@ -1074,7 +935,7 @@ mod tests {
         let mut view = Scrollback::default();
         view.push_shell("ls".to_owned(), "a.rs\nb.rs".to_owned());
 
-        let rendered: Vec<String> = view.lines(40).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 40);
         assert_eq!(rendered[0].trim(), "$ ls");
         assert_eq!(rendered[1].trim(), "a.rs");
         assert_eq!(rendered[2].trim(), "b.rs");
@@ -1085,7 +946,7 @@ mod tests {
         let mut view = Scrollback::default();
         view.push_shell("ls".to_owned(), "some very long output line".to_owned());
 
-        let rendered: Vec<String> = view.lines(12).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 12);
         assert_eq!(rendered[0].trim(), "$ ls");
         assert!(
             rendered
@@ -1103,7 +964,7 @@ mod tests {
         view.push_text(", world");
         assert_eq!(view.entries().len(), 1);
 
-        let rendered: Vec<String> = view.lines(40).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 40);
         assert!(rendered.iter().any(|line| line.contains("Hello, world")));
     }
 
@@ -1122,12 +983,12 @@ mod tests {
         view.begin_tool_stream(0, "bash");
         view.push_tool_stream(0, 300);
 
-        let rendered: Vec<String> = view.lines(60).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 60);
         assert!(rendered[0].starts_with("◌ bash"), "{}", rendered[0]);
         assert!(rendered[0].contains("receiving arguments… 300 B"));
 
         view.push_tool_stream(0, 112);
-        let rendered: Vec<String> = view.lines(60).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 60);
         assert!(rendered[0].contains("412 B"), "{}", rendered[0]);
     }
 
@@ -1140,14 +1001,14 @@ mod tests {
 
         assert_eq!(view.entries().len(), 1, "the placeholder became the card");
 
-        let rendered: Vec<String> = view.lines(60).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 60);
         assert!(rendered[0].starts_with("⋯ bash"), "{}", rendered[0]);
         assert!(rendered[0].contains("cargo test"));
         assert!(!rendered[0].contains("receiving"));
 
         // The claim registered the id, so results still find their card.
         view.finish_tool("c1", "ok", false, None);
-        let rendered: Vec<String> = view.lines(60).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 60);
         assert!(rendered[0].starts_with("→ bash"), "{}", rendered[0]);
     }
 
@@ -1162,7 +1023,7 @@ mod tests {
         assert_eq!(view.entries().len(), 2);
         view.finish_tool("c2", "a.rs b.rs", false, None);
 
-        let rendered: Vec<String> = view.lines(60).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 60);
         assert!(rendered[0].starts_with("⋯ read"), "{}", rendered[0]);
         // The second card is the one that finished, not the first.
         assert!(
@@ -1178,7 +1039,7 @@ mod tests {
         view.push_tool_stream(0, 90);
         view.settle_tool_streams();
 
-        let rendered: Vec<String> = view.lines(60).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 60);
         assert!(rendered[0].starts_with("✗ edit"), "{}", rendered[0]);
         assert!(rendered[1].contains("before the call was complete"));
     }
@@ -1190,7 +1051,7 @@ mod tests {
         view.push_tool_call("c1", "bash", r#"{"command":"ls"}"#);
         view.settle_tool_streams();
 
-        let rendered: Vec<String> = view.lines(60).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 60);
         assert!(rendered[0].starts_with("⋯ bash"), "{}", rendered[0]);
     }
 
@@ -1201,7 +1062,7 @@ mod tests {
         view.push_tool_progress("c1", "partial");
         view.finish_tool("c1", "final output", false, None);
 
-        let rendered: Vec<String> = view.lines(60).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 60);
         assert!(rendered.iter().any(|line| line.contains("final output")));
         assert!(!rendered.iter().any(|line| line.contains("partial")));
         assert!(rendered.iter().any(|line| line.contains("bash")));
@@ -1240,172 +1101,11 @@ mod tests {
     }
 
     #[test]
-    fn only_changed_blocks_move_their_revision() {
-        let mut view = Scrollback::default();
-        view.push_user("hello");
-        view.push_text("an answer");
-        let _ = view.lines(40);
-
-        assert_eq!(view.revs, view.cached_revs, "a drawn cache is level");
-
-        view.push_text(" with more");
-        assert_eq!(
-            view.revs
-                .iter()
-                .zip(&view.cached_revs)
-                .filter(|(rev, cached)| rev != cached)
-                .count(),
-            1,
-            "one entry changed, so one revision moved"
-        );
-
-        let _ = view.lines(40);
-        assert_eq!(view.revs, view.cached_revs);
-    }
-
-    #[test]
-    fn only_the_changed_block_is_rebuilt() {
-        let mut view = Scrollback::default();
-        for number in 0..MAX_ENTRIES {
-            view.push_notice(format!("notice {number}"));
-        }
-
-        let _ = view.lines(40);
-        assert_eq!(
-            view.rebuilt, MAX_ENTRIES,
-            "the first pass renders everything"
-        );
-
-        view.push_notice("one more");
-        let _ = view.lines(40);
-        assert_eq!(view.rebuilt, 1, "an appended entry costs one block");
-
-        view.push_text("an answer");
-        view.push_text(" with more");
-        let _ = view.lines(40);
-        assert_eq!(view.rebuilt, 1, "a grown entry costs one block");
-
-        let _ = view.lines(40);
-        assert_eq!(view.rebuilt, 0, "an unchanged transcript costs nothing");
-    }
-
-    #[test]
-    fn a_new_width_rebuilds_every_block() {
-        let mut view = Scrollback::default();
-        for number in 0..10 {
-            view.push_notice(format!("notice {number}"));
-        }
-
-        let _ = view.lines(40);
-        let _ = view.lines(20);
-        assert_eq!(
-            view.rebuilt, 10,
-            "wrapping is width-bound, so nothing carries"
-        );
-    }
-
-    #[test]
-    fn new_lines_below_the_viewport_do_not_move_it() {
-        let mut view = Scrollback::default();
-        for number in 0..10 {
-            view.push_notice(format!("line {number}"));
-        }
-        view.layout(20, 5);
-
-        view.scroll_up(2);
-        let parked = view.layout(20, 5).top;
-
-        view.push_notice("fresh content");
-        assert_eq!(
-            view.layout(20, 5).top,
-            parked,
-            "what is being read stays where it is"
-        );
-    }
-
-    #[test]
-    fn a_block_above_the_viewport_growing_carries_it_along() {
-        let mut view = Scrollback::default();
-        view.push_tool_call("c1", "bash", r#"{"command":"ls"}"#);
-        for number in 0..10 {
-            view.push_notice(format!("line {number}"));
-        }
-        view.layout(20, 5);
-        view.scroll_up(3);
-
-        let before = view.layout(20, 5);
-        // The first block gains lines, so everything below it moves down.
-        for number in 0..4 {
-            view.push_tool_progress("c1", &format!("output {number}"));
-        }
-        let after = view.layout(20, 5);
-
-        assert!(after.total > before.total);
-        assert_eq!(
-            after.top - before.top,
-            after.total - before.total,
-            "the anchor rides down with the content above it"
-        );
-    }
-
-    #[test]
-    fn scrolling_back_to_the_bottom_parks_there() {
-        let mut view = Scrollback::default();
-        for number in 0..40 {
-            view.push_notice(format!("line {number}"));
-        }
-        view.layout(20, 5);
-
-        view.scroll_up(10);
-        assert!(view.scrolled());
-
-        view.scroll_down(10);
-        assert!(!view.scrolled(), "it does not stick just short of the end");
-        assert_eq!(view.scroll(), Scroll::Bottom);
-    }
-
-    #[test]
-    fn two_page_keys_without_a_draw_between_move_two_pages() {
-        let mut view = Scrollback::default();
-        for number in 0..40 {
-            view.push_notice(format!("line {number}"));
-        }
-        let bottom = view.layout(20, 5).top;
-
-        view.scroll_up(4);
-        view.scroll_up(4);
-
-        assert_eq!(view.layout(20, 5).top, bottom - 8);
-    }
-
-    #[test]
-    fn an_evicted_anchor_falls_back_to_the_bottom() {
-        let mut view = Scrollback::default();
-        for number in 0..MAX_ENTRIES {
-            view.push_notice(format!("line {number}"));
-        }
-        view.layout(20, 5);
-        view.scroll_up(1_000);
-        assert!(view.scrolled());
-
-        // Push until the cap eats the entry the anchor named.
-        for number in 0..MAX_ENTRIES {
-            view.push_notice(format!("later {number}"));
-        }
-
-        assert_eq!(
-            view.scroll(),
-            Scroll::Bottom,
-            "the content it held is gone, so it holds nothing"
-        );
-    }
-
-    #[test]
     fn assistant_code_blocks_wrap_long_lines() {
         let mut view = Scrollback::default();
         view.push_text("```\n012345678901234567890123456789\n```");
 
-        let rendered: Vec<String> = view.lines(12).iter().map(ToString::to_string).collect();
+        let rendered = painted(&view, 12);
         assert!(
             rendered.iter().all(|line| line.chars().count() <= 12),
             "code lines are wrapped to the pane: {rendered:?}"

@@ -24,6 +24,7 @@ pub mod input;
 pub mod logo;
 pub mod modal;
 pub mod msg;
+pub mod render;
 pub mod runtime;
 pub mod scrollback;
 pub mod status;
