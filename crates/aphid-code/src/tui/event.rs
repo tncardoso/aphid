@@ -9,73 +9,12 @@ use aphid_agent::{
     Cx, Flow, Guard, Interest, PendingCall, Plugin, ResultCx, RunOutcome, StreamCx, ToolOutcome,
     TurnSummary,
 };
-use aphid_core::{BlockKind, ContentRef, Event, Json, StopReason, Usage};
-use ratatui::crossterm::event::{self, KeyEvent, MouseEvent};
+use aphid_core::{BlockKind, ContentRef, Event};
+use ratatui::crossterm::event;
 
 use crate::plugins::permissions::{Confirmer, Decision, Risk};
-use crate::tui::runtime::{self, ANSWER_TIMEOUT, Answers, Hub, RequestId};
-
-/// Everything the app loop reacts to.
-pub enum UiEvent {
-    TurnStarted,
-    /// A chunk of assistant prose.
-    Text(String),
-    /// A chunk of reasoning.
-    Thinking(String),
-    /// A tool-call block opened. Its arguments are still arriving, and the call
-    /// itself is not announced until the whole turn has been committed.
-    ToolStreamStart {
-        block: u32,
-        name: String,
-    },
-    /// More argument bytes landed in the block at `block`.
-    ToolStreamDelta {
-        block: u32,
-        bytes: usize,
-    },
-    ToolCall {
-        id: String,
-        name: String,
-        arguments: String,
-    },
-    ToolProgress {
-        id: String,
-        chunk: String,
-    },
-    ToolResult {
-        id: String,
-        name: String,
-        text: String,
-        is_error: bool,
-        details: Option<Json>,
-    },
-    TurnEnded {
-        usage: Usage,
-        stop: StopReason,
-        error: Option<String>,
-    },
-    RunEnded(Box<RunOutcome>),
-    /// A gated tool is waiting for an answer. The agent's task is blocked on
-    /// the channel this id names, and stays blocked until the app answers it.
-    Confirm {
-        id: RequestId,
-        tool: String,
-        summary: String,
-        risk: Risk,
-    },
-    /// Something a plugin wants the user to see.
-    Notice(String),
-    /// Text a plugin sent to the model, which is queued as a typed line is.
-    Prompt(String),
-    Key(KeyEvent),
-    /// A block of text the terminal delivered in one piece, under bracketed
-    /// paste. Its newlines are text, not the Enters they would be if the same
-    /// characters had been typed.
-    Paste(String),
-    /// A mouse button, drag or wheel event. The app decides who it belongs to.
-    Mouse(MouseEvent),
-    Resize,
-}
+pub use crate::tui::msg::UiEvent;
+use crate::tui::runtime::{self, ANSWER_TIMEOUT, Answers, Hub};
 
 /// Sends a plugin's `notify` and `prompt` output to the app loop.
 ///
@@ -213,7 +152,11 @@ impl Plugin for UiPlugin {
     }
 
     fn on_run_end(&self, _cx: &mut Cx<'_>, outcome: &RunOutcome) {
-        self.send(UiEvent::RunEnded(Box::new(outcome.clone())));
+        self.send(UiEvent::RunEnded {
+            stop: outcome.stop,
+            turns: outcome.turns,
+            error: outcome.error.clone(),
+        });
     }
 }
 

@@ -10,6 +10,14 @@
 - Quitting the terminal while a permission question is on screen refuses the
   call immediately, instead of leaving it to time out.
 
+### Fixed
+
+- A slash command typed while the model is replying now runs. It used to be
+  sent to the model as the text of the command, so `/tools` mid-reply asked
+  the model about the word `/tools`.
+- `/model` and `/think` typed while the model is replying now take effect when
+  the reply ends. The change used to be dropped without a word.
+
 ## [0.2.0] - 2026-08-16
 
 ### Added

@@ -37,6 +37,11 @@ impl<E> Cmd<E> {
         self.effects.push(effect);
     }
 
+    /// Take on everything another command asked for, after what this one did.
+    pub fn extend(&mut self, other: Self) {
+        self.effects.extend(other.effects);
+    }
+
     /// What was asked for, for a test to read.
     #[must_use]
     pub fn effects(&self) -> &[E] {

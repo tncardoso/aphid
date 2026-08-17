@@ -18,16 +18,20 @@
 //! [`UiEvent`](event::UiEvent)s, and the agent comes back when the run ends.
 
 pub mod app;
+pub mod effect;
 pub mod event;
 pub mod input;
 pub mod logo;
 pub mod modal;
+pub mod msg;
 pub mod runtime;
 pub mod scrollback;
 pub mod status;
 pub mod surface;
 
 pub use app::{App, run};
-pub use event::{UiConfirmer, UiEvent, UiPlugin, UiSink};
+pub use effect::Effect;
+pub use event::{UiConfirmer, UiPlugin, UiSink};
+pub use msg::{Msg, UiEvent};
 pub use scrollback::Scrollback;
 pub use status::Status;

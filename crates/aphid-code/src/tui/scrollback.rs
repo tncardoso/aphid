@@ -91,9 +91,6 @@ pub struct Viewport {
 #[derive(Default)]
 pub struct Scrollback {
     entries: Vec<Entry>,
-    /// Told about every notice, so a plugin can watch what the user is shown.
-    /// One field here beats a call at each of the fifteen places that push one.
-    host: Option<std::sync::Arc<aphid_plugin::PluginHost>>,
     /// Call id to entry index, so progress and results find their call.
     by_call: HashMap<String, usize>,
     /// Streaming block index to entry index, so a delta finds its placeholder.
@@ -133,13 +130,6 @@ pub struct Scrollback {
 }
 
 impl Scrollback {
-    /// Report notices to these plugins.
-    pub fn watch(&mut self, host: std::sync::Arc<aphid_plugin::PluginHost>) {
-        if host.any_defines("on_notify") {
-            self.host = Some(host);
-        }
-    }
-
     #[must_use]
     pub fn entries(&self) -> &[Entry] {
         &self.entries
@@ -213,11 +203,7 @@ impl Scrollback {
     }
 
     pub fn push_notice(&mut self, text: impl Into<String>) {
-        let text = text.into();
-        if let Some(host) = &self.host {
-            host.notice(&text);
-        }
-        self.push_entry(Entry::Notice(text));
+        self.push_entry(Entry::Notice(text.into()));
     }
 
     pub fn push_logo(&mut self) {

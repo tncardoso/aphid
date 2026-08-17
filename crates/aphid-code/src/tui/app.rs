@@ -28,10 +28,12 @@ use crate::plugins::scripts;
 use crate::session::{self, SessionPlugin, sessions_dir};
 use crate::skills::{self, Skill};
 use crate::tools::Workspace;
-use crate::tui::event::{UiConfirmer, UiEvent, UiPlugin, UiSink, spawn_input_thread};
+use crate::tui::effect::Effect;
+use crate::tui::event::{UiConfirmer, UiPlugin, UiSink, spawn_input_thread};
 use crate::tui::input::{Action, Input};
 use crate::tui::modal::{Confirm, Modal};
-use crate::tui::runtime::{self, Answers, Tty, restore, setup};
+use crate::tui::msg::Msg;
+use crate::tui::runtime::{self, Answers, Cmd, Hub, Subs, Tty, restore, setup};
 use crate::tui::scrollback::{Scrollback, one_line};
 use crate::tui::status::Status;
 use crate::tui::surface::SurfaceLayer;
@@ -71,7 +73,23 @@ pub struct App {
     /// The loaded plugins, for the commands they registered and `/plugins`.
     host: Option<Arc<aphid_plugin::PluginHost>>,
     catalog: Catalog,
+    /// The model the agent is pointed at. Held because clamping a thinking
+    /// level is a question about the model, and the update must answer it
+    /// without reaching for the agent.
+    current: Model,
     thinking: Option<ThinkingLevel>,
+    /// What the tools are called, for `/tools`. The set does not change during
+    /// a session, so a copy is as good as the agent's own.
+    tools: Vec<String>,
+    /// What `/session` says. Settled when the session opens.
+    session_label: String,
+    /// The slash commands the plugins registered, so an unknown one can be
+    /// told from one that is simply somebody else's.
+    plugin_commands: Vec<String>,
+    /// Whether any plugin asked to hear about notices.
+    plugins_watch_notices: bool,
+    /// Whether any plugin wants the background tick.
+    plugins_tick: bool,
     session: Option<Arc<SessionPlugin>>,
     /// Waiting for the agent, in the order it arrived. A queue and not one slot
     /// because a plugin can send while the user types, and neither should lose.
@@ -80,8 +98,6 @@ pub struct App {
     processes: Arc<exec::Registry>,
     /// Where `!` commands run.
     workspace: Workspace,
-    /// A `!` command in flight; delivers `(command, output)` when it finishes.
-    bang: Option<tokio::sync::oneshot::Receiver<(String, String)>>,
     /// The skills the model was told about, for `/skills`.
     skills: Vec<Skill>,
     /// Skill files that did not load, for the same list.
@@ -110,12 +126,22 @@ impl App {
             modal: None,
             surfaces: SurfaceLayer::default(),
             catalog: Catalog::new(),
+            current: harness.agent.model().clone(),
             thinking,
+            tools: harness
+                .agent
+                .tools()
+                .names()
+                .map(ToOwned::to_owned)
+                .collect(),
+            session_label: "not being saved".to_owned(),
+            plugin_commands: Vec::new(),
+            plugins_watch_notices: false,
+            plugins_tick: false,
             session: None,
             queued: VecDeque::new(),
             processes: Arc::clone(processes),
             workspace: harness.workspace.clone(),
-            bang: None,
             skills: harness.skills.clone(),
             skill_diagnostics: harness.diagnostics.clone(),
             handle: harness.agent.handle(),
@@ -134,12 +160,17 @@ impl App {
             modal: None,
             surfaces: SurfaceLayer::default(),
             catalog: Catalog::new(),
+            current: agent.model().clone(),
             thinking: None,
+            tools: agent.tools().names().map(ToOwned::to_owned).collect(),
+            session_label: "not being saved".to_owned(),
+            plugin_commands: Vec::new(),
+            plugins_watch_notices: false,
+            plugins_tick: false,
             session: None,
             queued: VecDeque::new(),
             processes: Arc::new(exec::Registry::new()),
             workspace: Workspace::new(std::env::temp_dir()),
-            bang: None,
             skills: Vec::new(),
             skill_diagnostics: Vec::new(),
             handle: agent.handle(),
@@ -198,42 +229,61 @@ impl App {
     }
 
     /// Apply one event. Returns true when the screen needs repainting.
-    fn apply(&mut self, event: UiEvent) -> bool {
-        match event {
-            UiEvent::TurnStarted => {
+    /// Apply one message.
+    ///
+    /// The only place the model changes, and it changes nothing else: no IO,
+    /// no script, no task, no terminal. What it wants done comes back as a
+    /// [`Cmd`], which the executor performs and reports on with more messages.
+    pub fn update(&mut self, msg: Msg) -> Cmd<Effect> {
+        match msg {
+            Msg::TurnStarted => {
                 self.status.running = true;
                 // Block indices restart with each turn's message buffer.
                 self.scrollback.clear_tool_streams();
+                Cmd::none()
             }
-            UiEvent::Text(text) => {
+            Msg::Text(text) => {
                 self.status.download.note(Instant::now(), text.len() as u64);
                 self.scrollback.push_text(&text);
+                Cmd::none()
             }
-            UiEvent::Thinking(text) => {
+            Msg::Thinking(text) => {
                 self.status.download.note(Instant::now(), text.len() as u64);
                 self.scrollback.push_thinking(&text);
+                Cmd::none()
             }
-            UiEvent::ToolStreamStart { block, name } => {
+            Msg::ToolStreamStart { block, name } => {
                 self.scrollback.begin_tool_stream(block, &name);
+                Cmd::none()
             }
-            UiEvent::ToolStreamDelta { block, bytes } => {
+            Msg::ToolStreamDelta { block, bytes } => {
                 self.status.download.note(Instant::now(), bytes as u64);
                 self.scrollback.push_tool_stream(block, bytes);
+                Cmd::none()
             }
-            UiEvent::ToolCall {
+            Msg::ToolCall {
                 id,
                 name,
                 arguments,
-            } => self.scrollback.push_tool_call(&id, &name, &arguments),
-            UiEvent::ToolProgress { id, chunk } => self.scrollback.push_tool_progress(&id, &chunk),
-            UiEvent::ToolResult {
+            } => {
+                self.scrollback.push_tool_call(&id, &name, &arguments);
+                Cmd::none()
+            }
+            Msg::ToolProgress { id, chunk } => {
+                self.scrollback.push_tool_progress(&id, &chunk);
+                Cmd::none()
+            }
+            Msg::ToolResult {
                 id,
                 text,
                 is_error,
                 details,
                 ..
-            } => self.scrollback.finish_tool(&id, &text, is_error, details),
-            UiEvent::TurnEnded { usage, error, .. } => {
+            } => {
+                self.scrollback.finish_tool(&id, &text, is_error, details);
+                Cmd::none()
+            }
+            Msg::TurnEnded { usage, error, .. } => {
                 // The stream is over; a stale reading must not sit on an idle
                 // line while `working…` is gone.
                 self.status.download.clear();
@@ -242,41 +292,126 @@ impl App {
                 self.scrollback.settle_tool_streams();
                 self.status.last = Some(usage);
                 self.status.total += usage;
-                if let Some(error) = error {
-                    self.scrollback.push_notice(format!("error: {error}"));
+                match error {
+                    Some(error) => self.notice(format!("error: {error}")),
+                    None => Cmd::none(),
                 }
             }
-            UiEvent::Notice(text) => self.scrollback.push_notice(text),
-            // A plugin's prompt takes the path a typed line takes, minus the
-            // command set: the agent is not in hand here, and a plugin has no
-            // business running `/quit`.
-            UiEvent::Prompt(text) => {
-                self.scrollback.push_user(text.clone());
-                self.enqueue(text);
-            }
-            UiEvent::RunEnded(_) => {
+            Msg::RunEnded { .. } => {
                 self.status.download.clear();
                 self.status.running = false;
+                self.start_queued()
             }
-            UiEvent::Confirm {
+            Msg::RunFailed(reason) => {
+                self.status.download.clear();
+                self.status.running = false;
+                let mut cmd = self.notice(format!("the run failed: {reason}"));
+                cmd.extend(self.start_queued());
+                cmd
+            }
+            Msg::Notice(text) => {
+                // Straight into the pane: this came from a plugin, so telling
+                // the plugins about it would be an echo.
+                self.scrollback.push_notice(text);
+                Cmd::none()
+            }
+            // A plugin's prompt takes the path a typed line takes, minus the
+            // command set: a plugin has no business running `/quit`.
+            Msg::Prompt(text) => {
+                self.scrollback.push_user(text.clone());
+                self.enqueue(text)
+            }
+            Msg::Confirm {
                 id,
                 tool,
                 summary,
                 risk,
             } => {
-                // A question arriving while another modal is up replaces it:
-                // the agent is blocked on this one, and a picker is not.
+                // A question arriving over another modal replaces it: the agent
+                // is blocked on this one, and a picker is not.
                 self.modal = Some(Modal::Confirm(Confirm {
                     id,
                     tool,
                     summary,
                     risk,
                 }));
+                Cmd::none()
             }
-            UiEvent::Mouse(mouse) => return self.mouse(mouse),
-            UiEvent::Key(_) | UiEvent::Paste(_) | UiEvent::Resize => {}
+            Msg::Key(key) => self.keyed(key),
+            Msg::Paste(text) => {
+                if self.modal.is_some() {
+                    return Cmd::none();
+                }
+                match self.surfaces.focus() {
+                    Some((plugin, name)) => Cmd::one(Effect::Surface {
+                        plugin,
+                        name,
+                        event: SurfaceEvent::Paste { text },
+                    }),
+                    None => {
+                        self.input.paste(&text);
+                        Cmd::none()
+                    }
+                }
+            }
+            Msg::Mouse(mouse) => self.moused(mouse),
+            Msg::Resize => Cmd::none(),
+            Msg::Frame => {
+                self.status.download.prune(Instant::now());
+                Cmd::none()
+            }
+            Msg::Poll => Cmd::one(Effect::SnapshotProcesses),
+            Msg::Processes(rows) => {
+                if let Some(Modal::Processes { rows: shown, .. }) = &mut self.modal {
+                    *shown = rows;
+                }
+                Cmd::none()
+            }
+            Msg::BangOutput { command, output } => {
+                self.scrollback.push_shell(command, output);
+                Cmd::none()
+            }
+            Msg::SurfaceDone { plugin, actions } => {
+                let mut cmd = Cmd::none();
+                for action in actions {
+                    match action {
+                        SurfaceAction::Consume => {}
+                        SurfaceAction::ReleaseFocus => self.surfaces.release_focus(),
+                        SurfaceAction::Notice(text) => {
+                            cmd.extend(self.notice(format!("{plugin}: {text}")));
+                        }
+                    }
+                }
+                cmd.push(Effect::RefreshSurfaces);
+                cmd
+            }
         }
-        true
+    }
+
+    /// The timers this model wants right now.
+    #[must_use]
+    pub fn wanted_subs(&self) -> Subs {
+        Subs {
+            frame: self.status.running.then_some(FRAME),
+            poll: matches!(self.modal, Some(Modal::Processes { .. })).then_some(PS_REFRESH),
+            tick: self.plugins_tick.then_some(TICK),
+        }
+    }
+
+    #[must_use]
+    pub fn quitting(&self) -> bool {
+        self.quit
+    }
+
+    /// Show a notice, and tell the plugins what was shown.
+    fn notice(&mut self, text: impl Into<String>) -> Cmd<Effect> {
+        let text = text.into();
+        self.scrollback.push_notice(text.clone());
+        if self.plugins_watch_notices {
+            Cmd::one(Effect::PluginNotice(text))
+        } else {
+            Cmd::none()
+        }
     }
 
     /// The next prompt waiting to be sent, if any.
@@ -285,133 +420,129 @@ impl App {
         self.queued.front().map(String::as_str)
     }
 
-    /// Put a prompt at the back of the queue.
-    fn enqueue(&mut self, prompt: String) {
+    /// Put a prompt at the back of the queue, and start it when nothing else
+    /// is running.
+    fn enqueue(&mut self, prompt: String) -> Cmd<Effect> {
         self.queued.push_back(prompt);
-        self.status.queued = self.status.running;
+        self.start_queued()
     }
 
-    /// Handle a mouse event, routing it to the focused surface or the transcript.
-    fn mouse(&mut self, mouse: MouseEvent) -> bool {
+    /// Send the next queued prompt, if the agent is free to take it.
+    ///
+    /// The queue is serial: one run at a time, whether the line was typed or
+    /// came from a plugin while the user was typing.
+    fn start_queued(&mut self) -> Cmd<Effect> {
+        if self.status.running {
+            self.status.queued = !self.queued.is_empty();
+            return Cmd::none();
+        }
+        let Some(prompt) = self.queued.pop_front() else {
+            self.status.queued = false;
+            return Cmd::none();
+        };
+        self.status.queued = !self.queued.is_empty();
+        self.status.running = true;
+        Cmd::one(Effect::StartRun(prompt))
+    }
+
+    /// Handle a mouse event, routing it to the focused surface or the pane.
+    fn moused(&mut self, mouse: MouseEvent) -> Cmd<Effect> {
         if self.modal.is_some() {
-            return true;
+            return Cmd::none();
         }
 
         match mouse.kind {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let up = mouse.kind == MouseEventKind::ScrollUp;
                 if self.surfaces.focus().is_some() {
-                    let button = if mouse.kind == MouseEventKind::ScrollUp {
-                        "up"
-                    } else {
-                        "down"
-                    };
-                    self.surface_mouse(button, mouse.column, mouse.row, None);
-                } else if mouse.kind == MouseEventKind::ScrollUp {
+                    let button = if up { "up" } else { "down" };
+                    return self.to_surface(button, mouse.column, mouse.row, None);
+                }
+                if up {
                     self.scrollback.scroll_up(MOUSE_SCROLL_LINES);
                 } else {
                     self.scrollback.scroll_down(MOUSE_SCROLL_LINES);
                 }
+                Cmd::none()
             }
-            MouseEventKind::Down(_) => {
-                if let Some((_surface, target)) = self.surfaces.click(mouse.column, mouse.row) {
-                    self.surface_mouse(mouse_button(mouse.kind), mouse.column, mouse.row, target);
+            MouseEventKind::Down(_) => match self.surfaces.click(mouse.column, mouse.row) {
+                Some((_surface, target)) => {
+                    self.to_surface(mouse_button(mouse.kind), mouse.column, mouse.row, target)
                 }
-            }
+                None => Cmd::none(),
+            },
             MouseEventKind::Up(_) | MouseEventKind::Drag(_) => {
                 let Some(focus) = self.surfaces.focus() else {
-                    return true;
+                    return Cmd::none();
                 };
                 let target = self
                     .surfaces
                     .hit(mouse.column, mouse.row)
                     .filter(|(key, _)| key == &focus)
                     .and_then(|(_, target)| target);
-                self.surface_mouse(mouse_button(mouse.kind), mouse.column, mouse.row, target);
+                self.to_surface(mouse_button(mouse.kind), mouse.column, mouse.row, target)
             }
-            _ => {}
+            _ => Cmd::none(),
         }
-        true
     }
 
     /// Send one mouse event to the focused surface.
-    fn surface_mouse(&mut self, button: &str, column: u16, row: u16, target: Option<String>) {
+    #[allow(clippy::wrong_self_convention, reason = "it sends to, not converts")]
+    fn to_surface(
+        &mut self,
+        button: &str,
+        column: u16,
+        row: u16,
+        target: Option<String>,
+    ) -> Cmd<Effect> {
         let Some((plugin, name)) = self.surfaces.focus() else {
-            return;
+            return Cmd::none();
         };
-        self.dispatch_surface_event(
-            &plugin,
-            &name,
-            SurfaceEvent::Mouse {
+        Cmd::one(Effect::Surface {
+            plugin,
+            name,
+            event: SurfaceEvent::Mouse {
                 button: button.to_owned(),
                 row,
                 column,
                 target,
             },
-        );
+        })
     }
 
-    /// Handle a key while a surface has focus. Returns true when consumed.
-    fn surface_key(&mut self, key: KeyEvent) -> bool {
+    /// Handle a key while a surface has focus.
+    fn surface_key(&mut self, key: KeyEvent) -> Cmd<Effect> {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char('c') if control => {
                 self.quit = true;
-                true
+                Cmd::one(Effect::Quit)
             }
             KeyCode::F(6) => {
                 self.surfaces.cycle_focus();
-                true
+                Cmd::none()
             }
             KeyCode::Esc => {
                 self.surfaces.release_focus();
-                true
+                Cmd::none()
             }
             _ => {
                 let Some((plugin, name)) = self.surfaces.focus() else {
-                    return true;
+                    return Cmd::none();
                 };
-                self.dispatch_surface_event(&plugin, &name, surface_key_event(key));
-                true
+                Cmd::one(Effect::Surface {
+                    plugin,
+                    name,
+                    event: surface_key_event(key),
+                })
             }
         }
-    }
-
-    /// Handle a paste while a surface has focus. Returns true when consumed.
-    fn surface_paste(&mut self, text: String) -> bool {
-        let Some((plugin, name)) = self.surfaces.focus() else {
-            return false;
-        };
-        self.dispatch_surface_event(&plugin, &name, SurfaceEvent::Paste { text });
-        true
-    }
-
-    /// Deliver one event to a surface and apply its returned actions.
-    fn dispatch_surface_event(&mut self, plugin: &str, name: &str, event: SurfaceEvent) {
-        let Some(host) = self.host.clone() else {
-            self.surfaces.release_focus();
-            return;
-        };
-        let Some(actions) = host.surface_event(plugin, name, event) else {
-            self.surfaces.release_focus();
-            return;
-        };
-
-        for action in actions {
-            match action {
-                SurfaceAction::Consume => {}
-                SurfaceAction::ReleaseFocus => self.surfaces.release_focus(),
-                SurfaceAction::Notice(text) => {
-                    self.scrollback.push_notice(format!("{plugin}: {text}"));
-                }
-            }
-        }
-        self.surfaces.refresh(&host);
     }
 
     /// Handle a keypress that a modal is claiming.
-    fn key_in_modal(&mut self, key: KeyEvent) -> Option<Model> {
+    fn key_in_modal(&mut self, key: KeyEvent) -> Cmd<Effect> {
         let Some(modal) = &mut self.modal else {
-            return None;
+            return Cmd::none();
         };
 
         match modal {
@@ -421,7 +552,9 @@ impl App {
                 KeyCode::Enter => {
                     let chosen = modal.selected_model().cloned();
                     self.modal = None;
-                    return chosen;
+                    if let Some(model) = chosen {
+                        return self.switch_model(model);
+                    }
                 }
                 KeyCode::Esc | KeyCode::Char('q') => self.modal = None,
                 _ => {}
@@ -433,7 +566,7 @@ impl App {
                     if let Some(process) = modal.selected_process() {
                         // Asking is all this does; the command's own task is
                         // watching for the answer and does the stopping.
-                        self.processes.kill(process.id);
+                        return Cmd::one(Effect::Kill(process.id));
                     }
                 }
                 KeyCode::Esc | KeyCode::Char('q') => self.modal = None,
@@ -449,164 +582,179 @@ impl App {
                 if let Some(decision) = decision
                     && let Some(Modal::Confirm(confirm)) = self.modal.take()
                 {
-                    self.answers.answer(confirm.id, decision);
+                    return Cmd::one(Effect::Answer {
+                        id: confirm.id,
+                        decision,
+                    });
                 }
             }
         }
-        None
+        Cmd::none()
     }
 
-    fn switch_model(&mut self, agent: &mut Agent, model: Model) {
+    /// Point the session at another model.
+    ///
+    /// Everything a reader sees happens here; the agent is told by the effect,
+    /// which also fetches the credentials the new provider needs.
+    fn switch_model(&mut self, model: Model) -> Cmd<Effect> {
         let (thinking, note) = clamp_thinking(&model, self.thinking);
         self.thinking = thinking;
         self.status.thinking = thinking.map(|level| level.as_str().to_owned());
         self.status.model = model.id.to_string();
         self.status.context_window = model.context_window;
+        self.current = model.clone();
 
-        self.scrollback
-            .push_notice(format!("── switched to {} ──", model.id));
+        let mut cmd = self.notice(format!("── switched to {} ──", model.id));
         if let Some(note) = note {
-            self.scrollback.push_notice(note);
+            cmd.extend(self.notice(note));
         }
-
-        // The key belongs to the provider, not to the session: switching to a
-        // model from somewhere else has to switch credentials with it, or the
-        // next request goes out signed by the wrong provider.
-        match api_key(&model) {
-            Ok(key) => agent.set_api_key(Some(key)),
-            Err(note) => {
-                agent.set_api_key(None);
-                self.scrollback.push_notice(note);
-            }
-        }
-
-        agent.set_thinking(thinking);
-        agent.set_model(model);
+        cmd.push(Effect::SetModel(Box::new(model)));
+        cmd
     }
 
-    /// Run a slash command. Returns a prompt when the line was not one.
-    fn command(&mut self, agent: &mut Agent, line: &str) -> Option<String> {
-        let Some((name, rest)) = split_command(line) else {
-            return Some(line.to_owned());
-        };
-
-        if self.command_solo(name, rest) {
-            return None;
+    /// Handle one keypress.
+    fn keyed(&mut self, key: KeyEvent) -> Cmd<Effect> {
+        if self.modal.is_some() {
+            return self.key_in_modal(key);
         }
 
-        match name {
-            "quit" | "q" | "exit" => self.quit = true,
-            "clear" | "new" => {
-                self.scrollback.clear();
-                // Keep the system prompt; drop the conversation.
-                let transcript = agent.transcript_mut();
-                let keep = usize::from(
-                    transcript
-                        .get(0)
-                        .is_some_and(|m| m.role() == aphid_core::Role::System),
-                );
-                transcript.truncate(keep);
-                self.status.last = None;
-                self.scrollback.push_notice("── new session ──");
+        if self.surfaces.focus().is_some() {
+            return self.surface_key(key);
+        }
+
+        if key.code == KeyCode::F(6) && self.surfaces.has_focusable() {
+            self.surfaces.focus_first();
+            return Cmd::none();
+        }
+
+        match self.input.handle(key) {
+            Action::None => Cmd::none(),
+            Action::Quit => {
+                self.quit = true;
+                Cmd::one(Effect::Quit)
             }
-            "model" => {
-                if rest.is_empty() {
-                    let models = self.catalog.models().to_vec();
-                    let selected = self.catalog.position(&self.status.model).unwrap_or(0);
-                    self.modal = Some(Modal::Models { models, selected });
+            Action::Cancel => {
+                if self.status.running {
+                    let mut cmd = Cmd::one(Effect::Cancel);
+                    cmd.extend(self.notice("── cancelled ──"));
+                    cmd
                 } else {
-                    match self.catalog.resolve(rest) {
-                        Ok(model) => self.switch_model(agent, model),
-                        Err(error) => self.scrollback.push_notice(match error {
-                            ResolveError::Unknown { candidates } => {
-                                format!("no model `{rest}`. Available: {}", candidates.join(", "))
-                            }
-                            ResolveError::Ambiguous { matches } => {
-                                format!("`{rest}` is ambiguous: {}", matches.join(", "))
-                            }
-                        }),
-                    }
+                    self.input.clear();
+                    Cmd::none()
                 }
             }
+            Action::ScrollUp => {
+                self.scrollback.scroll_up(PAGE_LINES);
+                Cmd::none()
+            }
+            Action::ScrollDown => {
+                self.scrollback.scroll_down(PAGE_LINES);
+                Cmd::none()
+            }
+            Action::ToggleThinking => {
+                self.scrollback.show_thinking = !self.scrollback.show_thinking;
+                Cmd::none()
+            }
+            // No agent involved, so a `!` command works mid-run too, like
+            // `/ps`. The registry tracks it, so `/ps` can stop it.
+            Action::Bang(command) => Cmd::one(Effect::Bang(command)),
+            Action::CycleModel => match self.catalog.next_after(&self.status.model.clone()) {
+                Some(model) => self.switch_model(model),
+                None => Cmd::none(),
+            },
+            Action::Submit(line) => self.submit(line),
+        }
+    }
+
+    /// A finished line: a command, or a prompt for the agent.
+    fn submit(&mut self, line: String) -> Cmd<Effect> {
+        if let Some((name, rest)) = split_command(&line) {
+            let (name, rest) = (name.to_owned(), rest.to_owned());
+            return self.command(&name, &rest);
+        }
+        self.scrollback.push_user(line.clone());
+        self.enqueue(line)
+    }
+
+    /// Run a slash command.
+    fn command(&mut self, name: &str, rest: &str) -> Cmd<Effect> {
+        match name {
+            "quit" | "q" | "exit" => {
+                self.quit = true;
+                Cmd::one(Effect::Quit)
+            }
+            "ps" => {
+                self.modal = Some(Modal::Processes {
+                    rows: Vec::new(),
+                    selected: 0,
+                });
+                Cmd::one(Effect::SnapshotProcesses)
+            }
+            "clear" | "new" => {
+                self.scrollback.clear();
+                self.status.last = None;
+                let mut cmd = Cmd::one(Effect::ClearTranscript);
+                cmd.extend(self.notice("── new session ──"));
+                cmd
+            }
+            "model" if rest.is_empty() => {
+                let models = self.catalog.models().to_vec();
+                let selected = self.catalog.position(&self.status.model).unwrap_or(0);
+                self.modal = Some(Modal::Models { models, selected });
+                Cmd::none()
+            }
+            "model" => match self.catalog.resolve(rest) {
+                Ok(model) => self.switch_model(model),
+                Err(ResolveError::Unknown { candidates }) => self.notice(format!(
+                    "no model `{rest}`. Available: {}",
+                    candidates.join(", ")
+                )),
+                Err(ResolveError::Ambiguous { matches }) => {
+                    self.notice(format!("`{rest}` is ambiguous: {}", matches.join(", ")))
+                }
+            },
             "think" => match parse_thinking(rest) {
                 Ok(level) => {
-                    let (level, note) = clamp_thinking(agent.model(), level);
+                    let (level, note) = clamp_thinking(&self.current, level);
                     self.thinking = level;
                     self.status.thinking = level.map(|level| level.as_str().to_owned());
-                    agent.set_thinking(level);
-                    self.scrollback.push_notice(note.unwrap_or_else(|| {
+                    let said = note.unwrap_or_else(|| {
                         format!(
                             "thinking {}",
                             level.map_or("off", aphid_core::ThinkingLevel::as_str)
                         )
-                    }));
+                    });
+                    let mut cmd = Cmd::one(Effect::SetThinking(level));
+                    cmd.extend(self.notice(said));
+                    cmd
                 }
-                Err(message) => self.scrollback.push_notice(message),
+                Err(message) => self.notice(message),
             },
             "tools" => {
-                let names: Vec<&str> = agent.tools().names().collect();
-                self.scrollback
-                    .push_notice(format!("tools: {}", names.join(", ")));
+                let names = self.tools.join(", ");
+                self.notice(format!("tools: {names}"))
             }
             "session" => {
-                let described = self
-                    .session
-                    .as_ref()
-                    .and_then(|session| Some((session.id()?, session.path()?)))
-                    .map_or_else(
-                        || "not being saved".to_owned(),
-                        |(id, path)| format!("{id} — {}", path.display()),
-                    );
-                self.scrollback.push_notice(format!("session: {described}"));
+                let described = self.session_label.clone();
+                self.notice(format!("session: {described}"))
             }
-            "help" => self.scrollback.push_notice(HELP),
-            "plugins" => self.scrollback.push_notice(self.plugin_summary()),
-            "skills" => self.scrollback.push_notice(self.skills_summary()),
+            "help" => self.notice(HELP),
+            "plugins" => {
+                let summary = self.plugin_summary();
+                self.notice(summary)
+            }
+            "skills" => {
+                let summary = self.skills_summary();
+                self.notice(summary)
+            }
             // Built-ins win, so a plugin can never take `/quit` away.
-            other => self.plugin_command(other, rest),
-        }
-
-        None
-    }
-
-    /// The commands that need nothing but the UI. `true` when the name was one.
-    ///
-    /// Kept apart from the rest because these are the only ones that still work
-    /// while a run holds the agent — which is exactly when a user wants to ask
-    /// what is running.
-    fn command_solo(&mut self, name: &str, _rest: &str) -> bool {
-        match name {
-            "ps" => {
-                self.modal = Some(Modal::Processes {
-                    rows: self.processes.snapshot(),
-                    selected: 0,
-                });
-                true
+            other if self.plugin_commands.iter().any(|known| known == other) => {
+                Cmd::one(Effect::PluginCommand {
+                    name: other.to_owned(),
+                    args: rest.to_owned(),
+                })
             }
-            _ => false,
-        }
-    }
-
-    /// Run a plugin's command, or report that nothing owns the name.
-    ///
-    /// A command reports by returning notices and steers by calling `prompt`,
-    /// which arrives as its own event, so there is nothing to hand back here.
-    fn plugin_command(&mut self, name: &str, args: &str) {
-        let Some(host) = self.host.clone() else {
-            self.scrollback
-                .push_notice(format!("unknown command `/{name}` — try /help"));
-            return;
-        };
-        let Some(actions) = host.run_command(name, args) else {
-            self.scrollback
-                .push_notice(format!("unknown command `/{name}` — try /help"));
-            return;
-        };
-
-        for action in actions {
-            match action {
-                PluginAction::Notice(text) => self.scrollback.push_notice(text),
-            }
+            other => self.notice(format!("unknown command `/{other}` — try /help")),
         }
     }
 
@@ -691,11 +839,6 @@ impl App {
         }
 
         format!("── skills ──\n{}", lines.join("\n"))
-    }
-
-    /// A finished `!` command: put its output in the content area.
-    fn apply_bang_output(&mut self, command: String, output: String) {
-        self.scrollback.push_shell(command, output);
     }
 }
 
@@ -815,7 +958,7 @@ pub async fn run(
         ));
     }
 
-    let (events, receiver) = runtime::channel();
+    let (events, mut receiver) = runtime::channel();
     // One set of reply channels, shared by whoever asks and whoever answers.
     let answers = Answers::default();
 
@@ -874,9 +1017,21 @@ pub async fn run(
     let mut harness = harness::build(options);
     let mut app = App::new(&harness, thinking, &processes);
     app.answers = answers;
+    app.session_label = session.id().zip(session.path()).map_or_else(
+        || "not being saved".to_owned(),
+        |(id, path)| format!("{id} — {}", path.display()),
+    );
     app.session = Some(session);
-    app.scrollback.watch(host.clone());
     app.host = Some(host.clone());
+    // Asked once, at load: what the plugins registered does not change during
+    // a session, and an update must be able to answer without the host.
+    app.plugin_commands = host
+        .commands()
+        .into_iter()
+        .map(|command| command.invocation)
+        .collect();
+    app.plugins_watch_notices = host.any_defines("on_notify");
+    app.plugins_tick = host.any_defines("on_tick") || host.has_surfaces();
     app.surfaces.refresh(&host);
 
     if resumed.is_none() {
@@ -922,7 +1077,14 @@ pub async fn run(
 
     let (mut terminal, kitty) = setup()?;
     spawn_input_thread(&events);
-    let result = drive(&mut terminal, &mut app, harness.agent, receiver).await;
+    let result = drive(
+        &mut terminal,
+        &mut app,
+        harness.agent,
+        &events,
+        &mut receiver,
+    )
+    .await;
     restore(&mut terminal, kitty)?;
 
     // After the terminal is back: a session hook that writes to standard error
@@ -938,224 +1100,231 @@ pub async fn run(
     result
 }
 
+/// Everything the model must not own.
+///
+/// The agent above all: it is parked here between runs and moved into the
+/// run's own task while one is in flight, which is why no update can reach for
+/// it and why every use of it is an effect.
+struct Executor {
+    idle: Option<Agent>,
+    running: Option<Running>,
+    /// What was asked for while the agent was away, applied when it comes
+    /// back. A `/model` chosen mid-run used to be dropped outright, and a
+    /// `/clear` was sent to the model as the word `/clear`.
+    pending: Vec<Effect>,
+    handle: AgentHandle,
+    processes: Arc<exec::Registry>,
+    workspace: Workspace,
+    host: Option<Arc<aphid_plugin::PluginHost>>,
+    answers: Answers<Decision>,
+    hub: Hub<Msg>,
+}
+
+impl Executor {
+    /// Do one thing, and report back with messages.
+    ///
+    /// Takes the model only for the surfaces, whose rendering still runs
+    /// inline; everything else here never reads it. That last thread is cut
+    /// when the plugin hub arrives.
+    fn perform(&mut self, app: &mut App, effect: Effect) {
+        match effect {
+            Effect::StartRun(prompt) => self.start_run(prompt),
+            Effect::Cancel => self.handle.cancel(),
+            // The three that need the agent itself. Each is held when it is
+            // away and applied the moment it is back, so nothing is lost.
+            held @ (Effect::SetModel(_) | Effect::SetThinking(_) | Effect::ClearTranscript) => {
+                match self.idle.as_mut() {
+                    Some(agent) => apply_to_agent(agent, held, &self.hub),
+                    None => self.pending.push(held),
+                }
+            }
+            Effect::Bang(command) => {
+                let processes = Arc::clone(&self.processes);
+                let root = self.workspace.root().to_path_buf();
+                let hub = self.hub.clone();
+                tokio::spawn(async move {
+                    let output = run_bang(&processes, &root, &command).await;
+                    hub.send(Msg::BangOutput { command, output });
+                });
+            }
+            Effect::Kill(id) => self.processes.kill(id),
+            Effect::SnapshotProcesses => {
+                self.hub.send(Msg::Processes(self.processes.snapshot()));
+            }
+            Effect::Answer { id, decision } => self.answers.answer(id, decision),
+            Effect::PluginCommand { name, args } => {
+                let Some(host) = self.host.clone() else {
+                    return;
+                };
+                for action in host.run_command(&name, &args).unwrap_or_default() {
+                    let PluginAction::Notice(text) = action;
+                    self.hub.send(Msg::Notice(text));
+                }
+            }
+            Effect::PluginNotice(text) => {
+                if let Some(host) = &self.host {
+                    host.notice(&text);
+                }
+            }
+            Effect::Surface {
+                plugin,
+                name,
+                event,
+            } => {
+                let Some(host) = self.host.clone() else {
+                    return;
+                };
+                match host.surface_event(&plugin, &name, event) {
+                    Some(actions) => {
+                        self.hub.send(Msg::SurfaceDone { plugin, actions });
+                    }
+                    None => app.surfaces.release_focus(),
+                }
+            }
+            Effect::RefreshSurfaces => {
+                if let Some(host) = self.host.clone() {
+                    app.surfaces.refresh(&host);
+                }
+            }
+            Effect::PluginTick => {
+                if let Some(host) = self.host.clone() {
+                    tokio::task::spawn_blocking(move || host.tick());
+                }
+            }
+            Effect::Quit => {
+                // Releasing the questions first unwinds whoever is blocked on
+                // one; cancelling alone would leave it waiting out its timeout.
+                self.answers.abandon_all();
+                self.handle.cancel();
+            }
+        }
+    }
+
+    fn start_run(&mut self, prompt: String) {
+        let Some(mut agent) = self.idle.take() else {
+            return;
+        };
+        // Whatever arrived while the last run held it.
+        for held in std::mem::take(&mut self.pending) {
+            apply_to_agent(&mut agent, held, &self.hub);
+        }
+        self.running = Some(tokio::spawn(async move {
+            let outcome = agent.prompt(&prompt).await;
+            (agent, outcome)
+        }));
+    }
+}
+
+/// Do one of the effects that only the agent itself can answer.
+fn apply_to_agent(agent: &mut Agent, effect: Effect, hub: &Hub<Msg>) {
+    match effect {
+        Effect::SetModel(model) => {
+            // The key belongs to the provider, not to the session: switching
+            // to a model from somewhere else has to switch credentials with
+            // it, or the next request goes out signed by the wrong provider.
+            match api_key(&model) {
+                Ok(key) => agent.set_api_key(Some(key)),
+                Err(note) => {
+                    agent.set_api_key(None);
+                    hub.send(Msg::Notice(note));
+                }
+            }
+            agent.set_model(*model);
+        }
+        Effect::SetThinking(level) => agent.set_thinking(level),
+        Effect::ClearTranscript => {
+            // Keep the system prompt; drop the conversation.
+            let transcript = agent.transcript_mut();
+            let keep = usize::from(
+                transcript
+                    .get(0)
+                    .is_some_and(|m| m.role() == aphid_core::Role::System),
+            );
+            transcript.truncate(keep);
+        }
+        other => debug_assert!(false, "not the agent's to do: {other:?}"),
+    }
+}
+
 async fn drive(
     terminal: &mut Tty,
     app: &mut App,
     agent: Agent,
-    mut receiver: UnboundedReceiver<UiEvent>,
+    hub: &Hub<Msg>,
+    receiver: &mut UnboundedReceiver<Msg>,
 ) -> std::io::Result<()> {
-    let mut idle: Option<Agent> = Some(agent);
-    let mut running: Option<Running> = None;
-    let mut dirty = true;
+    let mut ex = Executor {
+        idle: Some(agent),
+        running: None,
+        pending: Vec::new(),
+        handle: app.handle.clone(),
+        processes: Arc::clone(&app.processes),
+        workspace: app.workspace.clone(),
+        host: app.host.clone(),
+        answers: app.answers.clone(),
+        hub: hub.clone(),
+    };
 
-    // Armed only for a session that has a plugin hook or a surface waiting on
-    // it, so nothing else pays for a timer it does not use. An `interval` and
-    // not a fresh `sleep` per pass: a sleep built inside `select!` restarts
-    // whenever any other branch wins, which a busy loop would starve for ever.
-    let ticked = app.host.clone().filter(|host| host.any_defines("on_tick"));
-    let surfaces_tick = app.host.clone().filter(|host| host.has_surfaces());
+    // An `interval` and not a fresh `sleep` per pass: a sleep built inside
+    // `select!` restarts whenever any other branch wins, which a busy loop
+    // would starve for ever.
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let wants_tick = app.wanted_subs().tick.is_some();
 
-    while !app.quit {
-        if std::mem::take(&mut dirty) {
-            terminal.draw(|frame| render(frame, app))?;
-        }
+    while !app.quitting() {
+        terminal.draw(|frame| render(frame, app))?;
 
-        tokio::select! {
+        let msg = tokio::select! {
             // A finished run hands the agent back.
-            finished = async { running.as_mut().expect("only polled while running").await },
-                if running.is_some() =>
+            finished = async { ex.running.as_mut().expect("only polled while running").await },
+                if ex.running.is_some() =>
             {
-                running = None;
-                app.status.running = false;
+                ex.running = None;
                 match finished {
-                    Ok((agent, _outcome)) => idle = Some(agent),
-                    Err(error) => app.scrollback.push_notice(format!("the run panicked: {error}")),
-                }
-                dirty = true;
-            }
-            // A `!` command finished; its output goes into the content area.
-            bang = async { app.bang.as_mut().expect("only polled while some").await },
-                if app.bang.is_some() =>
-            {
-                app.bang = None;
-                if let Ok((command, output)) = bang {
-                    app.apply_bang_output(command, output);
-                }
-                dirty = true;
-            }
-            event = receiver.recv() => {
-                let Some(event) = event else { break };
-                match event {
-                    UiEvent::Key(key) => {
-                        dirty = true;
-                        handle_key(app, key, idle.as_mut());
+                    Ok((agent, outcome)) => {
+                        ex.idle = Some(agent);
+                        Some(Msg::RunEnded {
+                            stop: outcome.stop,
+                            turns: outcome.turns,
+                            error: outcome.error,
+                        })
                     }
-                    UiEvent::Paste(text) => {
-                        dirty = true;
-                        // A modal is answered with single keys; a paste into
-                        // one would mean nothing.
-                        if app.modal.is_none()
-                            && !app.surface_paste(text.clone())
-                        {
-                            app.input.paste(&text);
-                        }
-                    }
-                    UiEvent::Resize => dirty = true,
-                    other => {
-                        dirty = app.apply(other);
-                    }
+                    Err(error) => Some(Msg::RunFailed(error.to_string())),
                 }
             }
-            // A repaint tick, so a streaming reply animates rather than
-            // redrawing once per token. It is also when the download meter
-            // ages: the status line reads the meter and never the clock.
-            () = tokio::time::sleep(FRAME), if app.status.running => {
-                app.status.download.prune(Instant::now());
-                dirty = true;
-            }
-            // The process list counts elapsed time, which has to keep moving
-            // even with an idle agent and nothing else arriving. The snapshot
-            // is taken here rather than while drawing: reading the registry
-            // takes a lock, and a frame must not wait on one.
+            msg = receiver.recv() => match msg {
+                Some(msg) => Some(msg),
+                None => break,
+            },
+            () = tokio::time::sleep(FRAME), if app.wanted_subs().frame.is_some() => Some(Msg::Frame),
             () = tokio::time::sleep(PS_REFRESH),
-                if matches!(app.modal, Some(Modal::Processes { .. })) =>
-            {
-                if let Some(Modal::Processes { rows, .. }) = &mut app.modal {
-                    *rows = app.processes.snapshot();
-                }
-                dirty = true;
+                if app.wanted_subs().poll.is_some() => Some(Msg::Poll),
+            _ = ticker.tick(), if wants_tick => {
+                ex.perform(app, Effect::PluginTick);
+                ex.perform(app, Effect::RefreshSurfaces);
+                None
             }
-            // The plugins' tick. Dispatched off the loop, because a hook that
-            // reaches for `exec` or `http` blocks on the plugin worker and the
-            // loop that draws the screen must never wait on that.
-            _ = ticker.tick(), if ticked.is_some() || surfaces_tick.is_some() => {
-                if let Some(host) = ticked.clone() {
-                    tokio::task::spawn_blocking(move || host.tick());
-                }
-                if let Some(host) = surfaces_tick.clone() {
-                    app.surfaces.refresh(&host);
-                    dirty = true;
-                }
+        };
+
+        if let Some(msg) = msg {
+            for effect in app.update(msg).into_effects() {
+                ex.perform(app, effect);
             }
         }
-
-        // Anything typed while the agent was busy goes now that it is free.
-        if start_pending(&mut idle, app, &mut running) {
-            dirty = true;
+        // Whatever else is already waiting goes into the same frame.
+        while let Ok(msg) = receiver.try_recv() {
+            for effect in app.update(msg).into_effects() {
+                ex.perform(app, effect);
+            }
         }
     }
 
-    // Leave nothing running behind us. Abandoning the open questions first
-    // releases any task blocked on one, which cancelling alone would leave
-    // waiting out its timeout.
-    app.answers.abandon_all();
-    app.handle.cancel();
-    if let Some(running) = running {
+    ex.perform(app, Effect::Quit);
+    if let Some(running) = ex.running {
         running.abort();
     }
     Ok(())
-}
-
-/// Start the next queued prompt when there is both an idle agent and no run in
-/// flight. The explicit `running` guard is what keeps the queue serial: taking
-/// the idle agent while a run was still finishing would leave two runs alive.
-fn start_pending(idle: &mut Option<Agent>, app: &mut App, running: &mut Option<Running>) -> bool {
-    if running.is_some() || idle.is_none() || app.queued.is_empty() {
-        return false;
-    }
-
-    let agent = idle.take().expect("just checked");
-    let prompt = app.queued.pop_front().expect("just checked");
-
-    app.status.queued = !app.queued.is_empty();
-    app.status.running = true;
-    *running = Some(start(agent, prompt));
-    true
-}
-
-fn start(mut agent: Agent, prompt: String) -> Running {
-    tokio::spawn(async move {
-        let outcome = agent.prompt(&prompt).await;
-        (agent, outcome)
-    })
-}
-
-fn handle_key(app: &mut App, key: KeyEvent, agent: Option<&mut Agent>) {
-    if app.modal.is_some() {
-        // The picker's choice can only be applied while the agent is idle; if a
-        // run is in flight the switch waits for the next one.
-        if let Some(model) = app.key_in_modal(key)
-            && let Some(agent) = agent
-        {
-            app.switch_model(agent, model);
-        }
-        return;
-    }
-
-    if app.surfaces.focus().is_some() {
-        app.surface_key(key);
-        return;
-    }
-
-    if key.code == KeyCode::F(6) && app.surfaces.has_focusable() {
-        app.surfaces.focus_first();
-        return;
-    }
-
-    match app.input.handle(key) {
-        Action::None => {}
-        Action::Quit => app.quit = true,
-        Action::Cancel => {
-            if app.status.running {
-                app.handle.cancel();
-                app.scrollback.push_notice("── cancelled ──");
-            } else {
-                app.input.clear();
-            }
-        }
-        Action::ScrollUp => app.scrollback.scroll_up(PAGE_LINES),
-        Action::ScrollDown => app.scrollback.scroll_down(PAGE_LINES),
-        Action::ToggleThinking => app.scrollback.show_thinking = !app.scrollback.show_thinking,
-        Action::Bang(command) => {
-            // No agent involved, so a `!` command works mid-run too, like
-            // `/ps`. The registry tracks it, so `/ps` can stop it.
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            let processes = Arc::clone(&app.processes);
-            let root = app.workspace.root().to_path_buf();
-            app.bang = Some(rx);
-            tokio::spawn(async move {
-                let output = run_bang(&processes, &root, &command).await;
-                let _ = tx.send((command, output));
-            });
-        }
-        Action::CycleModel => {
-            let next = app.catalog.next_after(&app.status.model.clone());
-            if let (Some(model), Some(agent)) = (next, agent) {
-                app.switch_model(agent, model);
-            }
-        }
-        Action::Submit(line) => {
-            let Some(prompt) = ({
-                match agent {
-                    Some(agent) => app.command(agent, &line),
-                    // Mid-run the agent is away with the run, so only the
-                    // commands that do not need it can run; the rest of the
-                    // line queues as a prompt, as it always did.
-                    None => match split_command(&line) {
-                        Some((name, rest)) if app.command_solo(name, rest) => None,
-                        _ => Some(line),
-                    },
-                }
-            }) else {
-                return;
-            };
-
-            app.scrollback.push_user(prompt.clone());
-            app.enqueue(prompt);
-        }
-    }
 }
 
 /// Split `/name rest` into its two halves. `None` when the line is a prompt.
@@ -1300,19 +1469,19 @@ mod tests {
         app
     }
 
-    fn type_line(app: &mut App, agent: &mut Option<Agent>, line: &str) {
+    /// Type a line and press Enter, collecting everything it asked for.
+    fn type_line(app: &mut App, line: &str) -> Vec<Effect> {
+        let mut effects = Vec::new();
         for c in line.chars() {
-            handle_key(
-                app,
-                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
-                agent.as_mut(),
-            );
+            effects.extend(press(app, KeyCode::Char(c)));
         }
-        handle_key(
-            app,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            agent.as_mut(),
-        );
+        effects.extend(press(app, KeyCode::Enter));
+        effects
+    }
+
+    fn press(app: &mut App, code: KeyCode) -> Vec<Effect> {
+        app.update(Msg::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+            .into_effects()
     }
 
     fn mouse(kind: MouseEventKind) -> MouseEvent {
@@ -1324,108 +1493,123 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn submitting_a_message_actually_starts_a_run() {
+    /// An executor with nothing but the agent in it, for the few tests that
+    /// are about the hand-off rather than about the model.
+    fn executor(agent: Agent, hub: Hub<Msg>) -> Executor {
+        Executor {
+            handle: agent.handle(),
+            idle: Some(agent),
+            running: None,
+            pending: Vec::new(),
+            processes: Arc::new(exec::Registry::new()),
+            workspace: Workspace::new(std::env::temp_dir()),
+            host: None,
+            answers: Answers::default(),
+            hub,
+        }
+    }
+
+    #[test]
+    fn a_typed_line_asks_for_a_run_and_nothing_else() {
         let agent = agent_with(vec![Turn::text("hello back")]);
         let mut app = app_for(&agent);
-        let mut idle = Some(agent);
 
-        type_line(&mut app, &mut idle, "hello");
-        assert_eq!(app.queued(), Some("hello"), "the line should be queued");
-
-        let mut running = None;
-        assert!(
-            start_pending(&mut idle, &mut app, &mut running),
-            "a run should start"
+        assert_eq!(
+            type_line(&mut app, "hello"),
+            [Effect::StartRun("hello".to_owned())]
         );
-        assert!(idle.is_none(), "the agent moved into the run");
+        assert!(app.status.running, "the status line says so at once");
+        assert_eq!(app.queued(), None, "it went, so it is not still waiting");
+    }
 
-        let (agent, outcome) = running
-            .expect("just started")
-            .await
-            .expect("the run should not panic");
+    #[tokio::test]
+    async fn a_run_the_update_asked_for_actually_happens() {
+        let agent = agent_with(vec![Turn::text("hello back")]);
+        let mut app = app_for(&agent);
+        let (hub, _inbox) = crate::tui::runtime::channel();
+        let mut ex = executor(agent_with(vec![Turn::text("hello back")]), hub);
+
+        for effect in type_line(&mut app, "hello") {
+            ex.perform(&mut app, effect);
+        }
+
+        let (agent, outcome) = ex.running.expect("a run").await.expect("no panic");
         assert_eq!(outcome.turns, 1);
-
         // system, user, assistant
         assert_eq!(agent.transcript().len(), 3);
         assert_eq!(agent.transcript().get(1).unwrap().role(), Role::User);
     }
 
     #[tokio::test]
-    async fn an_idle_loop_tick_does_not_lose_the_agent() {
-        // The regression: taking the agent out to test a tuple pattern dropped
-        // it whenever nothing was queued, so every later submit did nothing.
-        let agent = agent_with(vec![Turn::text("late reply")]);
-        let mut app = app_for(&agent);
-        let mut idle = Some(agent);
-
-        let mut running = None;
-        for _ in 0..5 {
-            assert!(!start_pending(&mut idle, &mut app, &mut running));
-            assert!(idle.is_some(), "the agent must survive an idle tick");
-        }
-
-        type_line(&mut app, &mut idle, "still there?");
-        assert!(
-            start_pending(&mut idle, &mut app, &mut running),
-            "a run should still start"
-        );
-        let (agent, outcome) = running.expect("just started").await.expect("no panic");
-        assert_eq!(outcome.turns, 1);
-        assert_eq!(agent.transcript().len(), 3);
-    }
-
-    #[tokio::test]
-    async fn a_message_typed_mid_run_is_sent_once_the_agent_is_free() {
+    async fn the_agent_comes_back_for_the_next_run() {
         let agent = agent_with(vec![Turn::text("first"), Turn::text("second")]);
         let mut app = app_for(&agent);
-        let mut idle = Some(agent);
+        let (hub, _inbox) = crate::tui::runtime::channel();
+        let mut ex = executor(agent, hub);
 
-        type_line(&mut app, &mut idle, "one");
-        let mut running = None;
-        assert!(
-            start_pending(&mut idle, &mut app, &mut running),
-            "first run"
-        );
+        for effect in type_line(&mut app, "one") {
+            ex.perform(&mut app, effect);
+        }
+        let (agent, _) = ex.running.take().expect("a run").await.expect("no panic");
+        ex.idle = Some(agent);
 
-        // Typed while the agent is away: no agent to hand it to yet.
-        app.status.running = true;
-        type_line(&mut app, &mut idle, "two");
-        assert_eq!(app.queued(), Some("two"));
-        assert!(app.status.queued, "the status line should say so");
-        assert!(!start_pending(&mut idle, &mut app, &mut running));
+        for effect in app
+            .update(Msg::RunEnded {
+                stop: aphid_core::StopReason::Stop,
+                turns: 1,
+                error: None,
+            })
+            .into_effects()
+        {
+            ex.perform(&mut app, effect);
+        }
+        for effect in type_line(&mut app, "two") {
+            ex.perform(&mut app, effect);
+        }
 
-        let (agent, _) = running.expect("first run").await.expect("no panic");
-        idle = Some(agent);
-
-        let mut running = None;
-        assert!(
-            start_pending(&mut idle, &mut app, &mut running),
-            "the queued line goes now"
-        );
-        assert!(!app.status.queued);
-        let (agent, _) = running.expect("just started").await.expect("no panic");
-
+        let (agent, _) = ex.running.expect("a second run").await.expect("no panic");
         // system, user, assistant, user, assistant
         assert_eq!(agent.transcript().len(), 5);
     }
 
-    #[tokio::test]
-    async fn prompts_from_a_plugin_queue_in_order_behind_a_typed_line() {
-        let agent = agent_with(vec![
-            Turn::text("first"),
-            Turn::text("second"),
-            Turn::text("third"),
-        ]);
+    #[test]
+    fn a_line_typed_mid_run_waits_for_the_one_in_flight() {
+        let agent = agent_with(vec![Turn::text("first")]);
         let mut app = app_for(&agent);
-        let mut idle = Some(agent);
 
-        type_line(&mut app, &mut idle, "typed");
-        app.status.running = true;
-        app.apply(UiEvent::Prompt("from a plugin".to_owned()));
-        app.apply(UiEvent::Prompt("and another".to_owned()));
+        assert_eq!(
+            type_line(&mut app, "one"),
+            [Effect::StartRun("one".to_owned())]
+        );
 
-        // Both are in the pane already, as a typed line would be.
+        // The agent is away, so this only queues.
+        assert_eq!(type_line(&mut app, "two"), []);
+        assert_eq!(app.queued(), Some("two"));
+        assert!(app.status.queued, "the status line should say so");
+
+        // And goes the moment the run reports back.
+        let cmd = app.update(Msg::RunEnded {
+            stop: aphid_core::StopReason::Stop,
+            turns: 1,
+            error: None,
+        });
+        assert_eq!(cmd.effects(), [Effect::StartRun("two".to_owned())]);
+        assert!(!app.status.queued);
+    }
+
+    #[test]
+    fn prompts_from_a_plugin_queue_in_order_behind_a_typed_line() {
+        let agent = agent_with(vec![Turn::text("first")]);
+        let mut app = app_for(&agent);
+
+        type_line(&mut app, "typed");
+        assert!(
+            app.update(Msg::Prompt("from a plugin".to_owned()))
+                .is_empty()
+        );
+        assert!(app.update(Msg::Prompt("and another".to_owned())).is_empty());
+
+        // All three are in the pane already, as a typed line would be.
         let users: Vec<String> = app
             .scrollback
             .entries()
@@ -1437,16 +1621,14 @@ mod tests {
             .collect();
         assert_eq!(users, vec!["typed", "from a plugin", "and another"]);
 
-        app.status.running = false;
-        for expected in ["typed", "from a plugin", "and another"] {
-            assert_eq!(app.queued(), Some(expected));
-            let mut running = None;
-            assert!(
-                start_pending(&mut idle, &mut app, &mut running),
-                "a run should start"
-            );
-            let (agent, _) = running.expect("just started").await.expect("no panic");
-            idle = Some(agent);
+        // And they go one at a time, in the order they arrived.
+        for expected in ["from a plugin", "and another"] {
+            let cmd = app.update(Msg::RunEnded {
+                stop: aphid_core::StopReason::Stop,
+                turns: 1,
+                error: None,
+            });
+            assert_eq!(cmd.effects(), [Effect::StartRun(expected.to_owned())]);
         }
         assert_eq!(app.queued(), None, "the queue is drained in order");
     }
@@ -1456,9 +1638,9 @@ mod tests {
         let agent = agent_with(vec![Turn::text("reply")]);
         let mut app = app_for(&agent);
 
-        app.apply(UiEvent::Text("hello".to_owned()));
-        app.apply(UiEvent::Thinking("weighing".to_owned()));
-        app.apply(UiEvent::ToolStreamDelta {
+        app.update(Msg::Text("hello".to_owned()));
+        app.update(Msg::Thinking("weighing".to_owned()));
+        app.update(Msg::ToolStreamDelta {
             block: 0,
             bytes: 40,
         });
@@ -1474,10 +1656,10 @@ mod tests {
         let agent = agent_with(vec![Turn::text("reply")]);
         let mut app = app_for(&agent);
 
-        app.apply(UiEvent::Text("hello".to_owned()));
+        app.update(Msg::Text("hello".to_owned()));
         assert_eq!(app.status.download.bytes(), 5);
 
-        app.apply(UiEvent::TurnEnded {
+        app.update(Msg::TurnEnded {
             usage: aphid_core::Usage::default(),
             stop: aphid_core::StopReason::Stop,
             error: None,
@@ -1497,7 +1679,7 @@ mod tests {
             Turn::call("c1", "bash", r#"{"command":"cargo test"}"#),
             Turn::text("all green"),
         ]);
-        let (events, mut receiver) = crate::tui::runtime::channel::<UiEvent>();
+        let (events, mut receiver) = crate::tui::runtime::channel::<crate::tui::msg::Msg>();
         let mut agent = Agent::builder()
             .model(deepseek::flash())
             .stream_fn(backend)
@@ -1516,7 +1698,7 @@ mod tests {
         let mut app = app_for(&agent);
         let mut streaming_seen = false;
         while let Ok(event) = receiver.try_recv() {
-            app.apply(event);
+            app.update(event);
             // Between the block opening and the call being announced, the card
             // is on screen with a byte count.
             if let Some(Entry::Tool {
@@ -1570,7 +1752,7 @@ mod tests {
         let mut app = app_for(&agent);
         let (id, waiting) = app.answers.open();
 
-        app.apply(UiEvent::Confirm {
+        app.update(Msg::Confirm {
             id,
             tool: "bash".to_owned(),
             summary: "rm -rf build".to_owned(),
@@ -1578,7 +1760,15 @@ mod tests {
         });
         assert!(matches!(app.modal, Some(Modal::Confirm(_))));
 
-        app.key_in_modal(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        let asked = press(&mut app, KeyCode::Char('n'));
+        assert_eq!(
+            asked,
+            [Effect::Answer {
+                id,
+                decision: Decision::Deny,
+            }]
+        );
+        app.answers.answer(id, Decision::Deny);
 
         assert_eq!(waiting.try_recv(), Ok(Decision::Deny));
         assert!(app.modal.is_none(), "the question is answered and gone");
@@ -1590,14 +1780,23 @@ mod tests {
         let mut app = app_for(&agent);
         let (id, waiting) = app.answers.open();
 
-        app.apply(UiEvent::Confirm {
+        app.update(Msg::Confirm {
             id,
             tool: "bash".to_owned(),
             summary: "rm -rf build".to_owned(),
             risk: Risk::Destructive,
         });
-        app.key_in_modal(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
-        app.key_in_modal(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        for answer in [Decision::Allow, Decision::Deny] {
+            let code = match answer {
+                Decision::Allow => KeyCode::Char('y'),
+                _ => KeyCode::Char('n'),
+            };
+            for effect in press(&mut app, code) {
+                if let Effect::Answer { id, decision } = effect {
+                    app.answers.answer(id, decision);
+                }
+            }
+        }
 
         assert_eq!(waiting.try_recv(), Ok(Decision::Allow));
         assert!(waiting.try_recv().is_err(), "only the first answer counted");
@@ -1605,7 +1804,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_session_that_quits_refuses_what_it_was_asked() {
-        let (events, mut receiver) = crate::tui::runtime::channel::<UiEvent>();
+        let (events, mut receiver) = crate::tui::runtime::channel::<crate::tui::msg::Msg>();
         let answers = Answers::default();
         let confirmer = UiConfirmer::new(events, answers.clone());
 
@@ -1615,7 +1814,7 @@ mod tests {
         });
 
         let event = receiver.recv().await.expect("the question");
-        assert!(matches!(event, UiEvent::Confirm { .. }));
+        assert!(matches!(event, Msg::Confirm { .. }));
 
         // What the loop does on the way out.
         answers.abandon_all();
@@ -1633,13 +1832,13 @@ mod tests {
         let mut app = app_for(&agent);
         let bottom = scrollable(&mut app);
 
-        app.apply(UiEvent::Mouse(mouse(MouseEventKind::ScrollUp)));
+        app.update(Msg::Mouse(mouse(MouseEventKind::ScrollUp)));
         assert_eq!(
             app.scrollback.layout(40, 10).top,
             bottom - MOUSE_SCROLL_LINES
         );
 
-        app.apply(UiEvent::Mouse(mouse(MouseEventKind::ScrollDown)));
+        app.update(Msg::Mouse(mouse(MouseEventKind::ScrollDown)));
         assert_eq!(app.scrollback.layout(40, 10).top, bottom);
     }
 
@@ -1649,8 +1848,8 @@ mod tests {
         let mut app = app_for(&agent);
         let bottom = scrollable(&mut app);
 
-        app.apply(UiEvent::Mouse(mouse(MouseEventKind::ScrollDown)));
-        app.apply(UiEvent::Mouse(mouse(MouseEventKind::ScrollDown)));
+        app.update(Msg::Mouse(mouse(MouseEventKind::ScrollDown)));
+        app.update(Msg::Mouse(mouse(MouseEventKind::ScrollDown)));
         assert_eq!(app.scrollback.layout(40, 10).top, bottom);
         assert!(!app.scrollback.scrolled());
     }
@@ -1661,7 +1860,7 @@ mod tests {
         let mut app = app_for(&agent);
         scrollable(&mut app);
 
-        app.apply(UiEvent::Mouse(mouse(MouseEventKind::Moved)));
+        app.update(Msg::Mouse(mouse(MouseEventKind::Moved)));
         assert!(!app.scrollback.scrolled());
     }
 
@@ -1671,8 +1870,8 @@ mod tests {
         let mut app = app_for(&agent);
         app.input.paste("draft");
 
-        app.apply(UiEvent::Mouse(mouse(MouseEventKind::ScrollUp)));
-        app.apply(UiEvent::Mouse(mouse(MouseEventKind::ScrollDown)));
+        app.update(Msg::Mouse(mouse(MouseEventKind::ScrollUp)));
+        app.update(Msg::Mouse(mouse(MouseEventKind::ScrollDown)));
 
         assert_eq!(app.input.text(), "draft");
     }
@@ -1681,14 +1880,10 @@ mod tests {
     async fn a_slash_command_is_handled_rather_than_sent() {
         let agent = agent_with(vec![Turn::text("unused")]);
         let mut app = app_for(&agent);
-        let mut idle = Some(agent);
 
-        type_line(&mut app, &mut idle, "/tools");
+        type_line(&mut app, "/tools");
 
         assert!(app.queued().is_none(), "a command is not a prompt");
-        let mut running = None;
-        assert!(!start_pending(&mut idle, &mut app, &mut running));
-        assert!(idle.is_some());
     }
 
     fn notice_lines(app: &App) -> Vec<String> {
@@ -1721,7 +1916,6 @@ mod tests {
     async fn skills_lists_what_loaded_and_what_did_not() {
         let agent = agent_with(vec![Turn::text("unused")]);
         let mut app = app_for(&agent);
-        let mut idle = Some(agent);
         app.skills = vec![
             skill("release", "How to cut a release.", true),
             skill("review", &"a very wordy description ".repeat(20), false),
@@ -1731,7 +1925,7 @@ mod tests {
             message: "no `description` in the frontmatter".to_owned(),
         }];
 
-        type_line(&mut app, &mut idle, "/skills");
+        type_line(&mut app, "/skills");
 
         let lines = notice_lines(&app);
         assert!(
@@ -1759,9 +1953,8 @@ mod tests {
     async fn skills_says_so_when_there_are_none() {
         let agent = agent_with(vec![Turn::text("unused")]);
         let mut app = app_for(&agent);
-        let mut idle = Some(agent);
 
-        type_line(&mut app, &mut idle, "/skills");
+        type_line(&mut app, "/skills");
 
         assert!(notice_lines(&app).contains(&"no skills are loaded".to_owned()));
     }
@@ -1770,9 +1963,8 @@ mod tests {
     async fn ps_opens_the_process_list() {
         let agent = agent_with(vec![Turn::text("unused")]);
         let mut app = app_for(&agent);
-        let mut idle = Some(agent);
 
-        type_line(&mut app, &mut idle, "/ps");
+        type_line(&mut app, "/ps");
 
         assert!(matches!(app.modal, Some(Modal::Processes { .. })));
         assert!(app.queued().is_none(), "a command is not a prompt");
@@ -1784,33 +1976,69 @@ mod tests {
     async fn ps_works_while_a_run_holds_the_agent() {
         let agent = agent_with(vec![Turn::text("unused")]);
         let mut app = app_for(&agent);
-        let mut away: Option<Agent> = None;
         app.status.running = true;
 
-        type_line(&mut app, &mut away, "/ps");
+        type_line(&mut app, "/ps");
 
         assert!(matches!(app.modal, Some(Modal::Processes { .. })));
         assert_eq!(app.queued(), None, "it must not queue as a prompt");
     }
 
-    #[tokio::test]
-    async fn a_command_that_needs_the_agent_still_queues_mid_run() {
+    /// A command mid-run used to be sent to the model as the literal text of
+    /// the command, because the agent it wanted was away. The update answers
+    /// out of the model now, so it simply runs.
+    #[test]
+    fn a_command_works_while_a_run_holds_the_agent() {
         let agent = agent_with(vec![Turn::text("unused")]);
         let mut app = app_for(&agent);
-        let mut away: Option<Agent> = None;
         app.status.running = true;
 
-        type_line(&mut app, &mut away, "/tools");
+        assert!(type_line(&mut app, "/tools").is_empty());
 
-        assert!(app.modal.is_none());
-        assert_eq!(app.queued(), Some("/tools"));
+        assert_eq!(app.queued(), None, "it must not be sent as a prompt");
+        assert!(
+            notice_lines(&app)[0].starts_with("tools:"),
+            "{:?}",
+            notice_lines(&app)
+        );
+    }
+
+    /// The commands that do need the agent are held for it rather than lost.
+    #[tokio::test]
+    async fn a_model_switch_mid_run_is_applied_when_the_agent_returns() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+        let (hub, _inbox) = crate::tui::runtime::channel();
+        let mut ex = executor(agent, hub);
+
+        // Away with a run.
+        let held = ex.idle.take().expect("the agent");
+        app.status.running = true;
+
+        let asked = type_line(&mut app, "/think high");
+        assert!(
+            matches!(asked.as_slice(), [Effect::SetThinking(_)]),
+            "{asked:?}"
+        );
+        for effect in asked {
+            ex.perform(&mut app, effect);
+        }
+        assert_eq!(ex.pending.len(), 1, "held for the agent, not dropped");
+
+        // It comes back, and what was waiting is applied before the next run.
+        ex.idle = Some(held);
+        app.status.running = false;
+        for effect in type_line(&mut app, "hello") {
+            ex.perform(&mut app, effect);
+        }
+        assert!(ex.pending.is_empty(), "the wait is over");
+        let _ = ex.running.expect("a run").await;
     }
 
     #[tokio::test]
     async fn k_stops_the_selected_process() {
         let agent = agent_with(vec![Turn::text("unused")]);
         let mut app = app_for(&agent);
-        let mut idle = Some(agent);
 
         let processes = Arc::clone(&app.processes);
         let running = tokio::spawn({
@@ -1827,12 +2055,16 @@ mod tests {
         });
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        type_line(&mut app, &mut idle, "/ps");
-        handle_key(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
-            idle.as_mut(),
-        );
+        // Opening the list asks for a snapshot; the test provides it, as the
+        // executor would.
+        assert_eq!(type_line(&mut app, "/ps"), [Effect::SnapshotProcesses]);
+        app.update(Msg::Processes(processes.snapshot()));
+
+        let asked = press(&mut app, KeyCode::Char('k'));
+        let [Effect::Kill(id)] = asked.as_slice() else {
+            panic!("k should ask for a kill: {asked:?}");
+        };
+        processes.kill(*id);
 
         let status = running.await.expect("the sleep");
         assert_eq!(status, exec::Status::Killed);
@@ -1852,6 +2084,22 @@ mod tests {
         Workspace::new(root)
     }
 
+    /// Type a `!` line, run what it asked for, and feed the output back.
+    async fn run_bang_line(app: &mut App, line: &str) {
+        let asked = type_line(app, line);
+        assert_eq!(app.queued(), None, "a bang line is not a prompt");
+        let [Effect::Bang(command)] = asked.as_slice() else {
+            panic!("a bang line should ask for one command: {asked:?}");
+        };
+
+        let processes = Arc::new(exec::Registry::new());
+        let output = run_bang(&processes, app.workspace.root(), command).await;
+        app.update(Msg::BangOutput {
+            command: command.clone(),
+            output,
+        });
+    }
+
     fn shell_outputs(app: &App) -> Vec<String> {
         use crate::tui::scrollback::Entry;
         app.scrollback
@@ -1869,18 +2117,8 @@ mod tests {
         let agent = agent_with(vec![Turn::text("unused")]);
         let mut app = app_for(&agent);
         app.workspace = temp_workspace();
-        let mut idle = Some(agent);
 
-        type_line(&mut app, &mut idle, "!echo hi");
-
-        assert_eq!(app.queued(), None, "a bang line is not a prompt");
-        let (command, output) = app
-            .bang
-            .take()
-            .expect("a bang run started")
-            .await
-            .expect("the command ran");
-        app.apply_bang_output(command, output);
+        run_bang_line(&mut app, "!echo hi").await;
 
         assert_eq!(shell_outputs(&app), vec!["hi\n"]);
         assert!(!app.status.running, "no agent run was started");
@@ -1891,17 +2129,8 @@ mod tests {
         let agent = agent_with(vec![Turn::text("unused")]);
         let mut app = app_for(&agent);
         app.workspace = temp_workspace();
-        let mut idle = Some(agent);
 
-        type_line(&mut app, &mut idle, "!exit 3");
-
-        let (command, output) = app
-            .bang
-            .take()
-            .expect("a bang run started")
-            .await
-            .expect("the command ran");
-        app.apply_bang_output(command, output);
+        run_bang_line(&mut app, "!exit 3").await;
 
         let shown = shell_outputs(&app).remove(0);
         assert!(shown.ends_with("[exit code 3]"), "{shown:?}");
@@ -1912,12 +2141,13 @@ mod tests {
         let agent = agent_with(vec![Turn::text("unused")]);
         let mut app = app_for(&agent);
         app.workspace = temp_workspace();
-        let mut away: Option<Agent> = None;
         app.status.running = true;
 
-        type_line(&mut app, &mut away, "!echo hi");
-
-        assert!(app.bang.is_some(), "the bang run started without the agent");
+        assert_eq!(
+            type_line(&mut app, "!echo hi"),
+            [Effect::Bang("echo hi".to_owned())],
+            "a bang line needs no agent, so a run in flight does not stop it"
+        );
         assert_eq!(app.queued(), None, "it must not queue as a prompt");
     }
 }
@@ -1926,12 +2156,15 @@ mod tests {
 mod plugin_tests {
     use std::sync::Arc;
 
+    use crate::tui::effect::Effect;
+    use crate::tui::msg::Msg;
+
     use aphid_agent::{Agent, exec};
     use aphid_core::providers::deepseek;
     use aphid_plugin::{Capabilities, PluginHost, Silent, explicit};
 
     use super::{App, Status};
-    use crate::tui::event::{UiEvent, UiSink};
+    use crate::tui::event::UiSink;
     use crate::tui::scrollback::Entry;
 
     /// A workspace with one plugin, removed on drop.
@@ -1982,6 +2215,11 @@ mod plugin_tests {
             .build();
         let mut app = App::new_for_test(&agent);
         app.status = Status::from_model(agent.model());
+        app.plugin_commands = host
+            .commands()
+            .into_iter()
+            .map(|command| command.invocation)
+            .collect();
         app.host = Some(host);
         (app, agent)
     }
@@ -2011,19 +2249,33 @@ mod plugin_tests {
             });
             "#,
         );
-        let (events, mut receiver) = crate::tui::runtime::channel::<UiEvent>();
+        let (events, mut receiver) = crate::tui::runtime::channel::<crate::tui::msg::Msg>();
         let host = fixture.host_with(Arc::new(UiSink::new(events)));
-        let (mut app, mut agent) = app_with(host);
+        let (mut app, _agent) = app_with(Arc::clone(&host));
 
-        let typed = app.command(&mut agent, "/greet Ana");
-
-        assert_eq!(typed, None, "a command is not itself a prompt");
+        // The update names the plugin's command rather than running it; the
+        // executor is what reaches into the script.
+        let asked = app.command("greet", "Ana").into_effects();
+        assert_eq!(
+            asked,
+            [Effect::PluginCommand {
+                name: "greet".to_owned(),
+                args: "Ana".to_owned(),
+            }]
+        );
+        for action in host.run_command("greet", "Ana").expect("the command") {
+            let aphid_plugin::Action::Notice(text) = action;
+            app.update(Msg::Notice(text));
+        }
         assert_eq!(notices(&app), vec!["greeting Ana"]);
 
-        // The prompt took the long way round, as an event the loop applies.
+        // The prompt took the long way round, as a message the loop applies,
+        // and goes to the agent like a typed line.
         let event = receiver.try_recv().expect("the prompt was sent");
-        app.apply(event);
-        assert_eq!(app.queued(), Some("Say hello to Ana"));
+        assert_eq!(
+            app.update(event).into_effects(),
+            [Effect::StartRun("Say hello to Ana".to_owned())]
+        );
     }
 
     #[test]
@@ -2076,7 +2328,22 @@ mod plugin_tests {
         app.surfaces.focus_first();
         assert!(app.surfaces.focus().is_some(), "the panel can take focus");
 
-        app.surface_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let asked = app
+            .surface_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .into_effects();
+        let [
+            Effect::Surface {
+                plugin,
+                name,
+                event,
+            },
+        ] = asked.as_slice()
+        else {
+            panic!("a key on a focused panel goes to it: {asked:?}");
+        };
+        host.surface_event(plugin, name, event.clone())
+            .expect("the surface took it");
+
         let count = host
             .state_of("kit")
             .and_then(|state| state.get("count").cloned())
@@ -2096,11 +2363,12 @@ mod plugin_tests {
         let fixture = Fixture::new(
             r#"register_command(#{ name: "help", run: |args| { prompt("hijacked") } });"#,
         );
-        let (mut app, mut agent) = app_with(fixture.host());
+        let (mut app, _agent) = app_with(fixture.host());
 
-        let prompt = app.command(&mut agent, "/help");
-
-        assert_eq!(prompt, None, "the built-in ran, not the plugin");
+        assert!(
+            app.command("help", "").effects().is_empty(),
+            "the built-in ran, not the plugin"
+        );
         assert!(
             notices(&app)
                 .first()
@@ -2113,9 +2381,9 @@ mod plugin_tests {
     #[test]
     fn an_unknown_command_is_still_reported() {
         let fixture = Fixture::new(r#"fn on_run_start(cx) {}"#);
-        let (mut app, mut agent) = app_with(fixture.host());
+        let (mut app, _agent) = app_with(fixture.host());
 
-        assert_eq!(app.command(&mut agent, "/nope"), None);
+        assert!(app.command("nope", "").effects().is_empty());
         assert!(
             notices(&app)[0].contains("unknown command `/nope`"),
             "{:?}",
@@ -2131,9 +2399,9 @@ mod plugin_tests {
             register_command(#{ name: "greet", description: "Say hello.", run: |a| { "hi" } });
             "#,
         );
-        let (mut app, mut agent) = app_with(fixture.host());
+        let (mut app, _agent) = app_with(fixture.host());
 
-        app.command(&mut agent, "/plugins");
+        app.command("plugins", "");
 
         let summary = notices(&app).remove(0);
         assert!(summary.contains("kit"), "{summary}");
