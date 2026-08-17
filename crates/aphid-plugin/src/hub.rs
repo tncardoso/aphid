@@ -173,14 +173,20 @@ fn drain(first: Job, inbox: &Receiver<Job>) -> Vec<Job> {
 /// redraw always draws the state it finds. A slow tick used to queue behind
 /// itself and then run twice over; the flag the host kept for that is what
 /// this replaces.
+///
+/// The **last** of each is what is kept, not the first. A batch can hold a
+/// redraw, then a command that changes what a panel shows, then another
+/// redraw; keeping the first would draw the panel as it was and then throw
+/// away the ask that would have drawn it as it is.
 fn coalesce(queue: Vec<Job>) -> Vec<Job> {
     let mut kept: Vec<Job> = Vec::with_capacity(queue.len());
-    for job in queue {
-        if job.coalesces() && kept.iter().any(|waiting| waiting.same_kind(&job)) {
+    for job in queue.into_iter().rev() {
+        if job.coalesces() && kept.iter().any(|later| later.same_kind(&job)) {
             continue;
         }
         kept.push(job);
     }
+    kept.reverse();
     kept
 }
 
@@ -219,7 +225,14 @@ fn run(job: Job, host: &Arc<PluginHost>, panels: &mut Panels, report: &impl Fn(R
                 actions,
             });
         }
-        Job::Refresh => report(Report::Surfaces(panels.render(host))),
+        // Nothing is said when nothing moved: the tick asks for a redraw
+        // every quarter second, and answering it with an unchanged copy of
+        // every widget tree would be a copy and a message for nothing.
+        Job::Refresh => {
+            if let Some(open) = panels.render(host) {
+                report(Report::Surfaces(open));
+            }
+        }
         Job::Flush => host.flush(),
     }
 }
@@ -232,6 +245,9 @@ fn run(job: Job, host: &Arc<PluginHost>, panels: &mut Panels, report: &impl Fn(R
 #[derive(Default)]
 struct Panels {
     cache: HashMap<(String, String), Cached>,
+    /// Whether anything has been reported yet. The first answer is always
+    /// worth giving, even when every surface is closed.
+    reported: bool,
 }
 
 struct Cached {
@@ -240,8 +256,10 @@ struct Cached {
 }
 
 impl Panels {
-    fn render(&mut self, host: &Arc<PluginHost>) -> Vec<Open> {
+    /// What the surfaces come to, or `None` when none of them has moved.
+    fn render(&mut self, host: &Arc<PluginHost>) -> Option<Vec<Open>> {
         let mut open = Vec::new();
+        let mut moved = !self.reported;
 
         for surface in host.surfaces() {
             let crate::surface::Placement::Side(side) = surface.placement;
@@ -253,6 +271,7 @@ impl Panels {
                 .get(&key)
                 .is_none_or(|cached| cached.version != version);
             if stale {
+                moved = true;
                 let drawn = draw(host, &surface, side);
                 self.cache.insert(
                     key.clone(),
@@ -268,7 +287,11 @@ impl Panels {
             }
         }
 
-        open
+        if !moved {
+            return None;
+        }
+        self.reported = true;
+        Some(open)
     }
 }
 
@@ -342,6 +365,21 @@ mod tests {
                 args: String::new(),
             },
         ]);
-        assert_eq!(kinds(&kept), ["notice", "tick", "notice", "command"]);
+        assert_eq!(kinds(&kept), ["notice", "notice", "tick", "command"]);
+    }
+
+    #[test]
+    fn a_redraw_keeps_the_place_of_the_last_one_asked_for() {
+        // The one that matters is the one after the command: it is what draws
+        // the panel as the command left it.
+        let kept = coalesce(vec![
+            Job::Refresh,
+            Job::Command {
+                name: "bump".to_owned(),
+                args: String::new(),
+            },
+            Job::Refresh,
+        ]);
+        assert_eq!(kinds(&kept), ["command", "refresh"]);
     }
 }

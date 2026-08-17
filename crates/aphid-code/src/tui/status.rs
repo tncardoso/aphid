@@ -145,6 +145,12 @@ impl Status {
 pub struct DownloadSpeed {
     /// When each chunk landed and how many bytes it carried.
     samples: VecDeque<(Instant, u64)>,
+    /// What the samples add up to, carried rather than re-summed.
+    ///
+    /// A reading is taken at every chunk now, not once a frame, and a fast
+    /// provider puts a thousand chunks in the window: summing them at each one
+    /// would be a million additions for a reply.
+    total: u64,
     /// The reading the samples last gave.
     rate: Option<f64>,
 }
@@ -158,6 +164,7 @@ impl DownloadSpeed {
     /// Record that `bytes` landed at `now`.
     pub fn note(&mut self, now: Instant, bytes: u64) {
         self.samples.push_back((now, bytes));
+        self.total += bytes;
         self.recompute(now);
     }
 
@@ -173,6 +180,7 @@ impl DownloadSpeed {
     /// cannot sit on an idle line.
     pub fn clear(&mut self) {
         self.samples.clear();
+        self.total = 0;
         self.rate = None;
     }
 
@@ -191,26 +199,35 @@ impl DownloadSpeed {
         });
     }
 
-    /// Drop samples older than the window; return the oldest remaining sample
-    /// and the sum of the rest, or `None` when nothing remains.
+    /// Drop the samples older than the window, and report the oldest that is
+    /// left with what the window now holds.
+    ///
+    /// The work is what fell out, not what stayed: the total is carried.
     fn window_sum(&mut self, now: Instant) -> Option<(Instant, u64)> {
-        while self
-            .samples
-            .front()
-            .is_some_and(|(at, _)| now.saturating_duration_since(*at) > Self::WINDOW)
-        {
+        while let Some((at, bytes)) = self.samples.front().copied() {
+            if now.saturating_duration_since(at) <= Self::WINDOW {
+                break;
+            }
             self.samples.pop_front();
+            self.total -= bytes;
         }
         let (oldest, _) = *self.samples.front()?;
-        let sum = self.samples.iter().map(|(_, bytes)| bytes).sum();
-        Some((oldest, sum))
+        Some((oldest, self.total))
+    }
+
+    /// How many chunks the window still holds. Test-only: the meter is a
+    /// window and not a log, so this stays bounded however long a reply runs.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn samples(&self) -> usize {
+        self.samples.len()
     }
 
     /// Total bytes still in the window. Test-only: the app tests assert that
     /// streaming events feed the meter without peeking at its internals.
     #[cfg(test)]
     pub(crate) fn bytes(&self) -> u64 {
-        self.samples.iter().map(|(_, bytes)| bytes).sum()
+        self.total
     }
 }
 
@@ -390,6 +407,29 @@ mod tests {
 
         let rendered = status.line().to_string();
         assert!(rendered.contains("KB/s"), "{rendered:?}");
+    }
+
+    /// The total is carried rather than re-summed, so it has to stay in step
+    /// with the samples through every note and every expiry.
+    #[test]
+    fn the_carried_total_matches_what_the_window_holds() {
+        let t0 = Instant::now();
+        let mut meter = DownloadSpeed::default();
+
+        for step in 0..200u64 {
+            meter.note(t0 + Duration::from_millis(step * 25), 100);
+        }
+        // Half the notes are older than the two-second window by now.
+        assert_eq!(meter.bytes(), meter.samples() as u64 * 100);
+        assert!(meter.samples() < 200, "the old ones fell out");
+
+        meter.prune(t0 + Duration::from_secs(60));
+        assert_eq!(
+            meter.bytes(),
+            0,
+            "everything aged out, and so did the total"
+        );
+        assert_eq!(meter.rate_kb_s(), None);
     }
 
     #[test]

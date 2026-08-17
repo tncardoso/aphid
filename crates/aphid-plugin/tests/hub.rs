@@ -48,6 +48,9 @@ fn hub(host: Arc<PluginHost>) -> (PluginHub, Receiver<Report>) {
 }
 
 /// Wait for the thread to have nothing left to do.
+///
+/// A redraw answers only when something moved, so this pokes a plugin's state
+/// first to make sure there is an answer to wait for.
 fn settle(hub: &PluginHub, reports: &Receiver<Report>) -> Vec<Report> {
     hub.send(Job::Refresh);
     let mut seen = Vec::new();
@@ -188,4 +191,53 @@ fn an_event_for_a_surface_that_is_gone_says_so() {
         panic!("the wrong kind of answer");
     };
     assert_eq!(actions, None, "no surface by that name");
+}
+
+/// The tick asks for a redraw four times a second. A panel whose plugin has
+/// not moved must not answer, or every quarter second is a copy of every
+/// widget tree for nothing.
+#[test]
+fn a_redraw_says_nothing_when_no_panel_moved() {
+    let host = host(
+        r#"
+        register_surface(#{
+            name: "panel",
+            placement: #{ kind: "side", side: "right" },
+            init: || #{ n: 0 },
+            view: |s| #{ type: "text", text: "n " + s.n }
+        });
+        register_command(#{
+            name: "bump",
+            run: |args| {
+                let s = surface_state("panel");
+                s.n += 1;
+                surface_state("panel", s);
+                notice("bumped")
+            }
+        });
+        "#,
+    );
+    let (hub, reports) = hub(host);
+
+    // The first answer is always worth giving.
+    let _ = settle(&hub, &reports);
+
+    for _ in 0..10 {
+        hub.send(Job::Refresh);
+    }
+    assert!(
+        reports.recv_timeout(Duration::from_millis(200)).is_err(),
+        "nothing moved, so there is nothing to say"
+    );
+
+    hub.send(Job::Command {
+        name: "bump".to_owned(),
+        args: String::new(),
+    });
+    let seen = settle(&hub, &reports);
+    assert!(
+        seen.iter()
+            .any(|report| matches!(report, Report::Surfaces(_))),
+        "and it speaks up again the moment one does"
+    );
 }

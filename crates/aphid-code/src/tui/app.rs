@@ -1701,6 +1701,32 @@ mod tests {
         assert_eq!(app.queued(), None, "the queue is drained in order");
     }
 
+    /// A reply arrives as hundreds of small deltas, and each one is a message.
+    /// Anything the update does at every message is done hundreds of times per
+    /// reply, so what does not change must cost nothing.
+    #[test]
+    fn a_long_stream_does_not_rebuild_what_did_not_change() {
+        let agent = agent_with(vec![Turn::text("reply")]);
+        let mut app = app_for(&agent);
+
+        app.update(Msg::TurnStarted);
+        let built = app.input.borders_built();
+        for _ in 0..500 {
+            app.update(Msg::Text("a token ".to_owned()));
+        }
+
+        assert_eq!(
+            app.input.borders_built(),
+            built,
+            "the input border is the same border for the whole reply"
+        );
+        assert_eq!(
+            app.status.download.bytes(),
+            500 * "a token ".len() as u64,
+            "and the meter's carried total kept up with every one of them"
+        );
+    }
+
     #[test]
     fn streaming_events_feed_the_download_meter() {
         let agent = agent_with(vec![Turn::text("reply")]);
