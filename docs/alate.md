@@ -30,8 +30,8 @@ its configuration, its memory, its clock and its gate.
 ## Sessions
 
 An alate has more than one conversation at a time. Each is a **session**: one
-context, one transcript, one file in `.aphid/sessions`. Sessions run at the same
-time, so a job that starts at nine does not wait for you to stop typing.
+context, one transcript, one file in `~/.aphid/sessions`. Sessions run at the
+same time, so a job that starts at nine does not wait for you to stop typing.
 
 Three things make a session, and each ends differently:
 

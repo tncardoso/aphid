@@ -18,6 +18,10 @@
   on a prompt no longer holds for the rest of the day.
 - Quitting the terminal while a permission question is on screen refuses the
   call immediately, instead of leaving it to time out.
+- Sessions are now stored in one place shared by every project:
+  `~/.aphid/sessions` (or `$APHID_HOME/sessions`), as files named
+  `<project>-<id>.jsonl`. Sessions saved under a workspace's own `.aphid`
+  are no longer listed or resumed.
 
 ### Added
 

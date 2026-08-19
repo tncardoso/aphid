@@ -108,6 +108,7 @@ async fn a_terminal_gets_a_conversation_of_its_own() {
         config,
         model: Some(dummy_model()),
         stream_fn: Some(stream_fn),
+        sessions_dir: temp.path("sessions"),
     }));
 
     let mut client = attach(&socket).await;
@@ -155,6 +156,7 @@ async fn a_terminal_is_not_put_in_the_resident_session() {
         config,
         model: Some(dummy_model()),
         stream_fn: Some(stream_fn),
+        sessions_dir: temp.path("sessions"),
     }));
 
     let mut client = attach(&socket).await;
@@ -223,6 +225,7 @@ async fn a_job_runs_in_a_session_of_its_own() {
         config,
         model: Some(dummy_model()),
         stream_fn: Some(stream_fn),
+        sessions_dir: temp.path("sessions"),
     }));
 
     let mut client = attach(&socket).await;
@@ -288,10 +291,10 @@ async fn a_job_runs_in_a_session_of_its_own() {
 
     daemon.abort();
 
-    // And what it did is in its own transcript, not in this terminal's.
-    let path = temp
-        .path("test/.aphid/sessions")
-        .join(format!("{}.jsonl", job.id));
+    // And what it did is in its own transcript, not in this terminal's. The
+    // alate's home is "test" (`Home::open_in(&temp.root, "test")`), so that
+    // is the project prefix on the session's filename.
+    let path = temp.path("sessions").join(format!("test-{}.jsonl", job.id));
     let text = std::fs::read_to_string(&path).expect("the job's transcript");
     assert!(text.contains("Check on things."), "{text}");
 }
@@ -317,6 +320,7 @@ async fn what_the_agent_remembers_is_on_disk_afterwards() {
         config,
         model: Some(dummy_model()),
         stream_fn: Some(stream_fn),
+        sessions_dir: temp.path("sessions"),
     }));
 
     let mut client = attach(&socket).await;
@@ -378,6 +382,7 @@ async fn a_stored_fact_and_the_crontab_reach_the_model() {
         config,
         model: Some(dummy_model()),
         stream_fn: Some(stream_fn),
+        sessions_dir: temp.path("sessions"),
     }));
 
     let mut client = attach(&socket).await;
@@ -427,6 +432,7 @@ async fn a_heartbeat_wakes_the_resident_session() {
         config,
         model: Some(dummy_model()),
         stream_fn: Some(stream_fn),
+        sessions_dir: temp.path("sessions"),
     }));
 
     let mut client = attach(&socket).await;
@@ -460,6 +466,7 @@ async fn a_session_can_be_watched_after_it_ended() {
         config,
         model: Some(dummy_model()),
         stream_fn: Some(stream_fn),
+        sessions_dir: temp.path("sessions"),
     }));
 
     let mut first = attach(&socket).await;
@@ -515,7 +522,7 @@ async fn each_session_writes_its_own_transcript() {
     let config = quiet();
     let home = home(&temp, &config);
     let socket = home.socket();
-    let sessions = home.aphid_dir().join("sessions");
+    let sessions = temp.path("sessions");
 
     let (stream_fn, _script) = scripted([Turn::text("Said out loud.")]);
     let daemon = tokio::spawn(daemon::run(Options {
@@ -523,6 +530,7 @@ async fn each_session_writes_its_own_transcript() {
         config,
         model: Some(dummy_model()),
         stream_fn: Some(stream_fn),
+        sessions_dir: temp.path("sessions"),
     }));
 
     let mut client = attach(&socket).await;
@@ -568,6 +576,7 @@ async fn two_daemons_cannot_share_one_alate() {
         config: config.clone(),
         model: Some(dummy_model()),
         stream_fn: Some(stream_fn),
+        sessions_dir: temp.path("sessions"),
     }));
     let _client = attach(&socket).await;
 
@@ -577,6 +586,7 @@ async fn two_daemons_cannot_share_one_alate() {
         config,
         model: Some(dummy_model()),
         stream_fn: Some(stream_fn),
+        sessions_dir: temp.path("sessions"),
     })
     .await
     .expect_err("the second daemon should be refused");
@@ -598,6 +608,7 @@ async fn a_session_is_listed_under_the_channel_it_belongs_to() {
         config,
         model: Some(dummy_model()),
         stream_fn: Some(stream_fn),
+        sessions_dir: temp.path("sessions"),
     }));
 
     // A terminal, which says nothing about itself.

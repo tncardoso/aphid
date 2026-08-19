@@ -12,13 +12,15 @@
 //!   state.json      when the heartbeat last woke
 //!   gateway.sock    the socket clients attach to
 //!   alate.log       every frame the gateway sent, for the hours nobody watched
-//!   .aphid/         skills, plugins and sessions, found the ordinary way
+//!   .aphid/         skills and plugins, found the ordinary way
 //! ```
 //!
-//! The last line is the reason for the whole shape. The home *is* the agent's
-//! workspace, so [`skills::discover`], [`aphid_plugin::discover`] and
-//! [`sessions_dir`] find their directories with no new code and no second
-//! convention to learn.
+//! The last line is the reason for that much of the shape. The home *is* the
+//! agent's workspace, so [`skills::discover`] and [`aphid_plugin::discover`]
+//! find their directories with no new code and no second convention to learn.
+//! Sessions are the exception: they live in [`sessions_dir`], one directory
+//! shared by every project on the machine, not under any one instance's
+//! `.aphid`.
 //!
 //! Unlike [`aphid_code::home_dir`], this honours `$APHID_HOME`. That function
 //! ignores it deliberately, because moving `AGENTS.md` and skills now would
@@ -157,10 +159,8 @@ impl Home {
 
     /// Create the directories an instance needs.
     ///
-    /// `sessions` is left out on purpose: [`SessionStore::create`] makes it, and
-    /// an instance that has never run should not look as though it has.
-    ///
-    /// [`SessionStore::create`]: aphid_code::session::store::SessionStore::create
+    /// No `sessions` here: those live in the shared, global sessions
+    /// directory, not under any one instance's `.aphid`.
     ///
     /// # Errors
     ///

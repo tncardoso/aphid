@@ -54,6 +54,7 @@ async fn start(name: &str) -> ExitCode {
         config,
         model: None,
         stream_fn: None,
+        sessions_dir: aphid_code::session::sessions_dir(),
     })
     .await
     {

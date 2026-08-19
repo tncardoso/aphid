@@ -10,7 +10,7 @@ mod store;
 
 pub use format::{AssistantRecord, Block, Header, Line, Record, ToolResultRecord};
 pub use plugin::SessionPlugin;
-pub use store::{SessionStore, Summary, list, newest_for, resolve, sessions_dir};
+pub use store::{SessionStore, Summary, list, list_for, newest_for, resolve, sessions_dir};
 
 use std::path::Path;
 use std::sync::Arc;
@@ -30,6 +30,7 @@ use aphid_core::{Role, Transcript};
 /// Fails when the session directory or file cannot be opened.
 pub fn attach(
     dir: &Path,
+    root: &Path,
     cwd: &Path,
     model: Option<&str>,
     resume: Option<&Path>,
@@ -40,7 +41,7 @@ pub fn attach(
             let (store, _header) = SessionStore::resume(path, &mut transcript)?;
             (store, Some(transcript))
         }
-        None => (SessionStore::create(dir, cwd, model)?, None),
+        None => (SessionStore::create(dir, root, cwd, model)?, None),
     };
     Ok((Arc::new(SessionPlugin::new(store)), restored))
 }

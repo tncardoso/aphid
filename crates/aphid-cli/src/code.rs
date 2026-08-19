@@ -116,8 +116,8 @@ pub async fn run(args: Args) -> ExitCode {
     let workspace = Workspace::discover();
 
     if args.list_sessions {
-        let directory = sessions_dir(&workspace);
-        let sessions = session::list(&directory);
+        let directory = sessions_dir();
+        let sessions = session::list_for(&directory, workspace.root());
         if sessions.is_empty() {
             println!("no sessions in {}", directory.display());
         }
@@ -206,7 +206,7 @@ pub async fn run(args: Args) -> ExitCode {
         options.max_turns = max_turns;
     }
 
-    let resume = match resolve_resume(&workspace, &options.cwd, args.resume.as_ref()) {
+    let resume = match resolve_resume(&options.cwd, args.resume.as_ref()) {
         Ok(path) => path,
         Err(message) => {
             eprintln!("aphid: {message}");
@@ -230,7 +230,8 @@ pub async fn run(args: Args) -> ExitCode {
             // see them the same way they see interactive ones.
             let model_id = options.model.id.to_string();
             let (store, resumed) = match session::attach(
-                &sessions_dir(&workspace),
+                &sessions_dir(),
+                workspace.root(),
                 &options.cwd,
                 Some(&model_id),
                 resume.as_deref(),
@@ -397,14 +398,13 @@ fn api_key(model: &aphid_core::Model) -> Result<String, String> {
 }
 
 fn resolve_resume(
-    workspace: &Workspace,
     cwd: &std::path::Path,
     resume: Option<&Option<String>>,
 ) -> Result<Option<PathBuf>, String> {
     let Some(request) = resume else {
         return Ok(None);
     };
-    let directory = sessions_dir(workspace);
+    let directory = sessions_dir();
 
     let found = match request {
         Some(id) => session::resolve(&directory, id)

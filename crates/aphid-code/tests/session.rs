@@ -149,7 +149,8 @@ fn a_session_round_trips_every_content_kind() {
     let original = rich_transcript();
 
     let mut store =
-        SessionStore::create(&temp.root, &temp.root, Some("deepseek-v4-pro")).expect("create");
+        SessionStore::create(&temp.root, &temp.root, &temp.root, Some("deepseek-v4-pro"))
+            .expect("create");
     store.flush(&original).expect("flush");
     let path = store.path().to_path_buf();
 
@@ -167,7 +168,7 @@ fn flushing_only_appends_what_is_new() {
     let mut transcript = Transcript::new();
     transcript.push_user("one");
 
-    let mut store = SessionStore::create(&temp.root, &temp.root, None).expect("create");
+    let mut store = SessionStore::create(&temp.root, &temp.root, &temp.root, None).expect("create");
     store.flush(&transcript).expect("first flush");
     let after_one = std::fs::read_to_string(store.path()).expect("read");
 
@@ -195,7 +196,7 @@ fn resuming_continues_appending_to_the_same_file() {
     let mut transcript = Transcript::new();
     transcript.push_user("one");
 
-    let mut store = SessionStore::create(&temp.root, &temp.root, None).expect("create");
+    let mut store = SessionStore::create(&temp.root, &temp.root, &temp.root, None).expect("create");
     store.flush(&transcript).expect("flush");
     let path = store.path().to_path_buf();
     drop(store);
@@ -217,7 +218,7 @@ fn a_truncated_line_does_not_stop_the_load() {
     let mut transcript = Transcript::new();
     transcript.push_user("one");
 
-    let mut store = SessionStore::create(&temp.root, &temp.root, None).expect("create");
+    let mut store = SessionStore::create(&temp.root, &temp.root, &temp.root, None).expect("create");
     store.flush(&transcript).expect("flush");
     let path = store.path().to_path_buf();
 
@@ -236,12 +237,12 @@ fn sessions_are_listed_newest_first_and_found_by_cwd_or_id() {
     let temp = Temp::new();
     let elsewhere = temp.root.join("other");
 
-    let mut first = SessionStore::create(&temp.root, &temp.root, None).expect("create");
+    let mut first = SessionStore::create(&temp.root, &temp.root, &temp.root, None).expect("create");
     let mut transcript = Transcript::new();
     transcript.push_user("hello");
     first.flush(&transcript).expect("flush");
 
-    let second = SessionStore::create(&temp.root, &elsewhere, None).expect("create");
+    let second = SessionStore::create(&temp.root, &temp.root, &elsewhere, None).expect("create");
 
     let all = session::list(&temp.root);
     assert_eq!(all.len(), 2);
@@ -260,13 +261,34 @@ fn sessions_are_listed_newest_first_and_found_by_cwd_or_id() {
 }
 
 #[test]
+fn listing_for_a_project_is_not_fooled_by_a_shared_name_prefix() {
+    let temp = Temp::new();
+    // The whole point: "app" is a prefix of "app-backend"'s directory name, so
+    // a filter on the filename's prefix would wrongly let app-backend's
+    // sessions leak into app's listing.
+    let app = temp.root.join("app");
+    let backend = temp.root.join("app-backend");
+
+    let app_store = SessionStore::create(&temp.root, &app, &app, None).expect("create");
+    let backend_store = SessionStore::create(&temp.root, &backend, &backend, None).expect("create");
+
+    let for_app = session::list_for(&temp.root, &app);
+    assert_eq!(for_app.len(), 1, "{for_app:?}");
+    assert_eq!(for_app[0].header.id, app_store.id());
+
+    let for_backend = session::list_for(&temp.root, &backend);
+    assert_eq!(for_backend.len(), 1, "{for_backend:?}");
+    assert_eq!(for_backend[0].header.id, backend_store.id());
+}
+
+#[test]
 fn a_transcript_that_shrank_rewinds_instead_of_interleaving() {
     let temp = Temp::new();
     let mut transcript = Transcript::new();
     transcript.push_user("one");
     transcript.push_user("two");
 
-    let mut store = SessionStore::create(&temp.root, &temp.root, None).expect("create");
+    let mut store = SessionStore::create(&temp.root, &temp.root, &temp.root, None).expect("create");
     store.flush(&transcript).expect("flush");
 
     transcript.truncate(1);

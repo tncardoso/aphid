@@ -18,13 +18,13 @@
 //! - a cron job, into a session opened for it, which is why a job never lands
 //!   in the middle of what somebody was saying.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use aphid_agent::StreamFn;
 use aphid_code::model::Catalog;
 use aphid_code::plugins::scripts;
-use aphid_code::session::sessions_dir;
 use aphid_code::tools::Workspace;
 use aphid_plugin::{PluginHost, ScriptBackend, SessionInfo};
 use chrono::Local;
@@ -61,6 +61,11 @@ pub struct Options {
     ///
     /// [`HarnessOptions::stream_fn`]: aphid_code::harness::HarnessOptions::stream_fn
     pub stream_fn: Option<StreamFn>,
+    /// The shared, global sessions directory. Computed once at the true edge
+    /// (`aphid-cli`, next to `Home::open`) rather than here, so a test that
+    /// builds `Options` directly keeps its whole world in a temporary
+    /// directory without ever touching `$HOME`/`$APHID_HOME`.
+    pub sessions_dir: PathBuf,
 }
 
 /// Everything the loop holds between passes.
@@ -73,6 +78,7 @@ struct Alate {
     schedule: Schedule,
     crontab: cron::Shared,
     workspace: Workspace,
+    sessions_dir: PathBuf,
     model: String,
     context_window: u32,
     thinking: Option<String>,
@@ -100,6 +106,7 @@ pub async fn run(options: Options) -> Result<(), String> {
         config,
         model: given,
         stream_fn,
+        sessions_dir,
     } = options;
 
     // A caller that already resolved a model — the tests — needs no catalog
@@ -198,6 +205,7 @@ pub async fn run(options: Options) -> Result<(), String> {
         model: model.clone(),
         api_key,
         workspace: workspace.clone(),
+        sessions_dir: sessions_dir.clone(),
         publisher: server.publisher(),
         memory,
         crontab: crontab.clone(),
@@ -223,6 +231,7 @@ pub async fn run(options: Options) -> Result<(), String> {
         schedule,
         crontab,
         workspace,
+        sessions_dir,
     };
 
     // The resident session, which the heartbeat wakes into and which outlives
@@ -369,8 +378,9 @@ impl Alate {
             .and_then(crate::sessions::Session::path)
         {
             Some(path) => Some(path),
-            None => aphid_code::session::resolve(&sessions_dir(&self.workspace), id)
-                .map(|summary| summary.path),
+            None => {
+                aphid_code::session::resolve(&self.sessions_dir, id).map(|summary| summary.path)
+            }
         };
         let Some(path) = path else {
             self.server.reply(
@@ -526,7 +536,7 @@ fn handle(alate: &mut Alate, event: Event) {
             Request::Watch { id } => alate.watch(connection, &id),
             Request::Sessions => {
                 let live = alate.sessions.list();
-                let stored = stored(&alate.workspace, &alate.sessions);
+                let stored = stored(&alate.workspace, &alate.sessions_dir, &alate.sessions);
                 alate.server.reply(
                     connection,
                     Envelope::daemon(Frame::Sessions { live, stored }),

@@ -1,7 +1,7 @@
 //! The conversations an alate is having at once.
 //!
 //! A session is one agent context: one [`Agent`], one transcript, one file
-//! under `.aphid/sessions`. An alate hosts several rather than being one, which
+//! under `~/.aphid/sessions`. An alate hosts several rather than being one, which
 //! is what lets a scheduled job run without landing in the middle of what you
 //! were saying.
 //!
@@ -25,12 +25,13 @@
 //! <id>` needs no second namespace.
 
 use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use aphid_agent::{Agent, AgentHandle, RunOutcome, StreamFn};
 use aphid_code::harness::{self, HarnessOptions};
 use aphid_code::plugins::permissions::{AllowAll, Confirmer, DenyAll, Permissions};
-use aphid_code::session::{self, SessionPlugin, sessions_dir};
+use aphid_code::session::{self, SessionPlugin};
 use aphid_code::tools::Workspace;
 use aphid_plugin::PluginHost;
 use chrono::{DateTime, Local};
@@ -322,6 +323,10 @@ pub struct Blueprint {
     pub model: aphid_core::Model,
     pub api_key: Option<String>,
     pub workspace: Workspace,
+    /// The shared, global sessions directory — computed once at the edge
+    /// (`aphid-cli`), not derived here, so tests can sandbox it exactly as
+    /// they already sandbox `home`.
+    pub sessions_dir: PathBuf,
     pub publisher: Publisher,
     pub memory: memory::Shared,
     pub crontab: cron::Shared,
@@ -375,10 +380,16 @@ impl Blueprint {
         // The session file is opened first, because its id *is* the session's,
         // and the plugins below have to be told which session they speak for
         // before any of them can send a frame.
-        let directory = sessions_dir(&self.workspace);
+        let directory = &self.sessions_dir;
         let model_id = options.model.id.to_string();
-        let (plugin, _resumed) = session::attach(&directory, &options.cwd, Some(&model_id), None)
-            .map_err(|error| {
+        let (plugin, _resumed) = session::attach(
+            directory,
+            self.workspace.root(),
+            &options.cwd,
+            Some(&model_id),
+            None,
+        )
+        .map_err(|error| {
             format!(
                 "could not open a session in {}: {error}",
                 directory.display()
@@ -457,8 +468,8 @@ impl Blueprint {
 ///
 /// The open ones are filtered out so a list never shows one conversation twice.
 #[must_use]
-pub fn stored(workspace: &Workspace, open: &Sessions) -> Vec<Info> {
-    session::list(&sessions_dir(workspace))
+pub fn stored(workspace: &Workspace, sessions_dir: &Path, open: &Sessions) -> Vec<Info> {
+    session::list_for(sessions_dir, workspace.root())
         .into_iter()
         .filter(|summary| !open.contains(&summary.header.id))
         .map(|summary| Info {

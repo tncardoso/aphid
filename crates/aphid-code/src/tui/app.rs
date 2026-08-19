@@ -1041,8 +1041,14 @@ pub async fn run(
     }
 
     // The session plugin has to be registered before the agent is built.
-    let directory = sessions_dir(&workspace);
-    let (session, resumed) = session::attach(&directory, &cwd, Some(&model_id), resume.as_deref())?;
+    let directory = sessions_dir();
+    let (session, resumed) = session::attach(
+        &directory,
+        workspace.root(),
+        &cwd,
+        Some(&model_id),
+        resume.as_deref(),
+    )?;
     options.plugins.push(session.clone());
 
     let session_id = session.id();

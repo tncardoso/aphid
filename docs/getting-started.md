@@ -151,8 +151,8 @@ heartbeat and the crontab.
 | `~/.agents/skills/` | Your skills that the other agents read too. |
 | `~/.aphid/plugins/` | Your plugins, for each workspace. |
 | `~/.aphid/alate/<name>/` | One resident agent. |
+| `~/.aphid/sessions/` | The saved sessions of every project. |
 | `<workspace>/AGENTS.md` | Instructions for one workspace. |
-| `<workspace>/.aphid/sessions/` | The saved sessions. |
 | `<workspace>/.aphid/skills/` | The skills of this workspace. |
 | `<workspace>/.agents/skills/` | The skills of this workspace that the other agents read too. |
 | `<workspace>/.aphid/plugins/` | The plugins of this workspace. |

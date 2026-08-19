@@ -7,12 +7,43 @@ use std::path::{Path, PathBuf};
 use aphid_core::{Timestamp, Transcript};
 
 use super::format::{self, Header, Line, Record};
-use crate::tools::Workspace;
 
-/// Where a workspace keeps its sessions.
+/// `$APHID_HOME/sessions`, or `~/.aphid/sessions` — one directory, shared by
+/// every project on the machine.
+///
+/// Without a home directory (a container with no `$HOME`, say), this falls
+/// back to a temporary directory: aphid keeps running, it just does not
+/// persist the session past a reboot, rather than refusing to start.
 #[must_use]
-pub fn sessions_dir(workspace: &Workspace) -> PathBuf {
-    workspace.root().join(".aphid").join("sessions")
+pub fn sessions_dir() -> PathBuf {
+    aphid_core::catalog::aphid_dir()
+        .map(|dir| dir.join("sessions"))
+        .unwrap_or_else(|| std::env::temp_dir().join("aphid").join("sessions"))
+}
+
+/// The project name used in a session's filename, purely cosmetic: the last
+/// component of `root`. Not used for filtering — see [`list_for`].
+fn slug(root: &Path) -> std::borrow::Cow<'_, str> {
+    root.file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or(std::borrow::Cow::Borrowed("root"))
+}
+
+/// The sessions in `dir` that belong to the project at `root`, newest first.
+///
+/// Filtered by `header.cwd` compared to `root` component-by-component
+/// (`Path::starts_with`), not by filename: two projects whose last path
+/// component is a prefix of the other's (`app` and `app-backend`, say) would
+/// make a string-prefix filter on the filename ambiguous
+/// (`"app-backend-...".starts_with("app-")` is `true`), so the filename stays
+/// cosmetic and filtering goes through the full path already recorded in
+/// each session's header.
+#[must_use]
+pub fn list_for(dir: &Path, root: &Path) -> Vec<Summary> {
+    list(dir)
+        .into_iter()
+        .filter(|summary| Path::new(&summary.header.cwd).starts_with(root))
+        .collect()
 }
 
 /// An append-only session file.
@@ -34,11 +65,16 @@ impl SessionStore {
     /// # Errors
     ///
     /// Fails when the directory cannot be created or the file cannot be opened.
-    pub fn create(dir: &Path, cwd: &Path, model: Option<&str>) -> std::io::Result<Self> {
+    pub fn create(
+        dir: &Path,
+        root: &Path,
+        cwd: &Path,
+        model: Option<&str>,
+    ) -> std::io::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let started = chrono::Utc::now();
         let id = new_id(started);
-        let path = dir.join(format!("{id}.jsonl"));
+        let path = dir.join(format!("{}-{id}.jsonl", slug(root)));
 
         let mut file = OpenOptions::new()
             .create_new(true)

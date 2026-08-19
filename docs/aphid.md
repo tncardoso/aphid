@@ -44,10 +44,13 @@ For instructions that are only necessary sometimes, write a
 
 ## Sessions
 
-Aphid records each session as one file of JSON lines in
-`<workspace>/.aphid/sessions`, and adds to it as each message is committed.
-Nothing is written a second time. Thus a failure costs the turn that was in
-flight and no more, and `--resume` is a replay of the file.
+Aphid records each session as one file of JSON lines in `~/.aphid/sessions`,
+shared by every project on the machine, and adds to it as each message is
+committed. The filename is `<project>-<id>`, where `<project>` is the
+workspace's directory name — cosmetic only, so listing and resuming a session
+still work correctly even if two projects share a name. Nothing is written a
+second time. Thus a failure costs the turn that was in flight and no more, and
+`--resume` is a replay of the file.
 
 Headless runs are recorded also, and `--sessions` and `--resume` see them in the
 same manner as the sessions of the terminal.
@@ -354,10 +357,10 @@ To correct a model by hand, refer to [The file](core.md#the-file).
 | `~/.aphid/models.dev.json` | The local copy of the models.dev document. |
 | `~/.aphid/AGENTS.md` | Instructions for each workspace. |
 | `<workspace>/AGENTS.md` | Instructions for one workspace. |
-| `<workspace>/.aphid/sessions/` | The saved sessions. |
 | `<workspace>/.aphid/skills/` | The skills of this workspace. |
 | `<workspace>/.agents/skills/` | The skills of this workspace that the other agents read too. |
 | `<workspace>/.aphid/plugins/` | The plugins of this workspace. |
+| `~/.aphid/sessions/` | The saved sessions of every project, named `<project>-<id>.jsonl`. |
 | `~/.aphid/skills/` | Your skills, for each workspace. |
 | `~/.agents/skills/` | Your skills that the other agents read too. |
 | `~/.aphid/plugins/` | Your plugins, for each workspace. |

@@ -18,9 +18,8 @@ fn opening_makes_the_layout() {
     assert!(home.aphid_dir().join("skills").is_dir());
     assert!(home.aphid_dir().join("plugins").is_dir());
 
-    // Not made until the alate has actually run, so an instance that never ran
-    // does not look as though it did.
-    assert!(!home.aphid_dir().join("sessions").exists());
+    // Sessions live in the shared, global sessions directory now, not under
+    // an instance's own `.aphid` — see `aphid_code::session::sessions_dir`.
 }
 
 #[test]
