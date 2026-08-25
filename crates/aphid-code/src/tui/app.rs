@@ -942,6 +942,10 @@ impl App {
     /// comes with it. A plugin that declared something nobody provides does
     /// nothing and says nothing, which is a legitimate state and therefore a
     /// silent one — this is where it stops being silent.
+    ///
+    /// What a plugin is offering is listed under it, indented, so the listing
+    /// reads as the tree it is: who is loaded, and what each one put on the
+    /// table.
     fn plugin_summary(&self) -> String {
         let Some(host) = &self.host else {
             return "no plugins are loaded".to_owned();
@@ -956,8 +960,43 @@ impl App {
             .map(|composition| composition.runtime.roster())
             .unwrap_or_default();
 
+        // Read from what is on offer, not from what the files declared: a
+        // plugin that is waiting contributes nothing, and saying "2 command(s)"
+        // about one would be the listing lying about the state it just printed.
+        // The counts and the rows under them come from the same reading.
+        let commands = self
+            .registries
+            .as_ref()
+            .map(|i| crate::scripting::registered_commands(i.commands()))
+            .unwrap_or_default();
+        let surfaces = self
+            .registries
+            .as_ref()
+            .map(|i| crate::scripting::registered_surfaces(i.surfaces()))
+            .unwrap_or_default();
+
+        let component = |kind: &str, target: &str, detail: &str, plugin: &str| {
+            format!("    {kind:<8} {target:<16} {detail} [{plugin}]")
+        };
+
         let mut lines = Vec::new();
         for plugin in host.plugins() {
+            // A blank line ahead of every plugin but the first, so the rows
+            // under one read as belonging to it rather than running into the
+            // next name.
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+
+            let mine: Vec<_> = commands
+                .iter()
+                .filter(|command| command.plugin == plugin.name())
+                .collect();
+            let panels: Vec<_> = surfaces
+                .iter()
+                .filter(|surface| surface.plugin == plugin.name())
+                .collect();
+
             let mut parts = Vec::new();
             if let Some(status) = roster.iter().find(|status| status.name == plugin.name()) {
                 parts.push(status.state.to_string());
@@ -971,63 +1010,32 @@ impl App {
             if !plugin.hooks().is_empty() {
                 parts.push(plugin.hooks().join(", "));
             }
-            // Counted from what is on offer, not from what the file declared:
-            // a plugin that is waiting contributes nothing, and saying "2
-            // tool(s)" about one would be the listing lying about the state it
-            // just printed.
-            if let Some(registries) = &self.registries {
-                let offered =
-                    |count: usize, what: &str| (count > 0).then(|| format!("{count} {what}(s)"));
-                let mine = |source: &str| source == plugin.name();
-                parts.extend(offered(
-                    registries
-                        .commands()
-                        .entries()
-                        .iter()
-                        .filter(|entry| mine(&entry.source))
-                        .count(),
+            let offered =
+                |count: usize, what: &str| (count > 0).then(|| format!("{count} {what}(s)"));
+            parts.extend(offered(mine.len(), "command"));
+            parts.extend(offered(panels.len(), "surface"));
+
+            lines.push(format!("{:<16} {}", plugin.name(), parts.join(" · ")));
+            for command in mine {
+                lines.push(component(
                     "command",
-                ));
-                parts.extend(offered(
-                    registries
-                        .surfaces()
-                        .entries()
-                        .iter()
-                        .filter(|entry| mine(&entry.source))
-                        .count(),
-                    "surface",
+                    &format!("/{}", command.invocation),
+                    &command.description,
+                    &command.plugin,
                 ));
             }
-            lines.push(format!("  {:<16} {}", plugin.name(), parts.join(" · ")));
-        }
-
-        for command in self
-            .registries
-            .as_ref()
-            .map(|i| crate::scripting::registered_commands(i.commands()))
-            .unwrap_or_default()
-        {
-            lines.push(format!(
-                "  /{:<15} {} [{}]",
-                command.invocation, command.description, command.plugin
-            ));
-        }
-
-        for surface in self
-            .registries
-            .as_ref()
-            .map(|i| crate::scripting::registered_surfaces(i.surfaces()))
-            .unwrap_or_default()
-        {
-            let side = match surface.placement {
-                Placement::Side(Side::Left) => "left",
-                Placement::Side(Side::Right) => "right",
-            };
-            lines.push(format!(
-                "  {:<17} {side} panel [{}]",
-                format!("{}/{}", surface.plugin, surface.name),
-                surface.plugin
-            ));
+            for surface in panels {
+                let side = match surface.placement {
+                    Placement::Side(Side::Left) => "left",
+                    Placement::Side(Side::Right) => "right",
+                };
+                lines.push(component(
+                    "surface",
+                    &format!("{}/{}", surface.plugin, surface.name),
+                    &format!("{side} panel"),
+                    &surface.plugin,
+                ));
+            }
         }
 
         for problem in host.diagnostics() {
@@ -2985,6 +2993,38 @@ mod plugin_tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn the_listing_nests_a_plugin_components_under_it() {
+        let fixture = Fixture::new(
+            r#"const inject = ["commands", "surfaces"];
+
+
+fn apply(ctx) {
+    command(#{
+        name: "todo",
+        description: "Run a prompt in todo mode.",
+        run: |args| notice("todo")
+    });
+    surface(#{
+        name: "todo",
+        placement: #{ kind: "side", side: "right" },
+        view: || #{ type: "text", text: "todo" },
+    });
+}
+"#,
+        );
+        let host = fixture.host();
+        let (app, _agent) = app_with(host);
+
+        assert_eq!(
+            app.plugin_summary(),
+            "\u{2500}\u{2500} plugins \u{2500}\u{2500}\n\
+             kit              apply · 1 command(s) · 1 surface(s)\n\
+             \x20   command  /todo            Run a prompt in todo mode. [kit]\n\
+             \x20   surface  kit/todo         right panel [kit]"
+        );
     }
 
     #[test]
