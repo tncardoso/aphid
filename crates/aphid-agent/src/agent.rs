@@ -9,10 +9,13 @@ use aphid_core::{
     MessageId, Model, Role, SimpleStreamOptions, StopReason, ThinkingLevel, Transcript, Usage,
 };
 
-use crate::plugin::{EventListener, Plugin, StreamCx};
-use crate::registry::{Plugins, Tools};
+use crate::events::{StreamListeners, ToolProgress, TranscriptListeners};
+
+use crate::registry::Tools;
+use crate::rt::{Bus, Composition, Runtime};
 use crate::stream::{StreamFn, live_stream_fn};
 use crate::tool::{ProgressSink, ToolCx, ToolHandler};
+use crate::toolbox::Toolbox;
 
 /// How many turns a run takes before the loop gives up, unless configured
 /// otherwise. High enough not to interrupt real work, low enough that a model
@@ -78,14 +81,26 @@ impl AgentHandle {
     }
 }
 
-/// A configured agent: a transcript, a model, its tools, and the plugins that
+/// A configured agent: a transcript, a model, its tools, and the components that
 /// extend the loop.
 pub struct Agent {
     pub(crate) transcript: Transcript,
     pub(crate) model: Model,
-    pub(crate) tools: Tools,
+    pub(crate) tools: Arc<Toolbox>,
     /// Shared, because the progress sink handed to running tools holds it too.
-    pub(crate) plugins: Arc<Plugins>,
+    /// Where components listen. Shared, because the progress sink handed to
+    /// running tools holds it too, and because every payload a listener may
+    /// answer from another task carries a handle.
+    pub(crate) bus: Arc<Bus>,
+    /// The per-token subscribers. Not on the bus, and the type says why.
+    pub(crate) stream_listeners: Arc<StreamListeners>,
+    /// Subscribers that read the transcript where it grew. Also not on the bus,
+    /// for the same reason.
+    pub(crate) transcript_listeners: Arc<TranscriptListeners>,
+    /// The composition this loop was built into, if it was built into one.
+    /// Settled at the start of every run, so a component mounted from
+    /// synchronous assembly code is loaded before anything is announced.
+    pub(crate) composition: Option<Runtime>,
     pub(crate) options: SimpleStreamOptions,
     pub(crate) stream_fn: StreamFn,
     pub(crate) max_turns: u32,
@@ -102,7 +117,11 @@ impl Agent {
             model: NoModel,
             system: None,
             tools: Tools::new(),
-            plugins: Plugins::new(),
+            bus: Arc::new(Bus::new()),
+            stream_listeners: Arc::new(StreamListeners::new()),
+            transcript_listeners: Arc::new(TranscriptListeners::new()),
+            composition: None,
+            toolbox: None,
             options: SimpleStreamOptions::default(),
             stream_fn: None,
             max_turns: DEFAULT_MAX_TURNS,
@@ -139,13 +158,26 @@ impl Agent {
     }
 
     #[must_use]
-    pub fn tools(&self) -> &Tools {
+    pub fn tools(&self) -> &Arc<Toolbox> {
         &self.tools
     }
 
+    /// Where components subscribe to what the loop announces.
     #[must_use]
-    pub fn plugins(&self) -> &Plugins {
-        &self.plugins
+    pub fn bus(&self) -> &Arc<Bus> {
+        &self.bus
+    }
+
+    /// The per-token subscribers, which are deliberately not on the bus.
+    #[must_use]
+    pub fn stream_listeners(&self) -> &Arc<StreamListeners> {
+        &self.stream_listeners
+    }
+
+    /// The subscribers that read the transcript where it grew.
+    #[must_use]
+    pub fn transcript_listeners(&self) -> &Arc<TranscriptListeners> {
+        &self.transcript_listeners
     }
 
     pub fn set_thinking(&mut self, level: Option<ThinkingLevel>) {
@@ -179,13 +211,16 @@ impl Agent {
     pub fn tool_cx(&self) -> ToolCx {
         ToolCx::new(
             Arc::clone(&self.cancel),
-            Arc::new(PluginProgress {
-                plugins: Arc::clone(&self.plugins),
+            Arc::new(BusProgress {
+                bus: Arc::clone(&self.bus),
             }),
         )
     }
 
     /// Register a tool after construction. Replaces any tool of the same name.
+    ///
+    /// The set is read afresh each turn, so a tool added mid-session is offered
+    /// on the next request rather than the next process.
     pub fn register_tool(&mut self, tool: impl ToolHandler) {
         self.tools.push(Arc::new(tool));
     }
@@ -194,8 +229,9 @@ impl Agent {
     ///
     /// The arenas are append-only, so this rebuilds the transcript into a fresh
     /// one — which also drops whatever garbage had accumulated. Call it between
-    /// runs; a plugin that wants to add instructions for a single turn should
-    /// use [`Cx::push_system_note`](crate::Cx::push_system_note) instead.
+    /// runs; a component that wants to add instructions for a single turn
+    /// should listen for [`TurnStart`](crate::TurnStart) and call `note` on
+    /// its payload instead.
     pub fn set_system(&mut self, text: &str) {
         let keep: Vec<MessageId> = (0..self.transcript.len())
             .filter(|&index| {
@@ -223,24 +259,29 @@ impl std::fmt::Debug for Agent {
             .field("model", &self.model.id)
             .field("messages", &self.transcript.len())
             .field("tools", &self.tools)
-            .field("plugins", &self.plugins)
             .field("max_turns", &self.max_turns)
             .finish()
     }
 }
 
-/// Routes partial tool output to the plugins subscribed to it.
-struct PluginProgress {
-    plugins: Arc<Plugins>,
+/// Routes partial tool output to whoever subscribed to it.
+struct BusProgress {
+    bus: Arc<Bus>,
 }
 
-impl ProgressSink for PluginProgress {
+impl ProgressSink for BusProgress {
     fn progress(&self, call_id: &str, tool: &str, chunk: &str) {
-        self.plugins.tool_progress(call_id, tool, chunk);
+        if self.bus.has_listeners::<ToolProgress>() {
+            self.bus.emit(&mut ToolProgress {
+                call_id: call_id.to_owned(),
+                tool: tool.to_owned(),
+                chunk: chunk.to_owned(),
+            });
+        }
     }
 
     fn is_observed(&self) -> bool {
-        self.plugins.observes_progress()
+        self.bus.has_listeners::<ToolProgress>()
     }
 }
 
@@ -266,7 +307,11 @@ pub struct AgentBuilder<M> {
     model: M,
     system: Option<String>,
     tools: Tools,
-    plugins: Plugins,
+    bus: Arc<Bus>,
+    stream_listeners: Arc<StreamListeners>,
+    transcript_listeners: Arc<TranscriptListeners>,
+    composition: Option<Runtime>,
+    toolbox: Option<Arc<Toolbox>>,
     options: SimpleStreamOptions,
     stream_fn: Option<StreamFn>,
     max_turns: u32,
@@ -280,7 +325,11 @@ impl AgentBuilder<NoModel> {
             model,
             system: self.system,
             tools: self.tools,
-            plugins: self.plugins,
+            bus: self.bus,
+            stream_listeners: self.stream_listeners,
+            transcript_listeners: self.transcript_listeners,
+            composition: self.composition,
+            toolbox: self.toolbox,
             options: self.options,
             stream_fn: self.stream_fn,
             max_turns: self.max_turns,
@@ -313,31 +362,6 @@ impl<M> AgentBuilder<M> {
             self.tools.push(tool);
         }
         self
-    }
-
-    /// Register a plugin. Its tools are added after the builder's own, so a
-    /// plugin can shadow one by reusing its name.
-    #[must_use]
-    pub fn plugin(mut self, plugin: impl Plugin) -> Self {
-        self.plugins.push(Arc::new(plugin));
-        self
-    }
-
-    /// Register an already-shared plugin.
-    #[must_use]
-    pub fn plugin_arc(mut self, plugin: Arc<dyn Plugin>) -> Self {
-        self.plugins.push(plugin);
-        self
-    }
-
-    /// Subscribe to the protocol event stream. Sugar for a plugin that only
-    /// implements [`Plugin::on_event`] — this is how a renderer attaches.
-    #[must_use]
-    pub fn on_event<F>(self, listener: F) -> Self
-    where
-        F: Fn(&aphid_core::Event, &StreamCx<'_>) + Send + Sync + 'static,
-    {
-        self.plugin(EventListener::new(listener))
     }
 
     #[must_use]
@@ -384,14 +408,60 @@ impl<M> AgentBuilder<M> {
         self.stream_fn = Some(stream_fn);
         self
     }
+
+    /// Build into a composition the caller already assembled.
+    ///
+    /// Everything mounted on it is already subscribed, so the loop starts
+    /// announcing to listeners that are in place rather than to an empty bus
+    /// that components join afterwards.
+    #[must_use]
+    pub fn compose(mut self, composition: &Composition) -> Self {
+        self.bus = Arc::clone(&composition.bus);
+        self.stream_listeners = Arc::clone(&composition.stream);
+        self.transcript_listeners = Arc::clone(&composition.transcript);
+        self.composition = Some(composition.runtime.clone());
+        self.toolbox = Some(Arc::clone(&composition.tools));
+        self
+    }
+
+    /// Use a bus the caller already owns.
+    ///
+    /// The point of supplying one is composition order: components subscribe
+    /// when they load, which is generally before an agent exists to subscribe
+    /// to. Handing the agent a bus that already has listeners on it is what
+    /// lets the front end assemble the system first and build the loop into it.
+    #[must_use]
+    pub fn bus(mut self, bus: Arc<Bus>) -> Self {
+        self.bus = bus;
+        self
+    }
+
+    /// Use per-token subscribers the caller already owns. See
+    /// [`AgentBuilder::bus`] for why.
+    #[must_use]
+    pub fn stream_listeners(mut self, listeners: Arc<StreamListeners>) -> Self {
+        self.stream_listeners = listeners;
+        self
+    }
+
+    /// Use transcript subscribers the caller already owns. See
+    /// [`AgentBuilder::bus`] for why.
+    #[must_use]
+    pub fn transcript_listeners(mut self, listeners: Arc<TranscriptListeners>) -> Self {
+        self.transcript_listeners = listeners;
+        self
+    }
 }
 
 impl AgentBuilder<Model> {
     /// Build the agent. Infallible: the type already proved a model was set.
     #[must_use]
-    pub fn build(mut self) -> Agent {
-        for tool in self.plugins.tools() {
-            self.tools.push(tool);
+    pub fn build(self) -> Agent {
+        // The composition's box when there is one, so components that already
+        // registered tools keep them and the agent's own join the same set.
+        let tools = self.toolbox.unwrap_or_else(|| Arc::new(Toolbox::new()));
+        for handler in self.tools.into_handlers() {
+            tools.push(handler);
         }
 
         let mut transcript = Transcript::new();
@@ -402,8 +472,11 @@ impl AgentBuilder<Model> {
         Agent {
             transcript,
             model: self.model,
-            tools: self.tools,
-            plugins: Arc::new(self.plugins),
+            tools,
+            bus: self.bus,
+            stream_listeners: self.stream_listeners,
+            transcript_listeners: self.transcript_listeners,
+            composition: self.composition,
             options: self.options,
             stream_fn: self.stream_fn.unwrap_or_else(live_stream_fn),
             max_turns: self.max_turns,
@@ -421,7 +494,6 @@ pub struct AgentConfig {
     pub model: Model,
     pub system: Option<String>,
     pub tools: Vec<Arc<dyn ToolHandler>>,
-    pub plugins: Vec<Arc<dyn Plugin>>,
     pub options: SimpleStreamOptions,
     pub max_turns: u32,
     /// `None` uses the real provider backend.
@@ -435,7 +507,6 @@ impl AgentConfig {
             model,
             system: None,
             tools: Vec::new(),
-            plugins: Vec::new(),
             options: SimpleStreamOptions::default(),
             max_turns: DEFAULT_MAX_TURNS,
             stream_fn: None,
@@ -468,9 +539,6 @@ pub fn create_agent(config: AgentConfig) -> Agent {
 
     if let Some(system) = config.system {
         builder = builder.system(system);
-    }
-    for plugin in config.plugins {
-        builder = builder.plugin_arc(plugin);
     }
     if let Some(stream_fn) = config.stream_fn {
         builder = builder.stream_fn(stream_fn);

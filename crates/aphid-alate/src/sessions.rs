@@ -30,19 +30,19 @@ use std::sync::Arc;
 
 use aphid_agent::{Agent, AgentHandle, RunOutcome, StreamFn};
 use aphid_code::harness::{self, HarnessOptions};
-use aphid_code::plugins::permissions::{AllowAll, Confirmer, DenyAll, Permissions};
-use aphid_code::session::{self, SessionPlugin};
+use aphid_code::plugins::permissions::{AllowAll, Confirmer, DenyAll, PermissionGate, Permissions};
+use aphid_code::scripting::PluginHost;
+use aphid_code::session::{self, SessionComponent};
 use aphid_code::tools::Workspace;
-use aphid_plugin::PluginHost;
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 
 use crate::config::{Config, Permissions as Wanted};
-use crate::cron::{self, CronPlugin};
-use crate::gateway::{GatewayPlugin, Publisher};
+use crate::cron::{self, CronComponent};
+use crate::gateway::{GatewayComponent, Publisher};
 use crate::home::Home;
-use crate::memory::{self, MemoryPlugin};
+use crate::memory::{self, MemoryComponent};
 
 /// Why a session exists, and therefore when it ends.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,7 +104,7 @@ pub struct Session {
     agent: Option<Agent>,
     handle: AgentHandle,
     /// Kept so its transcript can be flushed when the session closes.
-    plugin: Arc<SessionPlugin>,
+    plugin: Arc<SessionComponent>,
     queued: VecDeque<String>,
 }
 
@@ -331,6 +331,13 @@ pub struct Blueprint {
     pub memory: memory::Shared,
     pub crontab: cron::Shared,
     pub host: Option<Arc<PluginHost>>,
+    /// One composition for the whole alate, not one per session.
+    ///
+    /// The plugin host is shared, the memory is shared, and a tick is a
+    /// property of the daemon rather than of whichever conversation happens to
+    /// be open. A composition per session would mean a plugin subscribed N
+    /// times and a daemon-level announcement with nowhere to go.
+    pub composition: aphid_agent::rt::Composition,
     pub stream_fn: Option<StreamFn>,
     pub processes: Arc<aphid_agent::exec::Registry>,
     /// The permission gate. One for the whole alate, so "allow always" answered
@@ -376,6 +383,7 @@ impl Blueprint {
         options.api_key = self.api_key.clone().map(Into::into);
         options.stream_fn = self.stream_fn.clone();
         options.processes = Arc::clone(&self.processes);
+        options.composition = self.composition.clone();
 
         // The session file is opened first, because its id *is* the session's,
         // and the plugins below have to be told which session they speak for
@@ -388,6 +396,7 @@ impl Blueprint {
             &options.cwd,
             Some(&model_id),
             None,
+            Arc::clone(&options.composition.transcript),
         )
         .map_err(|error| {
             format!(
@@ -419,37 +428,68 @@ impl Blueprint {
             options.append_system = Some(appended);
         }
 
-        options.plugins.push(Arc::new(GatewayPlugin::new(
-            self.publisher.for_session(&id),
-        )));
-        options.plugins.push(Arc::new(MemoryPlugin::new(
-            self.memory.clone(),
-            &self.config.memory,
-        )));
-        options
-            .plugins
-            .push(Arc::new(CronPlugin::new(self.crontab.clone())));
+        options.composition.mount(
+            Arc::new(GatewayComponent::new(
+                self.publisher.for_session(&id),
+                &options.composition,
+            )),
+            serde_json::Value::Null,
+        )?;
+        options.composition.mount(
+            Arc::new(MemoryComponent::new(
+                self.memory.clone(),
+                &self.config.memory,
+                &options.composition,
+            )),
+            serde_json::Value::Null,
+        )?;
+        options.composition.mount(
+            Arc::new(CronComponent::new(
+                self.crontab.clone(),
+                &options.composition,
+            )),
+            serde_json::Value::Null,
+        )?;
         // Beside the crontab, so a scheduled job can post to the colony as
         // readily as a conversation can — which is most of the point of a hub.
         #[cfg(feature = "colony")]
         if let Some(colony) = &self.colony {
-            options
-                .plugins
-                .push(Arc::new(crate::colony::ColonyPlugin::new(colony.clone())));
+            options.composition.mount(
+                Arc::new(crate::colony::ColonyComponent::new(
+                    colony.clone(),
+                    &options.composition,
+                )),
+                serde_json::Value::Null,
+            )?;
         }
         // One `Permissions` for the whole alate, so "allow always" answered in
-        // one session is remembered in the next.
-        options.plugins.push(self.permissions.clone());
+        // one session is remembered in the next. The gate around it is
+        // per-session, because that is what a composition is.
+        options.composition.mount(
+            Arc::new(PermissionGate::new(
+                self.permissions.clone(),
+                &options.composition,
+            )),
+            serde_json::Value::Null,
+        )?;
 
         // The host is registered in every session. Its hooks are per-run, so
         // that is right; its own *session* is the daemon's lifetime, which is
         // why `session_start` is not called again here.
         if let Some(host) = &self.host {
-            options.plugins.push(host.clone());
+            options.composition.mount(
+                Arc::new(aphid_code::scripting::ScriptHost::new(
+                    host.clone(),
+                    &options.composition,
+                )),
+                serde_json::Value::Null,
+            )?;
             options.host = Some(host.clone());
         }
 
-        options.plugins.push(plugin.clone());
+        options
+            .composition
+            .mount(plugin.clone(), serde_json::Value::Null)?;
 
         let harness = harness::build(options);
         Ok(Session {

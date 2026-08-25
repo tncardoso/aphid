@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use aphid_agent::{Agent, Plugin, StreamFn};
+use aphid_agent::{Agent, StreamFn};
 use aphid_core::{Model, ThinkingLevel};
 use compact_str::CompactString;
 
@@ -37,13 +37,16 @@ pub struct HarnessOptions {
     pub load_context: bool,
     pub max_turns: u32,
     pub api_key: Option<CompactString>,
-    pub plugins: Vec<Arc<dyn Plugin>>,
+    /// The system being assembled: the fiber graph, the bus, and the two
+    /// arena-borrow listener lists. Components mounted on it before [`build`]
+    /// are already subscribed when the loop starts.
+    pub composition: aphid_agent::rt::Composition,
     /// Rhai plugin files to load. The front end loads them rather than
-    /// [`build`], because loading needs a [`Sink`](aphid_plugin::Sink) and only
+    /// [`build`], because loading needs a [`Sink`](aphid_agent::Sink) and only
     /// the front end knows where its output can safely go.
-    pub plugin_files: Vec<aphid_plugin::PluginFile>,
+    pub plugin_files: Vec<crate::scripting::PluginFile>,
     /// The loaded scripts. Set by the front end, which does the loading.
-    pub host: Option<Arc<aphid_plugin::PluginHost>>,
+    pub host: Option<Arc<crate::scripting::PluginHost>>,
     /// Every command the runtime starts, from the `bash` tool or from a plugin.
     /// The front end takes a handle to this before building, so the same record
     /// backs the tools, the scripts and `/ps`.
@@ -70,7 +73,7 @@ impl HarnessOptions {
             load_context: true,
             max_turns: aphid_agent::DEFAULT_MAX_TURNS,
             api_key: None,
-            plugins: Vec::new(),
+            composition: aphid_agent::rt::Composition::new(),
             plugin_files: Vec::new(),
             host: None,
             processes: Arc::new(aphid_agent::exec::Registry::new()),
@@ -107,13 +110,14 @@ pub fn build(options: HarnessOptions) -> Harness {
         load_context,
         max_turns,
         api_key,
-        plugins,
         // Taken by the front end before it calls this, so anything left here
         // was never loaded and has nothing to contribute.
         plugin_files: _,
-        host,
+        // Kept for its state and its commands; nothing here dispatches to it.
+        host: _,
         processes,
         stream_fn,
+        composition,
     } = options;
 
     let mut notes = Vec::new();
@@ -137,12 +141,13 @@ pub fn build(options: HarnessOptions) -> Harness {
         context_files: context_files.clone(),
         skills: skills.clone(),
     };
-    let mut system_prompt = prompt::build(&prompt_options, &cwd);
-    // The last word on the prompt, and the only hook that runs before an agent
-    // exists — which is why it is here and not in the loop.
-    if let Some(host) = &host {
-        host.system_prompt(&mut system_prompt);
-    }
+    // The last word on the prompt, and the only announcement made before an
+    // agent exists — which is why it is here and not in the loop.
+    let system_prompt = composition
+        .bus
+        .waterfall::<crate::events::SystemPrompt>(prompt::build(&prompt_options, &cwd), &|text| {
+            text
+        });
 
     let (thinking, note) = model::clamp_thinking(&model, thinking);
     if let Some(note) = note {
@@ -157,7 +162,15 @@ pub fn build(options: HarnessOptions) -> Harness {
     let mut builder = Agent::builder()
         .model(model)
         .system(system_prompt)
-        .tools(tools::all(&workspace, host, &processes))
+        // Before anything else on the builder: components mounted on this
+        // composition subscribed when they loaded, and the loop has to announce
+        // to the same bus they are on.
+        .compose(&composition)
+        .tools(tools::all(
+            &workspace,
+            Some(Arc::clone(&composition.bus)),
+            &processes,
+        ))
         .max_turns(max_turns);
 
     if let Some(level) = thinking {
@@ -165,9 +178,6 @@ pub fn build(options: HarnessOptions) -> Harness {
     }
     if let Some(key) = api_key {
         builder = builder.api_key(key);
-    }
-    for plugin in plugins {
-        builder = builder.plugin_arc(plugin);
     }
     if let Some(stream_fn) = stream_fn {
         builder = builder.stream_fn(stream_fn);

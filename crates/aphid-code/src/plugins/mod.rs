@@ -3,4 +3,4 @@
 pub mod permissions;
 pub mod scripts;
 
-pub use permissions::{AllowAll, Confirmer, Decision, DenyAll, Permissions, Risk};
+pub use permissions::{AllowAll, Confirmer, Decision, DenyAll, PermissionGate, Permissions, Risk};

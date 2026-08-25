@@ -16,7 +16,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use aphid_agent::{Interest, Plugin, ToolHandler, ToolOutcome, tool_fn};
+use aphid_agent::rt::{Component, Composition, Context};
+use aphid_agent::{ToolHandler, ToolOutcome, Toolbox, tool_fn};
 use chrono::{DateTime, Local};
 use croner::Cron;
 use croner::parser::{CronParser, Seconds};
@@ -410,27 +411,29 @@ pub fn cron_tool(crontab: Shared) -> impl ToolHandler {
 ///
 /// It subscribes to no hooks: the crontab is read by the daemon loop, not by
 /// anything inside a run.
-pub struct CronPlugin {
+pub struct CronComponent {
     crontab: Shared,
+    tools: Arc<Toolbox>,
 }
 
-impl CronPlugin {
+impl CronComponent {
     #[must_use]
-    pub fn new(crontab: Shared) -> Self {
-        Self { crontab }
+    pub fn new(crontab: Shared, composition: &Composition) -> Self {
+        Self {
+            crontab,
+            tools: Arc::clone(&composition.tools),
+        }
     }
 }
 
-impl Plugin for CronPlugin {
+impl Component for CronComponent {
     fn name(&self) -> &str {
         "cron"
     }
 
-    fn interests(&self) -> Interest {
-        Interest::empty()
-    }
-
-    fn tools(&self) -> Vec<Arc<dyn ToolHandler>> {
-        vec![Arc::new(cron_tool(self.crontab.clone()))]
+    fn apply(&self, ctx: &Context) -> Result<(), String> {
+        self.tools
+            .contribute(ctx, Arc::new(cron_tool(self.crontab.clone())));
+        Ok(())
     }
 }

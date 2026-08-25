@@ -16,7 +16,7 @@
 //! ```
 //!
 //! The last line is the reason for that much of the shape. The home *is* the
-//! agent's workspace, so [`skills::discover`] and [`aphid_plugin::discover`]
+//! agent's workspace, so [`skills::discover`] and [`aphid_code::scripting::discover`]
 //! find their directories with no new code and no second convention to learn.
 //! Sessions are the exception: they live in [`sessions_dir`], one directory
 //! shared by every project on the machine, not under any one instance's

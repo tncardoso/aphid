@@ -18,24 +18,24 @@ pub mod write;
 use std::sync::Arc;
 
 use aphid_agent::ToolHandler;
-use aphid_plugin::PluginHost;
+use aphid_agent::rt::Bus;
 
 pub use paths::Workspace;
 
 /// Every tool, ready to register.
 ///
-/// `host` is told about files the tools change; pass `None` when nothing is
-/// listening, which is the case for tests and for a session with no plugins.
+/// `bus` is where files the tools change are announced; pass `None` when there
+/// is nowhere to announce them, which is the case for tests.
 /// `processes` is where every command `bash` starts is recorded.
 #[must_use]
 pub fn all(
     workspace: &Workspace,
-    host: Option<Arc<PluginHost>>,
+    bus: Option<Arc<Bus>>,
     processes: &Arc<aphid_agent::exec::Registry>,
 ) -> Vec<Arc<dyn ToolHandler>> {
-    // Only worth carrying when somebody actually asked for it: the handle is
+    // Only worth carrying when somebody is actually listening: the handle is
     // cloned into every call otherwise.
-    let watcher = host.filter(|host| host.any_defines("on_file_change"));
+    let watcher = bus.filter(|bus| bus.has_listeners::<crate::events::FileChange>());
     vec![
         Arc::new(bash::tool(workspace, processes)),
         Arc::new(read::tool(workspace)),

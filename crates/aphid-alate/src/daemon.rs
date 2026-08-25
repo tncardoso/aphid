@@ -25,8 +25,8 @@ use std::time::Duration;
 use aphid_agent::StreamFn;
 use aphid_code::model::Catalog;
 use aphid_code::plugins::scripts;
+use aphid_code::scripting::PluginHost;
 use aphid_code::tools::Workspace;
-use aphid_plugin::{PluginHost, ScriptBackend, SessionInfo};
 use chrono::Local;
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -180,18 +180,17 @@ pub async fn run(options: Options) -> Result<(), String> {
     );
     problems.extend(discovery);
 
-    let mut stream_fn = stream_fn;
-    if let Some(backend) = ScriptBackend::install(&host)
-        && stream_fn.is_none()
-    {
-        stream_fn = Some(backend);
-    }
-    host.session_start(&SessionInfo {
-        id: None,
-        path: None,
-        reason: "new",
-        restored: 0,
-    });
+    // One composition for the whole alate: the plugin host is shared, and a
+    // tick belongs to the daemon rather than to whichever conversation is open.
+    let composition = aphid_agent::rt::Composition::new();
+    composition.bus.emit(&mut aphid_code::events::SessionStart(
+        aphid_code::events::Session {
+            id: None,
+            path: None,
+            reason: "new".to_owned(),
+            restored: 0,
+        },
+    ));
 
     // The tools' half of the colony, made before the blueprint because every
     // session registers them. The bridge's half is started after the socket is
@@ -200,6 +199,7 @@ pub async fn run(options: Options) -> Result<(), String> {
     let (colony, colony_outbound) = colony_handle(&config);
 
     let blueprint = Blueprint {
+        composition: composition.clone(),
         home: home.clone(),
         config: config.clone(),
         model: model.clone(),
@@ -306,12 +306,19 @@ pub async fn run(options: Options) -> Result<(), String> {
         colony.abort();
     }
     alate.sessions.shutdown();
-    alate.host.session_end(&SessionInfo {
-        id: None,
-        path: None,
-        reason: "end",
-        restored: 0,
-    });
+    alate
+        .blueprint
+        .composition
+        .bus
+        .emit(&mut aphid_code::events::SessionEnd(
+            aphid_code::events::Session {
+                id: None,
+                path: None,
+                reason: "end".to_owned(),
+                restored: 0,
+            },
+        ));
+    alate.host.flush();
     Ok(())
 }
 
@@ -427,10 +434,13 @@ async fn drive(alate: &mut Alate, mut events: UnboundedReceiver<Event>) {
     // Armed only when a plugin is waiting on it, so an instance with no scripts
     // pays for no timer. An `interval` and not a fresh `sleep`: a sleep built
     // inside `select!` restarts whenever another branch wins.
-    let ticked = alate
-        .host
-        .any_defines("on_tick")
-        .then(|| alate.host.clone());
+    // Armed only when something is listening. Unlike the version this replaces
+    // that is not settled once: a plugin loaded by `/reload` starts the timer,
+    // and one unloaded stops it.
+    let bus = std::sync::Arc::clone(&alate.blueprint.composition.bus);
+    let ticked = bus
+        .has_listeners::<aphid_code::events::Tick>()
+        .then_some(bus);
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut clock = tokio::time::interval(CLOCK);
@@ -463,8 +473,10 @@ async fn drive(alate: &mut Alate, mut events: UnboundedReceiver<Event>) {
             // that. A plugin's `prompt` arrives through the sink, so nothing is
             // lost by not awaiting the tick.
             _ = ticker.tick(), if ticked.is_some() => {
-                let host = ticked.clone().expect("only polled while some");
-                tokio::task::spawn_blocking(move || host.tick());
+                let bus = ticked.clone().expect("only polled while some");
+                tokio::task::spawn_blocking(move || {
+                    bus.emit(&mut aphid_code::events::Tick);
+                });
             }
             _ = clock.tick() => wake(alate),
             () = shutdown() => break,
@@ -474,7 +486,7 @@ async fn drive(alate: &mut Alate, mut events: UnboundedReceiver<Event>) {
         // with a conversation: a long turn in one session holds up nothing in
         // another.
         //
-        // Nothing is announced here. `GatewayPlugin::on_turn_start` reports the
+        // Nothing is announced here. The gateway component reports the
         // turn from inside the run, and a frame sent here as well would be the
         // same news twice — on the wire and in `alate.log`.
         alate.sessions.start_ready();

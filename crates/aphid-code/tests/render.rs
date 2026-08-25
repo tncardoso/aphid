@@ -7,11 +7,13 @@ use aphid_code::plugins::permissions::Risk;
 use aphid_code::tui::modal::{Confirm, Modal};
 use aphid_code::tui::render::ScrollbackCache;
 use aphid_code::tui::scrollback::Scrollback;
+use aphid_code::tui::select::Spot;
 use aphid_code::tui::status::Status;
 use aphid_core::{Cost, Usage, providers::deepseek};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
+use ratatui::style::Modifier;
 use ratatui::widgets::Paragraph;
 
 /// The rendered buffer as one string per row, trailing blanks trimmed.
@@ -529,4 +531,78 @@ fn drawing_twice_paints_the_same_thing() {
     let second = paint(&mut view, &mut cache, 40, 12);
 
     assert_eq!(first, second);
+}
+
+/// Which cells of a row the terminal was told to reverse.
+fn reversed_cells(terminal: &Terminal<TestBackend>, row: u16) -> Vec<u16> {
+    let buffer = terminal.backend().buffer();
+    (0..buffer.area().width)
+        .filter(|x| {
+            buffer[(*x, row)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        })
+        .collect()
+}
+
+/// The selection is painted, and it is painted only where it is.
+#[test]
+fn the_selected_cells_are_painted_reversed() {
+    let mut view = Scrollback::default();
+    view.push_notice("first line");
+    view.push_notice("second line");
+
+    let mut cache = ScrollbackCache::default();
+    let laid = cache.layout(&view, 40, 12);
+    let mut lines = cache.visible(laid);
+    aphid_code::tui::select::highlight(
+        &mut lines,
+        laid.top,
+        (
+            Spot { line: 0, column: 6 },
+            Spot {
+                line: 0,
+                column: 10,
+            },
+        ),
+    );
+
+    let mut terminal = Terminal::new(TestBackend::new(40, 12)).expect("terminal");
+    terminal
+        .draw(|frame| frame.render_widget(Paragraph::new(lines), frame.area()))
+        .expect("draw");
+
+    assert_eq!(rows(&terminal)[0], "first line");
+    assert_eq!(
+        reversed_cells(&terminal, 0),
+        vec![6, 7, 8, 9],
+        "only the columns the selection covers"
+    );
+    assert!(
+        reversed_cells(&terminal, 2).is_empty(),
+        "the line below is not in the selection"
+    );
+}
+
+/// What is painted and what is copied have to be the same characters, or the
+/// clipboard quietly disagrees with the screen.
+#[test]
+fn the_copied_text_is_what_the_selection_covers() {
+    let mut view = Scrollback::default();
+    view.push_user("explain the wrapping rule");
+
+    let mut cache = ScrollbackCache::default();
+    let _ = cache.layout(&view, 40, 12);
+
+    // The prompt marker is part of the line, so a selection that starts at
+    // column zero takes it with it.
+    assert_eq!(
+        cache.selected_text((Spot { line: 0, column: 0 }, Spot { line: 0, column: 9 },)),
+        "> explain"
+    );
+    assert_eq!(
+        cache.selected_text((Spot { line: 0, column: 2 }, Spot { line: 0, column: 9 },)),
+        "explain"
+    );
 }

@@ -25,12 +25,20 @@
 
 ### Added
 
+- **You can now select text in the terminal transcript and copy it.** Hold the
+  left mouse button and move the pointer over what you want. The text is shown
+  in reverse video while you hold the button, and it goes to the clipboard when
+  you release it. The status line says how many lines it took, and `Esc` clears
+  the selection. Aphid uses OSC 52, so this also works over SSH and in tmux.
 - A plugin surface gets its defaults from `init`, and a value already stored
   wins over its default. A panel no longer has to write
   `if "open" in s { s.open } else { false }` for each of its keys.
 
 ### Fixed
 
+- `/clear` and `/new` now empty the screen. The transcript was dropped, but the
+  lines already drawn stayed where they were, so a new conversation started
+  under the old one.
 - A plugin's tick and its panel no longer run at the same time. They could
   both read the plugin's state, change it and write it back, and one of the
   two changes was lost.

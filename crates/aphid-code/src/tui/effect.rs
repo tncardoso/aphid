@@ -4,8 +4,8 @@
 //! test reads what a keypress decided without an agent, a plugin host or a
 //! terminal anywhere near it.
 
+use crate::scripting::SurfaceEvent;
 use aphid_core::{Model, ThinkingLevel};
-use aphid_plugin::SurfaceEvent;
 
 use crate::plugins::permissions::Decision;
 use crate::tui::runtime::RequestId;
@@ -30,6 +30,8 @@ pub enum Effect {
     ClearTranscript,
     /// Run a `!` command in the workspace root.
     Bang(String),
+    /// Put the selected text on the clipboard.
+    Copy(String),
     /// Ask a process to stop.
     Kill(u32),
     /// What the process list is showing is stale.
@@ -56,6 +58,13 @@ pub enum Effect {
     RefreshSurfaces,
     /// Run the plugins' tick.
     PluginTick,
+    /// Bring the plugin composition back in step with what is on disk.
+    ///
+    /// With a name, that one plugin is torn down and put back even if nothing
+    /// about it changed — which is what you want while you are editing it.
+    /// Without one, the whole tree is reconciled: a new file loads, a deleted
+    /// one unloads, an edited one reloads.
+    ReloadPlugins(Option<String>),
     /// Release every question, cancel the run, and stop.
     Quit,
 }

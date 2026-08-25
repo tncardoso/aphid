@@ -1,12 +1,16 @@
 //! Where the terminal's messages come from.
 //!
-//! The agent's hooks are synchronous, so they push onto the hub — a
-//! non-blocking, infallible operation, which is precisely why the plugin API
-//! was built that way. Terminal input arrives on its own thread, because
-//! `crossterm::event::read` blocks.
+//! Listeners are synchronous, so they push onto the hub — a non-blocking,
+//! infallible operation, which is precisely why the surface was built that way.
+//! Terminal input arrives on its own thread, because `crossterm::event::read`
+//! blocks.
 
+use std::sync::Arc;
+
+use aphid_agent::rt::{Bus, Component, Composition, Context, Disposer};
 use aphid_agent::{
-    Cx, Flow, Guard, Interest, PendingCall, Plugin, ResultCx, StreamCx, ToolOutcome, TurnSummary,
+    StreamCx, StreamListeners, ToolContent, ToolProgress, ToolRequest, ToolResult, TurnEnd,
+    TurnStart,
 };
 use aphid_core::{BlockKind, ContentRef, Event};
 use ratatui::crossterm::event;
@@ -31,7 +35,7 @@ impl UiSink {
     }
 }
 
-impl aphid_plugin::Sink for UiSink {
+impl aphid_agent::Sink for UiSink {
     fn notify(&self, plugin: &str, text: &str) {
         let _ = self.events.send(Msg::Notice(format!("{plugin}: {text}")));
     }
@@ -44,112 +48,148 @@ impl aphid_plugin::Sink for UiSink {
 /// Forwards the run to the app loop.
 ///
 /// Not the end of it, though: the run's own task says that, because only it
-/// knows that the agent has been handed back. A hook cannot know, because it
-/// runs inside the run.
-pub struct UiPlugin {
+/// knows that the agent has been handed back. A listener cannot know, because
+/// it runs inside the run.
+pub struct UiComponent {
     events: Hub<Msg>,
+    bus: Arc<Bus>,
+    stream: Arc<StreamListeners>,
 }
 
-impl UiPlugin {
+impl UiComponent {
     #[must_use]
-    pub fn new(events: Hub<Msg>) -> Self {
-        Self { events }
-    }
-
-    fn send(&self, event: Msg) {
-        // A closed channel means the app is gone; there is nothing to do about
-        // it here, and the run is being cancelled anyway.
-        self.events.send(event);
+    pub fn new(events: Hub<Msg>, composition: &Composition) -> Self {
+        Self {
+            events,
+            bus: Arc::clone(&composition.bus),
+            stream: Arc::clone(&composition.stream),
+        }
     }
 }
 
-impl Plugin for UiPlugin {
+impl Component for UiComponent {
     fn name(&self) -> &str {
         "tui"
     }
 
-    fn interests(&self) -> Interest {
-        Interest::TURN_START
-            | Interest::EVENT
-            | Interest::TOOL_CALL
-            | Interest::TOOL_PROGRESS
-            | Interest::TOOL_RESULT
-            | Interest::TURN_END
-    }
+    fn apply(&self, ctx: &Context) -> Result<(), String> {
+        let owner = ctx.uid();
+        let bus = Arc::clone(&self.bus);
 
-    fn on_turn_start(&self, _cx: &mut Cx<'_>) {
-        self.send(Msg::TurnStarted);
-    }
+        let events = self.events.clone();
+        bus.on::<TurnStart>(owner, move |_| {
+            let _ = events.send(Msg::TurnStarted);
+        });
 
-    fn on_event(&self, event: &Event, cx: &StreamCx<'_>) {
-        match *event {
-            // Tool-call arguments stream as deltas too. They are shown in full
-            // when the call is announced, so raw JSON would only be noise here
-            // — the bytes are counted instead, which is what proves to the user
-            // that a slow call is moving rather than stuck.
-            Event::BlockStart {
-                index,
-                kind: BlockKind::ToolCall,
-            } => {
-                let name = tool_name(cx, index);
-                self.send(Msg::ToolStreamStart { block: index, name });
+        let events = self.events.clone();
+        bus.on::<ToolRequest>(owner, move |request| {
+            let _ = events.send(Msg::ToolCall {
+                id: request.id.clone(),
+                name: request.name.clone(),
+                arguments: request.arguments.clone(),
+            });
+        });
+
+        let events = self.events.clone();
+        bus.on::<ToolProgress>(owner, move |progress| {
+            let _ = events.send(Msg::ToolProgress {
+                id: progress.call_id.clone(),
+                chunk: progress.chunk.clone(),
+            });
+        });
+
+        let events = self.events.clone();
+        bus.on::<ToolResult>(owner, move |result| {
+            let _ = events.send(Msg::ToolResult {
+                id: result.id.clone(),
+                name: result.name.clone(),
+                text: text_of(&result.content),
+                is_error: result.is_error,
+                details: result.details.clone(),
+            });
+        });
+
+        let events = self.events.clone();
+        bus.on::<TurnEnd>(owner, move |end| {
+            let _ = events.send(Msg::TurnEnded {
+                usage: end.summary.usage,
+                stop: end.summary.stop_reason,
+                error: end.summary.error.clone(),
+            });
+        });
+
+        // The token stream, which is not on the bus: what it hands out borrows
+        // the response arena, and copying that out is the one thing the core
+        // exists to avoid.
+        let events = self.events.clone();
+        self.stream.subscribe(owner, move |event, cx| {
+            match *event {
+                // Tool-call arguments stream as deltas too. They are shown in
+                // full when the call is announced, so raw JSON would only be
+                // noise here — the bytes are counted instead, which is what
+                // proves to the user that a slow call is moving rather than
+                // stuck.
+                Event::BlockStart {
+                    index,
+                    kind: BlockKind::ToolCall,
+                } => {
+                    let name = tool_name(cx, index);
+                    let _ = events.send(Msg::ToolStreamStart { block: index, name });
+                }
+                Event::Delta {
+                    index,
+                    kind: BlockKind::ToolCall,
+                    span,
+                } => {
+                    let _ = events.send(Msg::ToolStreamDelta {
+                        block: index,
+                        bytes: span.len() as usize,
+                    });
+                }
+                Event::Delta {
+                    kind: BlockKind::Text,
+                    span,
+                    ..
+                } => {
+                    let _ = events.send(Msg::Text(cx.text(span).to_owned()));
+                }
+                Event::Delta {
+                    kind: BlockKind::Thinking,
+                    span,
+                    ..
+                } => {
+                    let _ = events.send(Msg::Thinking(cx.text(span).to_owned()));
+                }
+                _ => {}
             }
-            Event::Delta {
-                index,
-                kind: BlockKind::ToolCall,
-                span,
-            } => self.send(Msg::ToolStreamDelta {
-                block: index,
-                bytes: span.len() as usize,
-            }),
-            Event::Delta {
-                kind: BlockKind::Text,
-                span,
-                ..
-            } => self.send(Msg::Text(cx.text(span).to_owned())),
-            Event::Delta {
-                kind: BlockKind::Thinking,
-                span,
-                ..
-            } => self.send(Msg::Thinking(cx.text(span).to_owned())),
-            _ => {}
-        }
-    }
-
-    fn on_tool_call(&self, call: &mut PendingCall<'_>) -> Guard {
-        self.send(Msg::ToolCall {
-            id: call.id().to_owned(),
-            name: call.name().to_owned(),
-            arguments: call.arguments().to_owned(),
         });
-        Guard::Allow
-    }
 
-    fn on_tool_progress(&self, call_id: &str, _tool: &str, chunk: &str) {
-        self.send(Msg::ToolProgress {
-            id: call_id.to_owned(),
-            chunk: chunk.to_owned(),
+        let bus = Arc::clone(&self.bus);
+        let stream = Arc::clone(&self.stream);
+        ctx.effect(move || {
+            Disposer::sync(move || {
+                bus.unsubscribe::<TurnStart>(owner);
+                bus.unsubscribe::<ToolRequest>(owner);
+                bus.unsubscribe::<ToolProgress>(owner);
+                bus.unsubscribe::<ToolResult>(owner);
+                bus.unsubscribe::<TurnEnd>(owner);
+                stream.unsubscribe(owner);
+            })
         });
+        Ok(())
     }
+}
 
-    fn on_tool_result(&self, outcome: &mut ToolOutcome, cx: &ResultCx<'_>) {
-        self.send(Msg::ToolResult {
-            id: cx.id().to_owned(),
-            name: cx.name().to_owned(),
-            text: outcome.text_content(),
-            is_error: outcome.is_error,
-            details: outcome.details.clone(),
-        });
-    }
-
-    fn on_turn_end(&self, _cx: &mut Cx<'_>, turn: &TurnSummary) -> Flow {
-        self.send(Msg::TurnEnded {
-            usage: turn.usage,
-            stop: turn.stop_reason,
-            error: turn.error.clone(),
-        });
-        Flow::Continue
-    }
+/// The text of a tool result, joined across its blocks.
+fn text_of(content: &[ToolContent]) -> String {
+    content
+        .iter()
+        .filter_map(|block| match block {
+            ToolContent::Text(text) => Some(text.as_str()),
+            ToolContent::Image { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 /// The name of the tool call in the block at `index`.

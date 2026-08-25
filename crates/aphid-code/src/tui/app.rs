@@ -5,27 +5,29 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::scripting::{
+    Action as PluginAction, Job as PluginJob, Placement, PluginHub, Report as PluginReport, Side,
+    SurfaceAction, SurfaceEvent,
+};
 use aphid_agent::{Agent, AgentHandle, exec};
 use aphid_core::{Model, ThinkingLevel, Transcript};
-use aphid_plugin::{
-    Action as PluginAction, Job as PluginJob, Placement, PluginHub, Report as PluginReport,
-    ScriptBackend, SessionInfo, Side, SurfaceAction, SurfaceEvent,
-};
 use compact_str::CompactString;
 use ratatui::Frame;
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use ratatui::layout::Rect;
 
 use crate::harness::{self, Harness, HarnessOptions};
 use crate::model::{Catalog, ResolveError, clamp_thinking};
-use crate::plugins::permissions::{Decision, Permissions};
+use crate::plugins::permissions::{Decision, PermissionGate, Permissions};
 use crate::plugins::scripts;
-use crate::session::{self, SessionPlugin, sessions_dir};
+use crate::session::{self, SessionComponent, sessions_dir};
 use crate::skills::{self, Skill};
 use crate::tools::Workspace;
+use crate::tui::clipboard::{self, Copied};
 use crate::tui::effect::Effect;
-use crate::tui::event::{UiConfirmer, UiPlugin, UiSink, spawn_input_thread};
+use crate::tui::event::{UiComponent, UiConfirmer, UiSink, spawn_input_thread};
 use crate::tui::input::{Action, Input};
 use crate::tui::modal::{Confirm, Modal};
 use crate::tui::msg::Msg;
@@ -34,6 +36,7 @@ use crate::tui::runtime::{
     self, Answers, Cmd, Draw, Effects, Hub, Program, Subs, Timer, restore, setup,
 };
 use crate::tui::scrollback::{Scrollback, one_line};
+use crate::tui::select::{Selection, Spot};
 use crate::tui::status::Status;
 use crate::tui::surface::{Panes, SurfaceLayer};
 
@@ -67,7 +70,14 @@ pub struct App {
     /// The plugin surfaces, for focus, events and rendering.
     pub surfaces: SurfaceLayer,
     /// The loaded plugins, for the commands they registered and `/plugins`.
-    host: Option<Arc<aphid_plugin::PluginHost>>,
+    host: Option<Arc<crate::scripting::PluginHost>>,
+    /// The composition the plugins are mounted on, so `/plugins` can say what
+    /// state each fiber is in without asking anybody.
+    composition: Option<aphid_agent::rt::Composition>,
+    /// What is on offer right now: the commands and panels loaded components
+    /// registered. Not what the files declared — a component that never loaded
+    /// has offered nothing.
+    registries: Option<Arc<crate::registries::Registries>>,
     catalog: Catalog,
     /// The model the agent is pointed at. Held because clamping a thinking
     /// level is a question about the model, and the update must answer it
@@ -88,7 +98,7 @@ pub struct App {
     plugins_tick: bool,
     /// Whether any plugin has a panel at all.
     plugins_draw: bool,
-    session: Option<Arc<SessionPlugin>>,
+    session: Option<Arc<SessionComponent>>,
     /// Waiting for the agent, in the order it arrived. A queue and not one slot
     /// because a plugin can send while the user types, and neither should lose.
     queued: VecDeque<String>,
@@ -103,6 +113,14 @@ pub struct App {
     /// The reply channels for questions on screen. Runtime state, held here
     /// until the executor exists to own it.
     answers: Answers<Decision>,
+    /// What is selected in the transcript, if anything.
+    pub selection: Option<Selection>,
+    /// Where the transcript pane was at the last draw, so a mouse cell can be
+    /// turned into a line and a column. Empty until the first frame, which is
+    /// also the only time there is nothing to select.
+    transcript: Rect,
+    /// The cache generation the selection was made against.
+    generation: u64,
     quit: bool,
 }
 
@@ -125,18 +143,15 @@ impl App {
             catalog: Catalog::new(),
             current: harness.agent.model().clone(),
             thinking,
-            tools: harness
-                .agent
-                .tools()
-                .names()
-                .map(ToOwned::to_owned)
-                .collect(),
+            tools: harness.agent.tools().names().into_iter().collect(),
             session_label: "not being saved".to_owned(),
             plugin_commands: Vec::new(),
             plugins_watch_notices: false,
             plugins_tick: false,
             plugins_draw: false,
             host: None,
+            composition: None,
+            registries: None,
             session: None,
             queued: VecDeque::new(),
             processes: Arc::clone(processes),
@@ -144,6 +159,9 @@ impl App {
             skills: harness.skills.clone(),
             skill_diagnostics: harness.diagnostics.clone(),
             answers: Answers::default(),
+            selection: None,
+            transcript: Rect::default(),
+            generation: 0,
             quit: false,
         }
     }
@@ -159,13 +177,15 @@ impl App {
             catalog: Catalog::new(),
             current: agent.model().clone(),
             thinking: None,
-            tools: agent.tools().names().map(ToOwned::to_owned).collect(),
+            tools: agent.tools().names(),
             session_label: "not being saved".to_owned(),
             plugin_commands: Vec::new(),
             plugins_watch_notices: false,
             plugins_tick: false,
             plugins_draw: false,
             host: None,
+            composition: None,
+            registries: None,
             session: None,
             queued: VecDeque::new(),
             processes: Arc::new(exec::Registry::new()),
@@ -173,6 +193,9 @@ impl App {
             skills: Vec::new(),
             skill_diagnostics: Vec::new(),
             answers: Answers::default(),
+            selection: None,
+            transcript: Rect::default(),
+            generation: 0,
             quit: false,
         }
     }
@@ -384,6 +407,23 @@ impl App {
                 // most frames lay out exactly what the last one did.
                 self.scrollback.laid_out(laid.viewport);
                 self.surfaces.laid_out(laid.hits);
+                self.transcript = laid.main;
+                self.settle_selection(laid.generation, laid.shifted_from);
+                match laid.selected {
+                    Some(text) => {
+                        self.selection = None;
+                        Cmd::one(Effect::Copy(text))
+                    }
+                    None => Cmd::none(),
+                }
+            }
+            Msg::Copied { lines, outcome } => {
+                self.status.hint = Some(match outcome {
+                    Copied::Sent if lines == 1 => "copied 1 line".to_owned(),
+                    Copied::Sent => format!("copied {lines} lines"),
+                    Copied::TooLarge => "too much to copy".to_owned(),
+                    Copied::Failed => "the terminal refused the copy".to_owned(),
+                });
                 Cmd::none()
             }
             Msg::Tick => Cmd::batch([Effect::PluginTick, Effect::RefreshSurfaces]),
@@ -509,8 +549,30 @@ impl App {
                 Some((_surface, target)) => {
                     self.to_surface(mouse_button(mouse.kind), mouse.column, mouse.row, target)
                 }
-                None => Cmd::none(),
+                // Nothing on screen wanted the click, so the transcript takes
+                // it and a selection starts. The left button only: the other
+                // two belong to the terminal's own menus.
+                None => {
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                        self.status.hint = None;
+                        self.selection = self.spot_at(mouse.column, mouse.row).map(Selection::at);
+                    }
+                    Cmd::none()
+                }
             },
+            MouseEventKind::Drag(_) if self.is_selecting() => self.drag_to(mouse.column, mouse.row),
+            MouseEventKind::Up(_) if self.is_selecting() => {
+                let selection = self.selection.as_mut().expect("a drag in progress");
+                selection.dragging = false;
+                // A click that never became a drag selects nothing, and asking
+                // to copy nothing would only wipe the clipboard.
+                if selection.is_empty() {
+                    self.selection = None;
+                } else {
+                    selection.pending_copy = true;
+                }
+                Cmd::none()
+            }
             MouseEventKind::Up(_) | MouseEventKind::Drag(_) => {
                 let Some(focus) = self.surfaces.focus() else {
                     return Cmd::none();
@@ -524,6 +586,68 @@ impl App {
             }
             _ => Cmd::none(),
         }
+    }
+
+    /// Drop the selection when the text under it has moved.
+    ///
+    /// A selection holds line numbers. A rebuild renumbers every line, and a
+    /// block that is re-wrapped renumbers the ones after it. Either way what
+    /// the numbers named is no longer there, and holding on to them would
+    /// highlight and copy text the reader never picked.
+    fn settle_selection(&mut self, generation: u64, shifted_from: Option<usize>) {
+        let moved = generation != self.generation;
+        self.generation = generation;
+        let Some(selection) = &self.selection else {
+            return;
+        };
+        if moved || shifted_from.is_some_and(|first| first <= selection.last_line()) {
+            self.selection = None;
+        }
+    }
+
+    /// Whether a drag over the transcript is in progress.
+    fn is_selecting(&self) -> bool {
+        self.selection.as_ref().is_some_and(|it| it.dragging)
+    }
+
+    /// The transcript line and column under a terminal cell.
+    ///
+    /// `None` when the cell is not over the transcript at all, which includes
+    /// every cell before the first frame has said where the transcript is.
+    fn spot_at(&self, column: u16, row: u16) -> Option<Spot> {
+        let area = self.transcript;
+        if area.width == 0
+            || column < area.x
+            || column >= area.x.saturating_add(area.width)
+            || row < area.y
+            || row >= area.y.saturating_add(area.height)
+        {
+            return None;
+        }
+        Some(Spot {
+            line: self.scrollback.viewport().top + usize::from(row - area.y),
+            column: usize::from(column - area.x),
+        })
+    }
+
+    /// Move the loose end of the selection to a cell.
+    ///
+    /// A drag that leaves the pane scrolls it, so a selection can be longer
+    /// than the screen. The clamping to the edge is what keeps the end of the
+    /// selection at the edge while the text underneath moves.
+    fn drag_to(&mut self, column: u16, row: u16) -> Cmd<Effect> {
+        let area = self.transcript;
+        if row < area.y {
+            self.scrollback.scroll_up(1);
+        } else if row >= area.y.saturating_add(area.height) {
+            self.scrollback.scroll_down(1);
+        }
+        let row = row.clamp(area.y, area.y.saturating_add(area.height).saturating_sub(1));
+        if let (Some(spot), Some(selection)) = (self.spot_at(column, row), self.selection.as_mut())
+        {
+            selection.head = spot;
+        }
+        Cmd::none()
     }
 
     /// Send one mouse event to the focused surface.
@@ -658,8 +782,18 @@ impl App {
             return self.key_in_modal(key);
         }
 
+        // Anything typed puts the last word about a copy behind it.
+        self.status.hint = None;
+
         if self.surfaces.focus().is_some() {
             return self.surface_key(key);
+        }
+
+        // Escape means "never mind" to the nearest thing that is going on, and
+        // a selection on the screen is nearer than the run behind it.
+        if key.code == KeyCode::Esc && self.selection.is_some() {
+            self.selection = None;
+            return Cmd::none();
         }
 
         if key.code == KeyCode::F(6) && self.surfaces.has_focusable() {
@@ -783,6 +917,10 @@ impl App {
                 let summary = self.plugin_summary();
                 self.notice(summary)
             }
+            "reload" => {
+                let named = (!rest.trim().is_empty()).then(|| rest.trim().to_owned());
+                Cmd::one(Effect::ReloadPlugins(named))
+            }
             "skills" => {
                 let summary = self.skills_summary();
                 self.notice(summary)
@@ -799,6 +937,11 @@ impl App {
     }
 
     /// What `/plugins` prints.
+    ///
+    /// The fiber state comes first, and the key a waiting plugin is short of
+    /// comes with it. A plugin that declared something nobody provides does
+    /// nothing and says nothing, which is a legitimate state and therefore a
+    /// silent one — this is where it stops being silent.
     fn plugin_summary(&self) -> String {
         let Some(host) = &self.host else {
             return "no plugins are loaded".to_owned();
@@ -807,35 +950,75 @@ impl App {
             return "no plugins are loaded".to_owned();
         }
 
+        let roster = self
+            .composition
+            .as_ref()
+            .map(|composition| composition.runtime.roster())
+            .unwrap_or_default();
+
         let mut lines = Vec::new();
         for plugin in host.plugins() {
             let mut parts = Vec::new();
+            if let Some(status) = roster.iter().find(|status| status.name == plugin.name()) {
+                parts.push(status.state.to_string());
+                if !status.missing.is_empty() {
+                    parts.push(format!("waiting on {}", status.missing.join(", ")));
+                }
+                if let Some(error) = &status.error {
+                    parts.push(error.clone());
+                }
+            }
             if !plugin.hooks().is_empty() {
                 parts.push(plugin.hooks().join(", "));
             }
-            let tools = plugin.tools().len();
-            if tools > 0 {
-                parts.push(format!("{tools} tool(s)"));
-            }
-            let commands = plugin.commands().len();
-            if commands > 0 {
-                parts.push(format!("{commands} command(s)"));
-            }
-            let surfaces = plugin.surfaces().len();
-            if surfaces > 0 {
-                parts.push(format!("{surfaces} surface(s)"));
+            // Counted from what is on offer, not from what the file declared:
+            // a plugin that is waiting contributes nothing, and saying "2
+            // tool(s)" about one would be the listing lying about the state it
+            // just printed.
+            if let Some(registries) = &self.registries {
+                let offered =
+                    |count: usize, what: &str| (count > 0).then(|| format!("{count} {what}(s)"));
+                let mine = |source: &str| source == plugin.name();
+                parts.extend(offered(
+                    registries
+                        .commands()
+                        .entries()
+                        .iter()
+                        .filter(|entry| mine(&entry.source))
+                        .count(),
+                    "command",
+                ));
+                parts.extend(offered(
+                    registries
+                        .surfaces()
+                        .entries()
+                        .iter()
+                        .filter(|entry| mine(&entry.source))
+                        .count(),
+                    "surface",
+                ));
             }
             lines.push(format!("  {:<16} {}", plugin.name(), parts.join(" · ")));
         }
 
-        for command in host.commands() {
+        for command in self
+            .registries
+            .as_ref()
+            .map(|i| crate::scripting::registered_commands(i.commands()))
+            .unwrap_or_default()
+        {
             lines.push(format!(
                 "  /{:<15} {} [{}]",
                 command.invocation, command.description, command.plugin
             ));
         }
 
-        for surface in host.surfaces() {
+        for surface in self
+            .registries
+            .as_ref()
+            .map(|i| crate::scripting::registered_surfaces(i.surfaces()))
+            .unwrap_or_default()
+        {
             let side = match surface.placement {
                 Placement::Side(Side::Left) => "left",
                 Placement::Side(Side::Right) => "right",
@@ -894,20 +1077,22 @@ const HELP: &str = "\
   /tools           list the registered tools
   /ps              what the runtime is running, and what it just ran
   /session         where this session is being written
-  /plugins         list the loaded plugins and their commands
+  /plugins         list the loaded plugins, their state and their commands
+  /reload [name]   reload the plugins from disk
   /skills          list the skills the model can open
   /help            this list
   /quit            exit
   !cmd             run a shell command; its output goes to the transcript
 
 ── keys ──────────────────────────────────────────
-  Esc         cancels a run, or returns focus from a panel
+  Esc         clears a selection, cancels a run, or returns focus
   Ctrl-C      quits
   Ctrl-P      cycles model
   Ctrl-T      shows reasoning
   F6          focus a plugin panel
   PageUp/Dn   scroll transcript
-  Mouse wheel scroll transcript";
+  Mouse wheel scroll transcript
+  Mouse drag  select transcript text; release copies it";
 
 /// Map a crossterm mouse kind to the short name a surface callback sees.
 fn mouse_button(kind: MouseEventKind) -> &'static str {
@@ -1003,15 +1188,24 @@ pub async fn run(
     let answers = Answers::default();
 
     options
-        .plugins
-        .push(Arc::new(UiPlugin::new(events.clone())));
+        .composition
+        .mount(
+            Arc::new(UiComponent::new(events.clone(), &options.composition)),
+            serde_json::Value::Null,
+        )
+        .map_err(std::io::Error::other)?;
     if confirm {
+        let permissions = Arc::new(Permissions::new(Arc::new(UiConfirmer::new(
+            events.clone(),
+            answers.clone(),
+        ))));
         options
-            .plugins
-            .push(Arc::new(Permissions::new(Arc::new(UiConfirmer::new(
-                events.clone(),
-                answers.clone(),
-            )))));
+            .composition
+            .mount(
+                Arc::new(PermissionGate::new(permissions, &options.composition)),
+                serde_json::Value::Null,
+            )
+            .map_err(std::io::Error::other)?;
     }
 
     let workspace = options.workspace.clone();
@@ -1024,23 +1218,52 @@ pub async fn run(
 
     // Scripts print through the app loop, because the UI owns the screen.
     let plugin_files = std::mem::take(&mut options.plugin_files);
+    let mut notes: Vec<String> = Vec::new();
     let (host, plugin_problems) = scripts::load(
         &workspace,
         &plugin_files,
         Arc::new(UiSink::new(events.clone())),
         &processes,
     );
-    if let Some(backend) = ScriptBackend::install(&host)
-        && options.stream_fn.is_none()
-    {
-        options.stream_fn = Some(backend);
-    }
+    // Mounted before anything that offers a command or a panel: those declare
+    // `commands` and `surfaces` in their `inject`, so they wait for this and
+    // nothing has to arrange the order.
+    let registries = crate::registries::Registries::for_composition(&options.composition);
+    options
+        .composition
+        .add(
+            Arc::clone(&registries) as Arc<dyn aphid_agent::rt::Component>,
+            serde_json::Value::Null,
+        )
+        .await
+        .map_err(std::io::Error::other)?;
+
+    // Reconciled rather than mounted wholesale: the loader is what `/reload`
+    // talks to, and starting from an empty composition means the first
+    // reconciliation is the initial load with no second code path for it.
+    let mut plugin_loader = aphid_agent::rt::Loader::new(
+        &options.composition,
+        Arc::new(crate::scripting::Scripts::new(
+            host.clone(),
+            &options.composition,
+        )),
+    );
     if !host.is_empty() {
-        options.plugins.push(host.clone());
+        let rows = match crate::scripting::read(workspace.root()) {
+            Ok(rows) => rows,
+            Err(error) => {
+                notes.push(error);
+                Vec::new()
+            }
+        };
+        let entries = crate::scripting::compose(&plugin_files, &rows);
+        let report = plugin_loader.reconcile(entries).await;
+        for (id, error) in &report.failed {
+            notes.push(format!("plugin {id}: {error}"));
+        }
         options.host = Some(host.clone());
     }
 
-    // The session plugin has to be registered before the agent is built.
     let directory = sessions_dir();
     let (session, resumed) = session::attach(
         &directory,
@@ -1048,18 +1271,30 @@ pub async fn run(
         &cwd,
         Some(&model_id),
         resume.as_deref(),
+        Arc::clone(&options.composition.transcript),
     )?;
-    options.plugins.push(session.clone());
+    // Mounted rather than pushed in a particular place: it subscribes when it
+    // loads, and the loop announces to whatever is subscribed by then.
+    options
+        .composition
+        .add(session.clone(), serde_json::Value::Null)
+        .await
+        .map_err(std::io::Error::other)?;
 
     let session_id = session.id();
     let session_path = session.path();
-    host.session_start(&SessionInfo {
-        id: session_id.as_deref(),
-        path: session_path.as_deref(),
-        reason: if resumed.is_some() { "resume" } else { "new" },
-        restored: 0,
-    });
 
+    // Kept before the options are consumed: the app reports fiber state from
+    // it, and the loader reconciles against it.
+    let composition = options.composition.clone();
+    composition
+        .bus
+        .emit(&mut crate::events::SessionStart(crate::events::Session {
+            id: session_id.clone(),
+            path: session_path.clone(),
+            reason: if resumed.is_some() { "resume" } else { "new" }.to_owned(),
+            restored: 0,
+        }));
     let mut harness = harness::build(options);
     let mut app = App::new(&harness, thinking, &processes);
     app.answers = answers;
@@ -1069,16 +1304,22 @@ pub async fn run(
     );
     app.session = Some(session);
     app.host = Some(host.clone());
+    app.composition = Some(composition.clone());
+    app.registries = Some(Arc::clone(&registries));
     // Asked once, at load: what the plugins registered does not change during
     // a session, and an update must be able to answer without the host.
-    app.plugin_commands = host
-        .commands()
+    app.plugin_commands = crate::scripting::registered_commands(registries.commands())
         .into_iter()
         .map(|command| command.invocation)
         .collect();
-    app.plugins_watch_notices = host.any_defines("on_notify");
-    app.plugins_tick = host.any_defines("on_tick") || host.has_surfaces();
-    app.plugins_draw = host.has_surfaces();
+    // Asked of the bus rather than of the source, so `/reload` moves them: a
+    // plugin that starts listening for ticks starts the timer, and one that
+    // stops stops it. The old version read this once from the files and could
+    // not be right afterwards.
+    app.plugins_watch_notices = composition.bus.has_listeners::<crate::events::Notice>();
+    app.plugins_tick =
+        composition.bus.has_listeners::<crate::events::Tick>() || !registries.surfaces().is_empty();
+    app.plugins_draw = !registries.surfaces().is_empty();
 
     if resumed.is_none() {
         app.scrollback.push_logo();
@@ -1122,7 +1363,19 @@ pub async fn run(
     ));
 
     let mut executor = Executor::new(harness.agent, &app, events.clone());
-    executor.plugins = Some(spawn_plugin_hub(host.clone(), events.clone()));
+    executor.plugins = Some(spawn_plugin_hub(
+        host.clone(),
+        Arc::clone(&composition.bus),
+        Arc::clone(&registries),
+        events.clone(),
+    ));
+    if !host.is_empty() {
+        executor.loader = Some(Arc::new(tokio::sync::Mutex::new(PluginLoader {
+            loader: plugin_loader,
+            root: workspace.root().to_path_buf(),
+            home: crate::context::home_dir(),
+        })));
+    }
 
     let (mut terminal, kitty) = setup()?;
     spawn_input_thread(&events);
@@ -1141,15 +1394,19 @@ pub async fn run(
         plugins.stop();
     }
 
-    // After the terminal is back: a session hook that writes to standard error
-    // then lands on a screen that is its own again. `session_end` also flushes
-    // every plugin's state, so this is the last thing to run.
-    host.session_end(&SessionInfo {
-        id: session_id.as_deref(),
-        path: session_path.as_deref(),
-        reason: "end",
-        restored: 0,
-    });
+    // After the terminal is back: a listener that writes to standard error then
+    // lands on a screen that is its own again.
+    composition
+        .bus
+        .emit(&mut crate::events::SessionEnd(crate::events::Session {
+            id: session_id.clone(),
+            path: session_path.clone(),
+            reason: "end".to_owned(),
+            restored: 0,
+        }));
+    // Written back whether or not anybody listened, and last, so a listener
+    // that saved on the way out is included.
+    host.flush();
 
     result
 }
@@ -1178,7 +1435,41 @@ struct Executor {
     /// The one thread that calls into a script. Nothing here waits on it: a
     /// job goes in and its answer comes back as a message.
     plugins: Option<PluginHub>,
+    /// Keeps the plugin composition in step with the files on disk. `None`
+    /// when no plugins were loaded, and there is nothing to reconcile.
+    loader: Option<Arc<tokio::sync::Mutex<PluginLoader>>>,
     hub: Hub<Msg>,
+}
+
+/// What a reload amounted to, in one line.
+fn describe(report: &aphid_agent::rt::Report, problems: &[crate::scripting::Diagnostic]) -> String {
+    let mut parts = Vec::new();
+    for (label, ids) in [
+        ("loaded", &report.mounted),
+        ("reloaded", &report.reloaded),
+        ("unloaded", &report.unmounted),
+    ] {
+        if !ids.is_empty() {
+            parts.push(format!("{label} {}", ids.join(", ")));
+        }
+    }
+    for (id, error) in &report.failed {
+        parts.push(format!("{id} failed: {error}"));
+    }
+    for problem in problems {
+        parts.push(format!("{}: {}", problem.path.display(), problem.message));
+    }
+    if parts.is_empty() {
+        return "nothing changed".to_owned();
+    }
+    parts.join(" · ")
+}
+
+/// The loader plus what it needs to build a fresh list of entries.
+pub(crate) struct PluginLoader {
+    pub(crate) loader: aphid_agent::rt::Loader,
+    pub(crate) root: PathBuf,
+    pub(crate) home: Option<PathBuf>,
 }
 
 impl Executor {
@@ -1193,6 +1484,7 @@ impl Executor {
             workspace: app.workspace.clone(),
             answers: app.answers.clone(),
             plugins: None,
+            loader: None,
             hub,
         }
     }
@@ -1228,6 +1520,11 @@ impl Executor {
                     hub.send(Msg::BangOutput { command, output });
                 });
             }
+            Effect::Copy(text) => {
+                let lines = text.lines().count();
+                let outcome = clipboard::copy(&text);
+                self.hub.send(Msg::Copied { lines, outcome });
+            }
             Effect::Kill(id) => self.processes.kill(id),
             Effect::SnapshotProcesses => {
                 self.hub.send(Msg::Processes(self.processes.snapshot()));
@@ -1237,6 +1534,7 @@ impl Executor {
                 self.to_plugins(PluginJob::Command { name, args });
             }
             Effect::PluginNotice(text) => self.to_plugins(PluginJob::Notice(text)),
+            Effect::ReloadPlugins(named) => self.reload_plugins(named),
             Effect::Surface {
                 plugin,
                 name,
@@ -1255,6 +1553,52 @@ impl Executor {
                 self.handle.cancel();
             }
         }
+    }
+
+    /// Bring the plugin composition back in step with the files on disk.
+    ///
+    /// Runs on a task of its own and reports as a notice, because reconciling
+    /// awaits every departing plugin's teardown and the loop that draws the
+    /// prompt must not wait for that.
+    fn reload_plugins(&self, named: Option<String>) {
+        let Some(loader) = self.loader.clone() else {
+            let _ = self
+                .hub
+                .send(Msg::Notice("no plugins are loaded".to_owned()));
+            return;
+        };
+        let hub = self.hub.clone();
+
+        tokio::spawn(async move {
+            let mut guard = loader.lock().await;
+            let PluginLoader { loader, root, home } = &mut *guard;
+
+            let (files, problems) = crate::scripting::discover(root, home.as_deref());
+            let rows = match crate::scripting::read(root) {
+                Ok(rows) => rows,
+                Err(error) => {
+                    let _ = hub.send(Msg::Notice(error));
+                    Vec::new()
+                }
+            };
+            let entries = crate::scripting::compose(&files, &rows);
+
+            // A named reload takes that one down whatever the file says, so an
+            // edit that changed nothing the loader compares still gets picked
+            // up. It is the case you are in while you are writing a plugin.
+            if let Some(name) = &named {
+                let Some(index) = entries.iter().position(|entry| entry.id == *name) else {
+                    let _ = hub.send(Msg::Notice(format!("no plugin called `{name}`")));
+                    return;
+                };
+                let mut down = entries.clone();
+                down[index].disabled = true;
+                loader.reconcile(down).await;
+            }
+
+            let report = loader.reconcile(entries).await;
+            let _ = hub.send(Msg::Notice(describe(&report, &problems)));
+        });
     }
 
     /// Queue a job for the script thread. Never waits.
@@ -1310,8 +1654,13 @@ impl Executor {
 
 /// Start the thread that calls into the scripts, and turn what it reports
 /// into messages.
-fn spawn_plugin_hub(host: Arc<aphid_plugin::PluginHost>, hub: Hub<Msg>) -> PluginHub {
-    PluginHub::spawn(host, move |report| {
+fn spawn_plugin_hub(
+    host: Arc<crate::scripting::PluginHost>,
+    bus: Arc<aphid_agent::rt::Bus>,
+    registries: Arc<crate::registries::Registries>,
+    hub: Hub<Msg>,
+) -> PluginHub {
+    PluginHub::spawn(host, bus, registries, move |report| {
         match report {
             PluginReport::Command(actions) => {
                 for action in actions {
@@ -1574,6 +1923,7 @@ mod tests {
             workspace: Workspace::new(std::env::temp_dir()),
             answers: Answers::default(),
             plugins: None,
+            loader: None,
             hub,
         }
     }
@@ -1780,10 +2130,18 @@ mod tests {
             Turn::text("all green"),
         ]);
         let (events, mut receiver) = crate::tui::runtime::channel::<crate::tui::msg::Msg>();
+        let composition = aphid_agent::rt::Composition::new();
+        composition
+            .add(
+                Arc::new(UiComponent::new(events, &composition)),
+                serde_json::Value::Null,
+            )
+            .await
+            .expect("the ui component mounts");
         let mut agent = Agent::builder()
             .model(deepseek::flash())
             .stream_fn(backend)
-            .plugin(UiPlugin::new(events))
+            .compose(&composition)
             .tool(aphid_agent::tool_fn(
                 "bash",
                 "Run a command.",
@@ -1843,14 +2201,38 @@ mod tests {
         drawn(app, cache)
     }
 
-    /// One frame's worth of laying out, and telling the model about it.
-    fn drawn(app: &mut App, cache: &mut ScrollbackCache) -> usize {
-        let view = cache.layout(&app.scrollback, 40, 10);
+    /// Where the transcript sits in these tests.
+    const PANE: Rect = Rect {
+        x: 0,
+        y: 0,
+        width: 40,
+        height: 10,
+    };
+
+    /// One frame: lay the pane out and report it exactly as the real draw
+    /// does, down to reading the selected text only when the model asked.
+    fn frame(app: &mut App, cache: &mut ScrollbackCache) -> Vec<Effect> {
+        let view = cache.layout(&app.scrollback, PANE.width as usize, PANE.height as usize);
+        let selected = app
+            .selection
+            .as_ref()
+            .filter(|selection| selection.pending_copy)
+            .map(|selection| cache.selected_text(selection.span()));
         app.update(Msg::LaidOut(crate::tui::render::Laid {
             viewport: view,
             hits: Vec::new(),
-        }));
-        view.top
+            main: PANE,
+            generation: cache.generation(),
+            shifted_from: cache.shifted_from(),
+            selected,
+        }))
+        .into_effects()
+    }
+
+    /// One frame, for the tests that only care where the pane ended up.
+    fn drawn(app: &mut App, cache: &mut ScrollbackCache) -> usize {
+        frame(app, cache);
+        app.scrollback.viewport().top
     }
 
     /// A gated call is a question with a task blocked behind it. These say
@@ -1983,6 +2365,194 @@ mod tests {
         app.update(Msg::Mouse(mouse(MouseEventKind::ScrollDown)));
 
         assert_eq!(app.input.text(), "draft");
+    }
+
+    /// The selection tests. All of them drive the model with mouse messages
+    /// and one stand-in frame, which is all a drag ever is.
+    fn at(kind: MouseEventKind, column: u16, row: u16) -> Msg {
+        Msg::Mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    /// A pane with one known line in it, laid out once so the model knows
+    /// where the transcript is.
+    fn selectable(app: &mut App, cache: &mut ScrollbackCache) {
+        app.scrollback.push_notice("hello world");
+        frame(app, cache);
+    }
+
+    const LEFT_DOWN: MouseEventKind = MouseEventKind::Down(MouseButton::Left);
+    const LEFT_DRAG: MouseEventKind = MouseEventKind::Drag(MouseButton::Left);
+    const LEFT_UP: MouseEventKind = MouseEventKind::Up(MouseButton::Left);
+
+    #[test]
+    fn dragging_the_mouse_selects_the_transcript() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+        let mut cache = ScrollbackCache::default();
+        selectable(&mut app, &mut cache);
+
+        app.update(at(LEFT_DOWN, 0, 0));
+        app.update(at(LEFT_DRAG, 5, 0));
+
+        let selection = app.selection.as_ref().expect("a selection");
+        assert_eq!(selection.anchor, Spot { line: 0, column: 0 });
+        assert_eq!(selection.head, Spot { line: 0, column: 5 });
+        assert!(selection.dragging);
+    }
+
+    #[test]
+    fn releasing_the_mouse_asks_for_a_copy() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+        let mut cache = ScrollbackCache::default();
+        selectable(&mut app, &mut cache);
+
+        app.update(at(LEFT_DOWN, 0, 0));
+        app.update(at(LEFT_DRAG, 5, 0));
+        assert!(
+            app.update(at(LEFT_UP, 5, 0)).into_effects().is_empty(),
+            "the text is not in the model, so the copy waits for a draw"
+        );
+
+        assert_eq!(
+            frame(&mut app, &mut cache),
+            [Effect::Copy("hello".to_owned())],
+            "the draw is where the lines are, so the draw is what reports them"
+        );
+        assert!(app.selection.is_none(), "a copied selection is done with");
+    }
+
+    #[test]
+    fn a_click_without_a_drag_clears_the_selection() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+        let mut cache = ScrollbackCache::default();
+        selectable(&mut app, &mut cache);
+
+        app.update(at(LEFT_DOWN, 3, 0));
+        app.update(at(LEFT_UP, 3, 0));
+
+        assert!(app.selection.is_none());
+        assert!(
+            frame(&mut app, &mut cache).is_empty(),
+            "nothing was selected, so nothing goes to the clipboard"
+        );
+    }
+
+    #[test]
+    fn a_click_below_the_transcript_selects_nothing() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+        let mut cache = ScrollbackCache::default();
+        selectable(&mut app, &mut cache);
+
+        app.update(at(LEFT_DOWN, 3, PANE.height));
+
+        assert!(app.selection.is_none(), "the input box is not the pane");
+    }
+
+    #[test]
+    fn only_the_left_button_starts_a_selection() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+        let mut cache = ScrollbackCache::default();
+        selectable(&mut app, &mut cache);
+
+        app.update(at(MouseEventKind::Down(MouseButton::Right), 0, 0));
+
+        assert!(app.selection.is_none());
+    }
+
+    #[test]
+    fn escape_clears_the_selection_before_cancelling_the_run() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+        let mut cache = ScrollbackCache::default();
+        selectable(&mut app, &mut cache);
+        app.status.running = true;
+
+        app.update(at(LEFT_DOWN, 0, 0));
+        app.update(at(LEFT_DRAG, 5, 0));
+        app.update(at(LEFT_UP, 5, 0));
+
+        assert!(press(&mut app, KeyCode::Esc).is_empty(), "the run goes on");
+        assert!(app.selection.is_none());
+        assert_eq!(
+            press(&mut app, KeyCode::Esc),
+            [Effect::Cancel],
+            "with nothing selected, escape means the run again"
+        );
+    }
+
+    #[test]
+    fn scrolling_keeps_the_selection() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+        let mut cache = ScrollbackCache::default();
+        scrollable(&mut app, &mut cache);
+
+        app.update(at(LEFT_DOWN, 0, 0));
+        app.update(at(LEFT_DRAG, 6, 0));
+        let held = app.selection.clone().expect("a selection");
+
+        app.update(Msg::Mouse(mouse(MouseEventKind::ScrollUp)));
+        frame(&mut app, &mut cache);
+
+        assert_eq!(
+            app.selection,
+            Some(held),
+            "a selection holds text, and the text did not move"
+        );
+    }
+
+    #[test]
+    fn a_rewrapped_transcript_drops_the_selection() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+        let mut cache = ScrollbackCache::default();
+        selectable(&mut app, &mut cache);
+
+        app.update(at(LEFT_DOWN, 0, 0));
+        app.update(at(LEFT_DRAG, 5, 0));
+
+        // A narrower pane re-wraps every line, so no line number survives.
+        let view = cache.layout(&app.scrollback, 20, PANE.height as usize);
+        app.update(Msg::LaidOut(crate::tui::render::Laid {
+            viewport: view,
+            hits: Vec::new(),
+            main: PANE,
+            generation: cache.generation(),
+            shifted_from: cache.shifted_from(),
+            selected: None,
+        }));
+
+        assert!(app.selection.is_none());
+    }
+
+    #[test]
+    fn a_copy_says_so_in_the_status_line() {
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+
+        app.update(Msg::Copied {
+            lines: 1,
+            outcome: Copied::Sent,
+        });
+        assert_eq!(app.status.hint.as_deref(), Some("copied 1 line"));
+
+        app.update(Msg::Copied {
+            lines: 4,
+            outcome: Copied::Sent,
+        });
+        assert_eq!(app.status.hint.as_deref(), Some("copied 4 lines"));
+
+        press(&mut app, KeyCode::Char('a'));
+        assert!(app.status.hint.is_none(), "typing puts it behind you");
     }
 
     #[tokio::test]
@@ -2267,9 +2837,10 @@ mod plugin_tests {
     use crate::tui::effect::Effect;
     use crate::tui::msg::Msg;
 
+    use crate::scripting::{Capabilities, PluginHost, explicit};
+    use aphid_agent::Silent;
     use aphid_agent::{Agent, exec};
     use aphid_core::providers::deepseek;
-    use aphid_plugin::{Capabilities, PluginHost, Silent, explicit};
 
     use super::{App, Status};
     use crate::tui::event::UiSink;
@@ -2298,7 +2869,7 @@ mod plugin_tests {
             self.host_with(Arc::new(Silent))
         }
 
-        fn host_with(&self, sink: Arc<dyn aphid_plugin::Sink>) -> Arc<PluginHost> {
+        fn host_with(&self, sink: Arc<dyn aphid_agent::Sink>) -> Arc<PluginHost> {
             let file = explicit(&self.0.join(".aphid").join("plugins").join("kit.rhai"))
                 .expect("readable");
             let processes = Arc::new(exec::Registry::new());
@@ -2315,6 +2886,49 @@ mod plugin_tests {
         }
     }
 
+    /// Mount the scripts and hand back what they are offering.
+    ///
+    /// The registry rather than the host, because what a component offers is a
+    /// property of it being loaded, and the tests care about that distinction
+    /// as much as anything else does.
+    fn offered(host: &Arc<PluginHost>) -> Arc<crate::registries::Registries> {
+        let composition = aphid_agent::rt::Composition::new();
+        let registries = crate::registries::Registries::for_composition(&composition);
+        composition
+            .mount(
+                Arc::clone(&registries) as Arc<dyn aphid_agent::rt::Component>,
+                serde_json::Value::Null,
+            )
+            .expect("the registry mounts");
+        for plugin in host.plugins() {
+            composition
+                .mount(
+                    Arc::new(crate::scripting::ScriptComponent::new(
+                        Arc::clone(plugin),
+                        &composition,
+                    )),
+                    serde_json::Value::Null,
+                )
+                .expect("a plugin mounts");
+        }
+        block_on(composition.runtime.settle());
+        registries
+    }
+
+    /// Drive a future to completion on the current thread.
+    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+        let mut future = Box::pin(future);
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        loop {
+            if let std::task::Poll::Ready(value) =
+                std::future::Future::poll(future.as_mut(), &mut cx)
+            {
+                return value;
+            }
+        }
+    }
+
     fn app_with(host: Arc<PluginHost>) -> (App, Agent) {
         let (backend, _script) = aphid_agent::testing::scripted([]);
         let agent = Agent::builder()
@@ -2323,11 +2937,12 @@ mod plugin_tests {
             .build();
         let mut app = App::new_for_test(&agent);
         app.status = Status::from_model(agent.model());
-        app.plugin_commands = host
-            .commands()
+        let registries = offered(&host);
+        app.plugin_commands = crate::scripting::registered_commands(registries.commands())
             .into_iter()
             .map(|command| command.invocation)
             .collect();
+        app.registries = Some(registries);
         app.host = Some(host);
         (app, agent)
     }
@@ -2336,16 +2951,20 @@ mod plugin_tests {
     /// does. Called straight rather than through the thread, so the test does
     /// not have to wait for one.
     fn refresh(app: &mut App, host: &Arc<PluginHost>) {
-        let open: Vec<aphid_plugin::Open> = host
-            .surfaces()
+        let surfaces = app
+            .registries
+            .as_ref()
+            .map(|i| crate::scripting::registered_surfaces(i.surfaces()))
+            .unwrap_or_default();
+        let open: Vec<crate::scripting::Open> = surfaces
             .into_iter()
             .filter_map(|surface| {
-                let aphid_plugin::Placement::Side(side) = surface.placement;
-                let widget = match host.render_surface(&surface.plugin, &surface.name)? {
-                    aphid_plugin::SurfaceRender::Widget(widget) => widget,
+                let crate::scripting::Placement::Side(side) = surface.placement;
+                let widget = match host.render_surface(&surface.spec, &surface.plugin)? {
+                    crate::scripting::SurfaceRender::Widget(widget) => widget,
                     _ => return None,
                 };
-                Some(aphid_plugin::Open {
+                Some(crate::scripting::Open {
                     plugin: surface.plugin,
                     name: surface.name,
                     side,
@@ -2371,16 +2990,20 @@ mod plugin_tests {
     #[test]
     fn a_plugin_command_prints_and_prompts() {
         let fixture = Fixture::new(
-            r#"
-            register_command(#{
-                name: "greet",
-                description: "Say hello.",
-                run: |args| {
-                    prompt("Say hello to " + args);
-                    notice("greeting " + args)
-                }
-            });
-            "#,
+            r#"const inject = ["commands"];
+
+
+fn apply(ctx) {
+    command(#{
+                    name: "greet",
+                    description: "Say hello.",
+                    run: |args| {
+                        prompt("Say hello to " + args);
+                        notice("greeting " + args)
+                    }
+                });
+}
+"#,
         );
         let (events, mut receiver) = crate::tui::runtime::channel::<crate::tui::msg::Msg>();
         let host = fixture.host_with(Arc::new(UiSink::new(events)));
@@ -2396,8 +3019,12 @@ mod plugin_tests {
                 args: "Ana".to_owned(),
             }]
         );
-        for action in host.run_command("greet", "Ana").expect("the command") {
-            let aphid_plugin::Action::Notice(text) = action;
+        let registries = offered(&host);
+        for action in host
+            .run_command(registries.commands(), "greet", "Ana")
+            .expect("the command")
+        {
+            let crate::scripting::Action::Notice(text) = action;
             app.update(Msg::Notice(text));
         }
         assert_eq!(notices(&app), vec!["greeting Ana"]);
@@ -2416,44 +3043,49 @@ mod plugin_tests {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let fixture = Fixture::new(
-            r#"
-            register_command(#{
-                name: "panel",
-                description: "Open the panel.",
-                run: |args| {
-                    let s = surface_state("panel");
-                    s.open = true;
-                    surface_state("panel", s);
-                    notice("panel on")
-                }
-            });
-            register_surface(#{
-                name: "panel",
-                placement: #{ kind: "side", side: "right" },
-                init: || #{ open: false, count: 0 },
-                view: |s| {
-                    if !s.open { return (); }
-                    #{ type: "text", text: "panel" }
-                },
-                update: |s, msg| {
-                    if msg.kind == "key" && msg.code == "down" {
-                        s.count += 1;
-                        return s;
+            r#"const inject = ["commands", "surfaces"];
+
+
+fn apply(ctx) {
+    command(#{
+                    name: "panel",
+                    description: "Open the panel.",
+                    run: |args| {
+                        let s = surface_state("panel");
+                        s.open = true;
+                        surface_state("panel", s);
+                        notice("panel on")
                     }
-                    if msg.kind == "key" && msg.code == "esc" {
-                        return "release_focus";
+                });
+
+    surface(#{
+                    name: "panel",
+                    placement: #{ kind: "side", side: "right" },
+                    init: || #{ open: false, count: 0 },
+                    view: |s| {
+                        if !s.open { return (); }
+                        #{ type: "text", text: "panel" }
+                    },
+                    update: |s, msg| {
+                        if msg.kind == "key" && msg.code == "down" {
+                            s.count += 1;
+                            return s;
+                        }
+                        if msg.kind == "key" && msg.code == "esc" {
+                            return "release_focus";
+                        }
+                        s
                     }
-                    s
-                }
-            });
-            "#,
+                });
+}
+"#,
         );
         let host = fixture.host();
         let (mut app, _agent) = app_with(host.clone());
         refresh(&mut app, &host);
         assert!(!app.surfaces.any_open(), "the panel starts closed");
 
-        let _ = host.run_command("panel", "");
+        let _ = host.run_command(offered(&host).commands(), "panel", "");
         refresh(&mut app, &host);
         assert!(app.surfaces.any_open(), "the panel is now open");
 
@@ -2473,7 +3105,16 @@ mod plugin_tests {
         else {
             panic!("a key on a focused panel goes to it: {asked:?}");
         };
-        host.surface_event(plugin, name, event.clone())
+        let surfaces = app
+            .registries
+            .as_ref()
+            .map(|r| crate::scripting::registered_surfaces(r.surfaces()))
+            .unwrap_or_default();
+        let open = surfaces
+            .iter()
+            .find(|open| open.plugin == *plugin && open.name == *name)
+            .expect("the panel is on offer");
+        host.surface_event(&open.spec, plugin, event.clone())
             .expect("the surface took it");
 
         let count = host.plugins()[0]
@@ -2493,7 +3134,13 @@ mod plugin_tests {
     #[test]
     fn a_built_in_command_wins_over_a_plugin_of_the_same_name() {
         let fixture = Fixture::new(
-            r#"register_command(#{ name: "help", run: |args| { prompt("hijacked") } });"#,
+            r#"const inject = ["commands"];
+
+
+fn apply(ctx) {
+    command(#{ name: "help", run: |args| { prompt("hijacked") } });
+}
+"#,
         );
         let (mut app, _agent) = app_with(fixture.host());
 
@@ -2512,7 +3159,7 @@ mod plugin_tests {
 
     #[test]
     fn an_unknown_command_is_still_reported() {
-        let fixture = Fixture::new(r#"fn on_run_start(cx) {}"#);
+        let fixture = Fixture::new(r#"fn apply(ctx) {}"#);
         let (mut app, _agent) = app_with(fixture.host());
 
         assert!(app.command("nope", "").effects().is_empty());
@@ -2526,9 +3173,11 @@ mod plugin_tests {
     #[test]
     fn plugins_lists_what_loaded() {
         let fixture = Fixture::new(
-            r#"
-            fn on_run_start(cx) {}
-            register_command(#{ name: "greet", description: "Say hello.", run: |a| { "hi" } });
+            r#"const inject = ["commands"];
+
+            fn apply(ctx) {
+                command(#{ name: "greet", description: "Say hello.", run: |a| { "hi" } });
+            }
             "#,
         );
         let (mut app, _agent) = app_with(fixture.host());
@@ -2537,7 +3186,7 @@ mod plugin_tests {
 
         let summary = notices(&app).remove(0);
         assert!(summary.contains("kit"), "{summary}");
-        assert!(summary.contains("on_run_start"), "{summary}");
+        assert!(summary.contains("apply"), "{summary}");
         assert!(summary.contains("/greet"), "{summary}");
         assert!(summary.contains("Say hello."), "{summary}");
     }

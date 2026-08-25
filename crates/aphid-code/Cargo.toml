@@ -15,7 +15,8 @@ include = ["/src", "/tests", "/Cargo.toml"]
 [dependencies]
 aphid-agent.workspace = true
 aphid-core.workspace = true
-aphid-plugin.workspace = true
+rhai = { workspace = true }
+reqwest = { workspace = true, features = ["blocking"] }
 chrono.workspace = true
 compact_str.workspace = true
 ratatui.workspace = true

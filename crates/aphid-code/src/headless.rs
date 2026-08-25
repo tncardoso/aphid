@@ -6,11 +6,11 @@
 //! a problem is in the harness or in the UI.
 
 use std::io::Write;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use aphid_agent::rt::{Component, Composition, Context, Disposer};
 use aphid_agent::{
-    Cx, Flow, Guard, Interest, PendingCall, Plugin, ResultCx, RunOutcome, StreamCx, ToolOutcome,
-    TurnSummary,
+    RunEnd, RunOutcome, ToolContent, ToolProgress, ToolRequest, ToolResult, TurnEnd,
 };
 use aphid_core::{BlockKind, Event};
 
@@ -68,80 +68,125 @@ impl Printer {
 
 /// A plugin's `notify` output goes to the same stream as everything else, so it
 /// interleaves correctly with the run rather than racing it.
-impl aphid_plugin::Sink for Printer {
+impl aphid_agent::Sink for Printer {
     fn notify(&self, plugin: &str, text: &str) {
         self.line(&format!("[{plugin}] {text}"));
     }
 }
 
-impl Plugin for Printer {
+/// Subscribes the printer to a composition.
+///
+/// A component rather than the printer itself, so that what it listens to and
+/// what it knows how to print stay separable: `Printer` is also the
+/// [`Sink`](aphid_agent::Sink) a script's `notify` reaches, and that has
+/// nothing to do with the run.
+pub struct Reporter {
+    printer: Arc<Printer>,
+    composition: Composition,
+}
+
+impl Reporter {
+    #[must_use]
+    pub fn new(printer: Arc<Printer>, composition: &Composition) -> Self {
+        Self {
+            printer,
+            composition: composition.clone(),
+        }
+    }
+}
+
+impl Component for Reporter {
     fn name(&self) -> &str {
         "stdout-printer"
     }
 
-    fn interests(&self) -> Interest {
-        let base = Interest::EVENT
-            | Interest::TOOL_CALL
-            | Interest::TOOL_RESULT
-            | Interest::TURN_END
-            | Interest::RUN_END;
-        if self.quiet {
-            base
-        } else {
-            base | Interest::TOOL_PROGRESS
+    fn apply(&self, ctx: &Context) -> Result<(), String> {
+        let owner = ctx.uid();
+        let bus = Arc::clone(&self.composition.bus);
+
+        let printer = Arc::clone(&self.printer);
+        bus.on::<ToolRequest>(owner, move |request| {
+            printer.line(&format!("→ {} {}", request.name, request.arguments));
+        });
+
+        // Per-line output of a running tool is the first thing to drop when
+        // asked to be quiet: it is progress, not result.
+        if !self.printer.quiet {
+            let printer = Arc::clone(&self.printer);
+            bus.on::<ToolProgress>(owner, move |progress| {
+                printer.line(&format!("  │ {}", progress.chunk));
+            });
         }
-    }
 
-    fn on_event(&self, event: &Event, cx: &StreamCx<'_>) {
-        // Only assistant prose goes to stdout as it streams. Tool-call arguments
-        // arrive as deltas too, and printing raw JSON token by token helps
-        // nobody — the call is announced in full by `on_tool_call`.
-        if let Event::Delta {
-            kind: BlockKind::Text,
-            span,
-            ..
-        } = *event
-        {
-            self.write(cx.text(span), true);
-        }
-    }
+        let printer = Arc::clone(&self.printer);
+        bus.on::<ToolResult>(owner, move |result| {
+            let body = text_of(&result.content);
+            let summary = body.lines().next().unwrap_or("").trim();
+            let arrow = if result.is_error { "✗" } else { "←" };
+            let more = match body.lines().count() {
+                0 | 1 => String::new(),
+                n => format!("  (+{} lines)", n - 1),
+            };
+            printer.line(&format!("{arrow} {} {summary}{more}", result.name));
+        });
 
-    fn on_tool_call(&self, call: &mut PendingCall<'_>) -> Guard {
-        self.line(&format!("→ {} {}", call.name(), call.arguments()));
-        Guard::Allow
-    }
+        let printer = Arc::clone(&self.printer);
+        bus.on::<TurnEnd>(owner, move |_| printer.write("", false));
 
-    fn on_tool_progress(&self, _call_id: &str, _tool: &str, chunk: &str) {
-        self.line(&format!("  │ {chunk}"));
-    }
+        let printer = Arc::clone(&self.printer);
+        bus.on::<RunEnd>(owner, move |end| {
+            printer.write("", false);
+            let usage = end.run.usage;
+            printer.line(&format!(
+                "\n{} turns · in {} · cached {} · out {} · ${:.6}",
+                end.turns, usage.input, usage.cache_read, usage.output, usage.cost.total
+            ));
+            if let Some(error) = &end.error {
+                printer.line(&format!("error: {error}"));
+            }
+        });
 
-    fn on_tool_result(&self, outcome: &mut ToolOutcome, cx: &ResultCx<'_>) {
-        let body = outcome.text_content();
-        let summary = body.lines().next().unwrap_or("").trim();
-        let arrow = if outcome.is_error { "✗" } else { "←" };
-        let more = match body.lines().count() {
-            0 | 1 => String::new(),
-            n => format!("  (+{} lines)", n - 1),
-        };
-        self.line(&format!("{arrow} {} {summary}{more}", cx.name()));
-    }
+        // Only assistant prose goes to stdout as it streams. Tool-call
+        // arguments arrive as deltas too, and printing raw JSON token by token
+        // helps nobody — the call is announced in full when it is requested.
+        let printer = Arc::clone(&self.printer);
+        self.composition.stream.subscribe(owner, move |event, cx| {
+            if let Event::Delta {
+                kind: BlockKind::Text,
+                span,
+                ..
+            } = *event
+            {
+                printer.write(cx.text(span), true);
+            }
+        });
 
-    fn on_turn_end(&self, _cx: &mut Cx<'_>, _turn: &TurnSummary) -> Flow {
-        self.write("", false);
-        Flow::Continue
+        let bus = Arc::clone(&self.composition.bus);
+        let stream = Arc::clone(&self.composition.stream);
+        ctx.effect(move || {
+            Disposer::sync(move || {
+                bus.unsubscribe::<ToolRequest>(owner);
+                bus.unsubscribe::<ToolProgress>(owner);
+                bus.unsubscribe::<ToolResult>(owner);
+                bus.unsubscribe::<TurnEnd>(owner);
+                bus.unsubscribe::<RunEnd>(owner);
+                stream.unsubscribe(owner);
+            })
+        });
+        Ok(())
     }
+}
 
-    fn on_run_end(&self, _cx: &mut Cx<'_>, outcome: &RunOutcome) {
-        self.write("", false);
-        let usage = outcome.usage;
-        self.line(&format!(
-            "\n{} turns · in {} · cached {} · out {} · ${:.6}",
-            outcome.turns, usage.input, usage.cache_read, usage.output, usage.cost.total
-        ));
-        if let Some(error) = &outcome.error {
-            self.line(&format!("error: {error}"));
-        }
-    }
+/// The text of a tool result, joined across its blocks.
+fn text_of(content: &[ToolContent]) -> String {
+    content
+        .iter()
+        .filter_map(|block| match block {
+            ToolContent::Text(text) => Some(text.as_str()),
+            ToolContent::Image { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 /// Build a harness that reports to stdout and run one prompt through it.
@@ -157,8 +202,15 @@ pub async fn run(
     quiet: bool,
     resumed: Option<Transcript>,
 ) -> (Harness, RunOutcome) {
-    let printer = std::sync::Arc::new(Printer::new(quiet));
-    options.plugins.push(printer.clone());
+    let printer = Arc::new(Printer::new(quiet));
+    options
+        .composition
+        .add(
+            Arc::new(Reporter::new(Arc::clone(&printer), &options.composition)),
+            serde_json::Value::Null,
+        )
+        .await
+        .expect("the reporter has no dependencies and no schema");
 
     // Scripts print through the same printer, so their output interleaves with
     // the run instead of racing it.
@@ -166,22 +218,29 @@ pub async fn run(
     let workspace = options.workspace.clone();
     let processes = std::sync::Arc::clone(&options.processes);
     let (host, plugin_problems) = scripts::load(&workspace, &plugin_files, printer, &processes);
-    if let Some(backend) = aphid_plugin::ScriptBackend::install(&host)
-        && options.stream_fn.is_none()
-    {
-        options.stream_fn = Some(backend);
-    }
     if !host.is_empty() {
-        options.plugins.push(host.clone());
+        options
+            .composition
+            .mount(
+                Arc::new(crate::scripting::ScriptHost::new(
+                    host.clone(),
+                    &options.composition,
+                )),
+                serde_json::Value::Null,
+            )
+            .expect("the script host has no dependencies and no schema");
         options.host = Some(host.clone());
     }
 
-    host.session_start(&aphid_plugin::SessionInfo {
-        id: None,
-        path: None,
-        reason: if resumed.is_some() { "resume" } else { "new" },
-        restored: 0,
-    });
+    let composition = options.composition.clone();
+    composition
+        .bus
+        .emit(&mut crate::events::SessionStart(crate::events::Session {
+            id: None,
+            path: None,
+            reason: if resumed.is_some() { "resume" } else { "new" }.to_owned(),
+            restored: 0,
+        }));
 
     let mut harness = harness::build(options);
     if let Some(transcript) = resumed {
@@ -190,7 +249,9 @@ pub async fn run(
     }
     for note in &harness.notes {
         eprintln!("aphid: {note}");
-        host.notice(note);
+        composition
+            .bus
+            .emit(&mut crate::events::Notice(note.clone()));
     }
     for diagnostic in &harness.diagnostics {
         eprintln!(
@@ -206,13 +267,16 @@ pub async fn run(
     let outcome = harness.agent.prompt(prompt).await;
 
     // One prompt is the whole session here, so it ends as soon as the run does.
-    // This flushes plugin state too.
-    host.session_end(&aphid_plugin::SessionInfo {
-        id: None,
-        path: None,
-        reason: "end",
-        restored: 0,
-    });
+    composition
+        .bus
+        .emit(&mut crate::events::SessionEnd(crate::events::Session {
+            id: None,
+            path: None,
+            reason: "end".to_owned(),
+            restored: 0,
+        }));
+    // Session state is written back whether or not anybody listened.
+    host.flush();
 
     (harness, outcome)
 }

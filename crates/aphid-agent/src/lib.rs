@@ -1,33 +1,43 @@
-//! The agent loop, tool execution, and the plugin API for the aphid harness.
+//! The agent loop, tool execution, and the composition runtime for the aphid
+//! harness.
 //!
 //! [`aphid_core`] gives you a conversation and one streamed response. This crate
 //! turns that into an agent: [`Agent::prompt`] runs *request → stream → commit →
 //! execute tools* until the model stops asking for tools.
 //!
-//! # The plugin API
+//! # Composition
 //!
-//! Everything interesting is interceptable. A [`Plugin`] can contribute tools,
-//! add context before a request, watch every protocol event, block or rewrite a
-//! tool call, patch a tool result, and stop the run.
+//! Everything interesting is interceptable. A [`Component`](rt::Component)
+//! declares the services it needs, contributes tools, and subscribes to what
+//! the loop announces: a prompt on its way in, a request about to be sent, a
+//! tool call that could be refused or rewritten, a result that could be
+//! patched, a turn that could end the run.
 //!
-//! Hooks are **synchronous**. The only per-token hook is [`Plugin::on_event`],
-//! and boxing a future for each of those would undo the point of the core's
-//! arena layout. Anything that must await belongs in a [`ToolHandler`], the one
-//! async point in the surface. Plugins declare an [`Interest`] set, and the
-//! registry turns those declarations into one subscriber list per hook, so a
-//! hook nobody wants costs an empty-slice check.
+//! Nothing is ordered by hand. A component waits until what it declared is
+//! available, loads, and unloads again if any of it goes away — and everything
+//! it registered leaves with it, because every registration carries its
+//! inverse. See [`rt`].
+//!
+//! Announcements are **synchronous** and their payloads own their data, so a
+//! listener may keep one, move it to another thread, or answer from a task.
+//! The one exception is the per-token stream, which hands out a borrow into the
+//! response arena and is documented where it lives:
+//! [`StreamListeners`].
 //!
 //! # Ordering
 //!
-//! Tool results are committed in assistant source order, never completion order,
-//! however the batch was scheduled. Providers match results to calls
+//! Tool results are committed in assistant source order, never completion
+//! order, however the batch was scheduled. Providers match results to calls
 //! positionally, so scheduling must not leak into the transcript.
 //!
 //! # Example
 //!
 //! ```
-//! use aphid_agent::{Agent, Guard, PendingCall, Plugin, ToolOutcome, tool_fn};
+//! use std::sync::Arc;
+//!
+//! use aphid_agent::rt::{Component, Composition, Context};
 //! use aphid_agent::testing::{Turn, scripted};
+//! use aphid_agent::{Agent, Blocked, ToolOutcome, ToolRequest, tool_fn};
 //! use aphid_core::{Role, providers::deepseek};
 //! use serde::Deserialize;
 //!
@@ -36,19 +46,23 @@
 //!     city: String,
 //! }
 //!
-//! // A plugin that vetoes one city.
-//! struct NoLisbon;
+//! // A component that vetoes one city.
+//! struct NoLisbon {
+//!     composition: Composition,
+//! }
 //!
-//! impl Plugin for NoLisbon {
+//! impl Component for NoLisbon {
 //!     fn name(&self) -> &str {
 //!         "no-lisbon"
 //!     }
 //!
-//!     fn on_tool_call(&self, call: &mut PendingCall<'_>) -> Guard {
-//!         if call.arguments().contains("Lisbon") {
-//!             return Guard::block("Lisbon is off limits.");
-//!         }
-//!         Guard::Allow
+//!     fn apply(&self, ctx: &Context) -> Result<(), String> {
+//!         self.composition.bus.on::<ToolRequest>(ctx.uid(), |request| {
+//!             if request.arguments.contains("Lisbon") {
+//!                 request.refuse(Blocked::new("Lisbon is off limits."));
+//!             }
+//!         });
+//!         Ok(())
 //!     }
 //! }
 //!
@@ -58,6 +72,12 @@
 //!     Turn::call("call_1", "get_weather", r#"{"city":"Porto"}"#),
 //!     Turn::text("It is sunny in Porto."),
 //! ]);
+//!
+//! let composition = Composition::new();
+//! composition
+//!     .plug(NoLisbon { composition: composition.clone() })
+//!     .await
+//!     .expect("no dependencies, no schema");
 //!
 //! let mut agent = Agent::builder()
 //!     .model(deepseek::flash())
@@ -74,7 +94,7 @@
 //!             ToolOutcome::text(format!("sunny in {}", args.city))
 //!         },
 //!     ))
-//!     .plugin(NoLisbon)
+//!     .compose(&composition)
 //!     .stream_fn(backend)
 //!     .build();
 //!
@@ -88,25 +108,32 @@
 //! ```
 
 mod agent;
+mod events;
 pub mod exec;
 mod plugin;
 mod registry;
+pub mod rt;
 mod run;
+mod sink;
 mod stream;
 pub mod testing;
 mod tool;
+mod toolbox;
 
 pub use agent::{
     Agent, AgentBuilder, AgentConfig, AgentHandle, DEFAULT_MAX_TURNS, NoModel, RunOutcome,
     create_agent,
 };
-pub use plugin::{
-    Cx, EventListener, Flow, Guard, Interest, PendingCall, Plugin, PromptDraft, ResultCx, RunCx,
-    StreamCx, TurnCx, TurnSummary,
+pub use events::{
+    AGENT_EVENTS, Blocked, Edit, Message, Moment, Prompt, Run, RunEnd, RunStart, StreamListeners,
+    ToolArguments, ToolProgress, ToolRequest, ToolResult, TranscriptListeners, TurnEnd, TurnStart,
 };
-pub use registry::{Plugins, Tools};
+pub use plugin::{StreamCx, TurnSummary};
+pub use registry::Tools;
+pub use sink::{Silent, Sink};
 pub use stream::{Backend, BoxStream, DynAssistantStream, Live, StreamFn, live_stream_fn};
 pub use tool::{
     BoxFuture, Execution, FnTool, ProgressSink, ToolCall, ToolContent, ToolCx, ToolHandler,
     ToolOutcome, tool_fn,
 };
+pub use toolbox::Toolbox;

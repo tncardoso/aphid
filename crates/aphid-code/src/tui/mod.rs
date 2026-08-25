@@ -18,6 +18,7 @@
 //! [`Msg`](msg::Msg)s, and the agent comes back when the run ends.
 
 pub mod app;
+pub mod clipboard;
 pub mod effect;
 pub mod event;
 pub mod input;
@@ -27,12 +28,14 @@ pub mod msg;
 pub mod render;
 pub mod runtime;
 pub mod scrollback;
+pub mod select;
 pub mod status;
 pub mod surface;
 
 pub use app::{App, run};
 pub use effect::Effect;
-pub use event::{UiConfirmer, UiPlugin, UiSink};
+pub use event::{UiComponent, UiConfirmer, UiSink};
 pub use msg::Msg;
 pub use scrollback::Scrollback;
+pub use select::{Selection, Spot};
 pub use status::Status;

@@ -33,6 +33,10 @@ pub struct Status {
     pub queued: bool,
     /// Bytes streamed from the provider, for the live download speed.
     pub download: DownloadSpeed,
+    /// A word about what just happened, shown until the next thing the user
+    /// does. No clock behind it: a hint that expired on its own would need a
+    /// timer, and this line is drawn from the model alone.
+    pub hint: Option<String>,
 }
 
 impl Status {
@@ -126,6 +130,12 @@ impl Status {
         }
         if self.queued {
             spans.push(Span::styled("  (queued)", Style::default().fg(Color::Cyan)));
+        }
+        if let Some(hint) = &self.hint {
+            spans.push(Span::styled(
+                format!("  {hint}"),
+                Style::default().fg(Color::Green),
+            ));
         }
 
         Line::from(spans)

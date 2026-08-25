@@ -2,6 +2,8 @@
 //! and /todo-status to open or close the right-hand todo panel.
 //! The list lives in memory for this session only.
 
+const inject = ["tools", "commands", "surfaces"];
+
 /// The prompt prefix for todo mode.
 ///
 /// A function and not a constant, because a command body is called without the
@@ -60,121 +62,123 @@ fn trimmed(text) {
     out
 }
 
-register_surface(#{
-    name: "todo",
-    placement: #{ kind: "side", side: "right" },
-    init: || #{ items: [], next: 1, open: false },
-    view: |s| {
-        if !s.open { return (); }
-        #{ type: "text", text: format_todos(s.items) }
-    }
-});
-
-register_command(#{
-    name: "todo",
-    description: "Run a prompt in todo mode (uses the todo tools).",
-    run: |args| {
-        let text = trimmed(args);
-        if text == "" {
-            return notice("usage: /todo <prompt>");
+fn apply(ctx) {
+    surface(#{
+        name: "todo",
+        placement: #{ kind: "side", side: "right" },
+        init: || #{ items: [], next: 1, open: false },
+        view: |s| {
+            if !s.open { return (); }
+            #{ type: "text", text: format_todos(s.items) }
         }
-        prompt(todo_mode() + "\n\n" + text);
-        notice("todo mode: " + text)
-    }
-});
+    });
 
-register_command(#{
-    name: "todo-status",
-    description: "Open or close the todo panel. /todo-status on|off.",
-    run: |args| {
-        let arg = trimmed(args);
-        if arg == "on" || arg == "off" || arg == "" {
-            let s = store();
-            if arg == "on" {
-                s.open = true;
-            } else if arg == "off" {
-                s.open = false;
+    command(#{
+        name: "todo",
+        description: "Run a prompt in todo mode (uses the todo tools).",
+        run: |args| {
+            let text = trimmed(args);
+            if text == "" {
+                return notice("usage: /todo <prompt>");
+            }
+            prompt(todo_mode() + "\n\n" + text);
+            notice("todo mode: " + text)
+        }
+    });
+
+    command(#{
+        name: "todo-status",
+        description: "Open or close the todo panel. /todo-status on|off.",
+        run: |args| {
+            let arg = trimmed(args);
+            if arg == "on" || arg == "off" || arg == "" {
+                let s = store();
+                if arg == "on" {
+                    s.open = true;
+                } else if arg == "off" {
+                    s.open = false;
+                } else {
+                    s.open = !s.open;
+                }
+                remember(s);
+                notice("todo panel " + if s.open { "on" } else { "off" })
             } else {
-                s.open = !s.open;
+                notice("usage: /todo-status on|off")
             }
+        }
+    });
+
+    tool(#{
+        name: "todo_list",
+        description: "List the current todos as markdown, pending first.",
+        parameters: #{ type: "object", properties: #{}, required: [] },
+        execute: |args| { format_todos(store().items) }
+    });
+
+    tool(#{
+        name: "todo_add",
+        description: "Add a task to the todo list. Returns the updated list.",
+        parameters: #{
+            type: "object",
+            properties: #{ task: #{ type: "string", description: "The task to add." } },
+            required: ["task"]
+        },
+        execute: |args| {
+            let task = args.task;
+            if task == "" {
+                return #{ content: "task is empty", is_error: true };
+            }
+
+            let s = store();
+            let id = s.next;
+            s.items.push(#{ id: id, task: task, done: false });
+            s.next = id + 1;
             remember(s);
-            notice("todo panel " + if s.open { "on" } else { "off" })
-        } else {
-            notice("usage: /todo-status on|off")
+
+            "Added task " + id + ". " + task + ".\n\n" + format_todos(s.items)
         }
-    }
-});
+    });
 
-register_tool(#{
-    name: "todo_list",
-    description: "List the current todos as markdown, pending first.",
-    parameters: #{ type: "object", properties: #{}, required: [] },
-    execute: |args| { format_todos(store().items) }
-});
-
-register_tool(#{
-    name: "todo_add",
-    description: "Add a task to the todo list. Returns the updated list.",
-    parameters: #{
-        type: "object",
-        properties: #{ task: #{ type: "string", description: "The task to add." } },
-        required: ["task"]
-    },
-    execute: |args| {
-        let task = args.task;
-        if task == "" {
-            return #{ content: "task is empty", is_error: true };
+    tool(#{
+        name: "todo_clear",
+        description: "Remove every pending and done task from the todo list. Returns the updated list.",
+        parameters: #{ type: "object", properties: #{}, required: [] },
+        execute: |args| {
+            let s = store();
+            s.items = [];
+            s.next = 1;
+            remember(s);
+            "Cleared the todo list.\n\n" + format_todos(s.items)
         }
+    });
 
-        let s = store();
-        let id = s.next;
-        s.items.push(#{ id: id, task: task, done: false });
-        s.next = id + 1;
-        remember(s);
-
-        "Added task " + id + ". " + task + ".\n\n" + format_todos(s.items)
-    }
-});
-
-register_tool(#{
-    name: "todo_clear",
-    description: "Remove every pending and done task from the todo list. Returns the updated list.",
-    parameters: #{ type: "object", properties: #{}, required: [] },
-    execute: |args| {
-        let s = store();
-        s.items = [];
-        s.next = 1;
-        remember(s);
-        "Cleared the todo list.\n\n" + format_todos(s.items)
-    }
-});
-
-register_tool(#{
-    name: "todo_done",
-    description: "Mark a task as done by id. Returns the updated list.",
-    parameters: #{
-        type: "object",
-        properties: #{ id: #{ type: "integer", description: "The task id to mark done." } },
-        required: ["id"]
-    },
-    execute: |args| {
-        let target = args.id;
-        let s = store();
-        let found = false;
-        let i = 0;
-        while i < s.items.len() {
-            if s.items[i].id == target {
-                s.items[i].done = true;
-                found = true;
+    tool(#{
+        name: "todo_done",
+        description: "Mark a task as done by id. Returns the updated list.",
+        parameters: #{
+            type: "object",
+            properties: #{ id: #{ type: "integer", description: "The task id to mark done." } },
+            required: ["id"]
+        },
+        execute: |args| {
+            let target = args.id;
+            let s = store();
+            let found = false;
+            let i = 0;
+            while i < s.items.len() {
+                if s.items[i].id == target {
+                    s.items[i].done = true;
+                    found = true;
+                }
+                i += 1;
             }
-            i += 1;
-        }
 
-        if !found {
-            return #{ content: "no task with id " + target, is_error: true };
-        }
+            if !found {
+                return #{ content: "no task with id " + target, is_error: true };
+            }
 
-        remember(s);
-        "Marked task " + target + " done.\n\n" + format_todos(s.items)
-    }
-});
+            remember(s);
+            "Marked task " + target + " done.\n\n" + format_todos(s.items)
+        }
+    });
+}

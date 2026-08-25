@@ -80,8 +80,8 @@ with different contents, so step 4 is the step to do carefully.
 ## The order of the crates
 
 `cargo publish --workspace` reads the graph and sends each crate after the
-crates it needs. The order is `aphid-core`, `aphid-agent`, `aphid-plugin`,
-`aphid-code`, `aphid-nostr`, `aphid-colony`, `aphid-alate`, `aphid-ai`. Each
+crates it needs. The order is `aphid-core`, `aphid-agent`, `aphid-code`,
+`aphid-nostr`, `aphid-colony`, `aphid-alate`, `aphid-ai`. Each
 crate of the workspace names a version as well as a path in
 `[workspace.dependencies]`, because a path alone is enough to build and not
 enough to publish.

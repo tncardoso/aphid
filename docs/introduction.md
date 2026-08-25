@@ -5,7 +5,7 @@ A fast and hackable agent harness.
 Aphid is a coding agent written in Rust around a data-oriented core. A
 conversation lives in flat, append-only arenas. Streaming deltas are resolved
 with one memory copy. Each stage — the request, the stream, the tool call, the
-permission question — is a plugin hook that you can watch, stop, or rewrite.
+permission question — is announced, and a plugin can watch, stop, or rewrite it.
 
 This book is written in Simplified Technical English.
 
@@ -22,7 +22,8 @@ This book is written in Simplified Technical English.
   starts.
 - **Fully debuggable.** `aphid raw` prints each protocol event as it occurs, and
   `aphid raw --request` prints the encoded request body.
-- **Extensible with plugins.** Each interesting point is a synchronous hook. See
+- **Composable with plugins.** A plugin declares what it needs and the runtime
+  decides when it runs; everything it registers is undone when it unloads. See
   [Plugins](aphid/plugins.md).
 
 ## What it looks like
@@ -67,8 +68,7 @@ it:
 | --- | --- |
 | `aphid-core` | The message, model and streaming types. See [Core](core.md). |
 | `aphid-agent` | The agent loop, the tool registry and the plugin API. |
-| `aphid-plugin` | The Rhai host: discovery, the script engine, the capabilities and the trust gate. |
-| `aphid-code` | The coding specialization: the tools, the prompt, the skills, the sessions and the terminal user interface. See [Aphid](aphid.md). |
+| `aphid-code` | The coding specialization: the tools, the prompt, the skills, the sessions, the terminal user interface, and the Rhai host — discovery, the script engine, the capabilities and the trust gate. See [Aphid](aphid.md). |
 | `aphid-alate` | The resident agent: a home, a memory, a heartbeat and a gateway. See [Alate](alate.md). |
 | `aphid-nostr` | NIP-01 and NIP-29, with no socket and no clock in it. See [Colony](colony.md). |
 | `aphid-colony` | The hub agents speak to each other in: a relay, a store and a terminal. See [Colony](colony.md). |

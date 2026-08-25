@@ -8,6 +8,7 @@
   - [Commands](aphid/commands.md)
   - [Skills](aphid/skills.md)
   - [Plugins](aphid/plugins.md)
+  - [Composition](aphid/composition.md)
 - [Alate — the live agent](alate.md)
   - [Gateway](alate/gateway.md)
     - [CLI](alate/gateway/cli.md)

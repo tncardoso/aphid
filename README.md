@@ -11,7 +11,7 @@ A fast and hackable agent harness.
 
 Aphid is a coding agent built in Rust around a data-oriented core: conversations
 lives in flat, append-only arenas, streaming deltas are resolved in a single
-copy. Every stage have a plugin hook you can observe, block, or rewrite.
+copy. Every stage is announced, and a plugin can observe, block, or rewrite it.
 Aphid is as minimal as Pi with fast startup and response times.
 
 ## Aphid

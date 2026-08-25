@@ -5,19 +5,42 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use aphid_agent::Agent;
+use aphid_agent::rt::{Component, Composition, Context, Uid};
 use aphid_agent::testing::{Turn, scripted};
 use aphid_agent::{
-    Agent, Cx, Flow, Guard, Interest, PendingCall, Plugin, PromptDraft, ResultCx, StreamCx, ToolCx,
-    ToolHandler, ToolOutcome, TurnSummary, tool_fn,
+    Blocked, Moment, Prompt, ToolContent, ToolCx, ToolHandler, ToolOutcome, ToolProgress,
+    ToolRequest, ToolResult, TurnEnd, TurnStart, tool_fn,
 };
 use aphid_core::{
-    ContentInput, ContentRef, Event, MessageId, MessageRef, Model, Role, StopReason,
-    providers::deepseek,
+    ContentInput, ContentRef, Event, MessageRef, Model, Role, StopReason, providers::deepseek,
 };
 use serde::Deserialize;
 
 fn model() -> Model {
     deepseek::flash()
+}
+
+/// Something to hang listeners on.
+///
+/// Listeners are filed under the fiber that registered them, so that unloading
+/// it takes them with it. Nothing here is ever unloaded — what these tests want
+/// from a component is only its identity.
+struct Anchor;
+
+impl Component for Anchor {
+    fn name(&self) -> &str {
+        "anchor"
+    }
+    fn apply(&self, _ctx: &Context) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+async fn composed() -> (Composition, Uid) {
+    let composition = Composition::new();
+    let owner = composition.plug(Anchor).await.expect("the anchor mounts");
+    (composition, owner)
 }
 
 #[derive(Deserialize)]
@@ -166,25 +189,6 @@ async fn commits_results_in_source_order_not_completion_order() {
     );
 }
 
-struct Blocker;
-
-impl Plugin for Blocker {
-    fn name(&self) -> &str {
-        "blocker"
-    }
-
-    fn interests(&self) -> Interest {
-        Interest::TOOL_CALL
-    }
-
-    fn on_tool_call(&self, call: &mut PendingCall<'_>) -> Guard {
-        if call.name() == "echo" {
-            return Guard::block("not allowed");
-        }
-        Guard::Allow
-    }
-}
-
 #[tokio::test]
 async fn a_plugin_can_block_a_tool_call() {
     let ran = Arc::new(AtomicUsize::new(0));
@@ -208,10 +212,17 @@ async fn a_plugin_can_block_a_tool_call() {
         Turn::text("understood"),
     ]);
 
+    let (composition, owner) = composed().await;
+    composition.bus.on::<ToolRequest>(owner, |request| {
+        if request.name == "echo" {
+            request.refuse(Blocked::new("not allowed"));
+        }
+    });
+
     let mut agent = Agent::builder()
         .model(model())
         .tool(guarded)
-        .plugin(Blocker)
+        .compose(&composition)
         .stream_fn(backend)
         .build();
 
@@ -228,24 +239,6 @@ async fn a_plugin_can_block_a_tool_call() {
     assert_eq!(tool_result_texts(&agent), vec!["not allowed".to_owned()]);
 }
 
-struct Patcher(&'static str);
-
-impl Plugin for Patcher {
-    fn name(&self) -> &str {
-        "patcher"
-    }
-
-    fn interests(&self) -> Interest {
-        Interest::TOOL_CALL
-    }
-
-    fn on_tool_call(&self, call: &mut PendingCall<'_>) -> Guard {
-        let patched = format!(r#"{{"value":"{}{}"}}"#, call.arguments().len(), self.0);
-        call.set_arguments(patched);
-        Guard::Allow
-    }
-}
-
 #[tokio::test]
 async fn plugins_patch_arguments_in_order() {
     let (backend, _script) = scripted([
@@ -253,38 +246,25 @@ async fn plugins_patch_arguments_in_order() {
         Turn::text("done"),
     ]);
 
+    let (composition, owner) = composed().await;
+    for suffix in ["-first", "-second"] {
+        composition.bus.on::<ToolRequest>(owner, move |request| {
+            request.arguments = format!(r#"{{"value":"{}{suffix}"}}"#, request.arguments.len());
+        });
+    }
+
     let mut agent = Agent::builder()
         .model(model())
         .tool(echo("echo"))
-        .plugin(Patcher("-first"))
-        .plugin(Patcher("-second"))
+        .compose(&composition)
         .stream_fn(backend)
         .build();
 
     agent.prompt("go").await;
 
-    // The first plugin rewrote `{"value":"x"}` (15 bytes) to
+    // The first listener rewrote `{"value":"x"}` (15 bytes) to
     // `{"value":"15-first"}` (20 bytes); the second saw that and rewrote again.
     assert_eq!(tool_result_texts(&agent), vec!["20-second".to_owned()]);
-}
-
-struct Suffix(&'static str);
-
-impl Plugin for Suffix {
-    fn name(&self) -> &str {
-        "suffix"
-    }
-
-    fn interests(&self) -> Interest {
-        Interest::TOOL_RESULT
-    }
-
-    fn on_tool_result(&self, outcome: &mut ToolOutcome, cx: &ResultCx<'_>) {
-        assert_eq!(cx.name(), "echo");
-        let text = format!("{}{}", outcome.text_content(), self.0);
-        outcome.content = vec![aphid_agent::ToolContent::Text(text)];
-        outcome.details = Some(serde_json::json!({ "patched_by": self.0 }));
-    }
 }
 
 #[tokio::test]
@@ -294,11 +274,20 @@ async fn plugins_chain_when_patching_results() {
         Turn::text("done"),
     ]);
 
+    let (composition, owner) = composed().await;
+    for suffix in ["-one", "-two"] {
+        composition.bus.on::<ToolResult>(owner, move |result| {
+            assert_eq!(result.name, "echo");
+            let text = format!("{}{suffix}", text_of_result(&result.content));
+            result.content = vec![ToolContent::Text(text)];
+            result.details = Some(serde_json::json!({ "patched_by": suffix }));
+        });
+    }
+
     let mut agent = Agent::builder()
         .model(model())
         .tool(echo("echo"))
-        .plugin(Suffix("-one"))
-        .plugin(Suffix("-two"))
+        .compose(&composition)
         .stream_fn(backend)
         .build();
 
@@ -311,12 +300,12 @@ async fn plugins_chain_when_patching_results() {
         .iter()
         .find_map(|message| message.tool_result())
         .expect("meta");
-    // The later plugin's details replace the earlier one's; nothing deep-merges.
+    // The later listener's details replace the earlier one's; nothing deep-merges.
     assert_eq!(
         meta.details,
         Some(serde_json::json!({ "patched_by": "-two" }))
     );
-    // A field no plugin touched keeps the handler's value.
+    // A field no listener touched keeps the handler's value.
     assert!(!meta.is_error);
 }
 
@@ -360,22 +349,6 @@ async fn max_turns_caps_a_runaway_loop() {
     assert_eq!(script.request_count(), 3);
 }
 
-struct StopAfterFirst;
-
-impl Plugin for StopAfterFirst {
-    fn name(&self) -> &str {
-        "stop-after-first"
-    }
-
-    fn interests(&self) -> Interest {
-        Interest::TURN_END
-    }
-
-    fn on_turn_end(&self, _cx: &mut Cx<'_>, _turn: &TurnSummary) -> Flow {
-        Flow::Stop
-    }
-}
-
 #[tokio::test]
 async fn a_plugin_can_stop_the_run() {
     let (backend, script) = scripted([
@@ -383,10 +356,13 @@ async fn a_plugin_can_stop_the_run() {
         Turn::text("never reached"),
     ]);
 
+    let (composition, owner) = composed().await;
+    composition.bus.on::<TurnEnd>(owner, |end| end.stop = true);
+
     let mut agent = Agent::builder()
         .model(model())
         .tool(echo("echo"))
-        .plugin(StopAfterFirst)
+        .compose(&composition)
         .stream_fn(backend)
         .build();
 
@@ -445,23 +421,6 @@ async fn terminate_needs_the_whole_batch_to_agree() {
     assert_eq!(script.request_count(), 1);
 }
 
-struct CancelOnFirstTurn;
-
-impl Plugin for CancelOnFirstTurn {
-    fn name(&self) -> &str {
-        "canceller"
-    }
-
-    fn interests(&self) -> Interest {
-        Interest::TURN_END
-    }
-
-    fn on_turn_end(&self, cx: &mut Cx<'_>, _turn: &TurnSummary) -> Flow {
-        cx.cancel();
-        Flow::Continue
-    }
-}
-
 #[tokio::test]
 async fn cancelling_ends_the_run_as_aborted() {
     let (backend, script) = scripted([
@@ -469,10 +428,13 @@ async fn cancelling_ends_the_run_as_aborted() {
         Turn::text("never reached"),
     ]);
 
+    let (composition, owner) = composed().await;
+    composition.bus.on::<TurnEnd>(owner, |end| end.run.cancel());
+
     let mut agent = Agent::builder()
         .model(model())
         .tool(echo("echo"))
-        .plugin(CancelOnFirstTurn)
+        .compose(&composition)
         .stream_fn(backend)
         .build();
 
@@ -500,66 +462,65 @@ async fn a_provider_failure_ends_the_run_without_panicking() {
     assert_eq!(script.request_count(), 1);
 }
 
-struct Counter {
-    interests: Interest,
-    events: Arc<AtomicUsize>,
-}
-
-impl Plugin for Counter {
-    fn name(&self) -> &str {
-        "counter"
-    }
-
-    fn interests(&self) -> Interest {
-        self.interests
-    }
-
-    fn on_event(&self, _event: &Event, _cx: &StreamCx<'_>) {
-        self.events.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
 #[tokio::test]
-async fn interests_gate_the_dispatch() {
-    let subscribed = Arc::new(AtomicUsize::new(0));
-    let unsubscribed = Arc::new(AtomicUsize::new(0));
-
+async fn only_what_subscribed_is_dispatched_to() {
+    let counted = Arc::new(AtomicUsize::new(0));
     let (backend, _script) = scripted([Turn::text("hello")]);
+
+    let (composition, owner) = composed().await;
+    let events = Arc::clone(&counted);
+    composition.stream.subscribe(owner, move |_event, _cx| {
+        events.fetch_add(1, Ordering::Relaxed);
+    });
 
     let mut agent = Agent::builder()
         .model(model())
-        .plugin(Counter {
-            interests: Interest::EVENT,
-            events: Arc::clone(&subscribed),
-        })
-        .plugin(Counter {
-            interests: Interest::empty(),
-            events: Arc::clone(&unsubscribed),
-        })
+        .compose(&composition)
         .stream_fn(backend)
         .build();
 
     agent.prompt("go").await;
 
     // Start, BlockStart, Delta, BlockEnd, Done.
-    assert_eq!(subscribed.load(Ordering::Relaxed), 5);
-    assert_eq!(unsubscribed.load(Ordering::Relaxed), 0);
+    assert_eq!(counted.load(Ordering::Relaxed), 5);
 }
 
 #[tokio::test]
-async fn on_event_can_resolve_delta_spans() {
+async fn a_response_nobody_watches_dispatches_nothing() {
+    let (backend, _script) = scripted([Turn::text("hello")]);
+    let (composition, _owner) = composed().await;
+
+    // Nothing subscribed, so the loop can skip the whole per-token path — and
+    // says so before it streams a single one.
+    assert!(!composition.stream.is_observed());
+
+    let mut agent = Agent::builder()
+        .model(model())
+        .compose(&composition)
+        .stream_fn(backend)
+        .build();
+
+    let outcome = agent.prompt("go").await;
+    assert_eq!(outcome.turns, 1);
+}
+
+#[tokio::test]
+async fn a_stream_listener_can_resolve_delta_spans() {
     let text = Arc::new(Mutex::new(String::new()));
     let sink = Arc::clone(&text);
 
     let (backend, _script) = scripted([Turn::text("streamed answer")]);
 
+    let (composition, owner) = composed().await;
+    composition.stream.subscribe(owner, move |event, cx| {
+        if let Event::Delta { span, .. } = event {
+            sink.lock().expect("lock").push_str(cx.text(*span));
+        }
+    });
+
     let mut agent = Agent::builder()
         .model(model())
-        .on_event(move |event, cx| {
-            if let Event::Delta { span, .. } = event {
-                sink.lock().expect("lock").push_str(cx.text(*span));
-            }
-        })
+        .compose(&composition)
         .stream_fn(backend)
         .build();
 
@@ -568,34 +529,44 @@ async fn on_event_can_resolve_delta_spans() {
     assert_eq!(text.lock().expect("lock").as_str(), "streamed answer");
 }
 
+/// Contributes a tool of its own, shadowing a built-in of the same name.
 struct ToolProvider;
 
-impl Plugin for ToolProvider {
+impl Component for ToolProvider {
     fn name(&self) -> &str {
         "tool-provider"
     }
 
-    fn tools(&self) -> Vec<Arc<dyn ToolHandler>> {
-        vec![Arc::new(tool_fn(
-            "echo",
-            "A plugin's own echo, shadowing the built-in.",
-            schema(),
-            |args: Echo, _cx: ToolCx| async move { ToolOutcome::text(format!("plugin:{}", args.value)) },
-        ))]
+    fn apply(&self, _ctx: &Context) -> Result<(), String> {
+        Ok(())
     }
 }
 
 #[tokio::test]
-async fn a_plugin_tool_shadows_one_of_the_same_name() {
+async fn a_component_tool_shadows_one_of_the_same_name() {
     let (backend, _script) = scripted([
         Turn::call("call_1", "echo", r#"{"value":"pong"}"#),
         Turn::text("done"),
     ]);
 
+    let composition = Composition::new();
+    let owner = composition.plug(ToolProvider).await.expect("mounts");
+    composition.tools.register(
+        owner,
+        Arc::new(tool_fn(
+            "echo",
+            "A component's own echo, shadowing the built-in.",
+            schema(),
+            |args: Echo, _cx: ToolCx| async move {
+                ToolOutcome::text(format!("component:{}", args.value))
+            },
+        )),
+    );
+
     let mut agent = Agent::builder()
         .model(model())
         .tool(echo("echo"))
-        .plugin(ToolProvider)
+        .compose(&composition)
         .stream_fn(backend)
         .build();
 
@@ -603,33 +574,22 @@ async fn a_plugin_tool_shadows_one_of_the_same_name() {
 
     agent.prompt("go").await;
 
-    assert_eq!(tool_result_texts(&agent), vec!["plugin:pong".to_owned()]);
-}
-
-struct ContextInjector;
-
-impl Plugin for ContextInjector {
-    fn name(&self) -> &str {
-        "context-injector"
-    }
-
-    fn interests(&self) -> Interest {
-        Interest::TURN_START
-    }
-
-    fn on_turn_start(&self, cx: &mut Cx<'_>) {
-        cx.push_system_note("remember: be brief");
-    }
+    assert_eq!(tool_result_texts(&agent), vec!["component:pong".to_owned()]);
 }
 
 #[tokio::test]
-async fn a_plugin_can_add_context_before_a_request() {
+async fn a_listener_can_add_context_before_a_request() {
     let (backend, script) = scripted([Turn::text("brief")]);
+
+    let (composition, owner) = composed().await;
+    composition
+        .bus
+        .on::<TurnStart>(owner, |start| start.0.note("remember: be brief"));
 
     let mut agent = Agent::builder()
         .model(model())
         .system("base prompt")
-        .plugin(ContextInjector)
+        .compose(&composition)
         .stream_fn(backend)
         .build();
 
@@ -701,29 +661,8 @@ fn chatty(name: &'static str) -> impl ToolHandler {
     )
 }
 
-struct ProgressWatcher {
-    chunks: Arc<Mutex<Vec<String>>>,
-}
-
-impl Plugin for ProgressWatcher {
-    fn name(&self) -> &str {
-        "progress-watcher"
-    }
-
-    fn interests(&self) -> Interest {
-        Interest::TOOL_PROGRESS
-    }
-
-    fn on_tool_progress(&self, call_id: &str, tool: &str, chunk: &str) {
-        self.chunks
-            .lock()
-            .expect("lock")
-            .push(format!("{call_id}/{tool}/{chunk}"));
-    }
-}
-
 #[tokio::test]
-async fn tool_progress_reaches_a_subscribed_plugin_in_order() {
+async fn tool_progress_reaches_a_listener_in_order() {
     let chunks = Arc::new(Mutex::new(Vec::new()));
 
     let (backend, _script) = scripted([
@@ -731,12 +670,19 @@ async fn tool_progress_reaches_a_subscribed_plugin_in_order() {
         Turn::text("done"),
     ]);
 
+    let (composition, owner) = composed().await;
+    let seen = Arc::clone(&chunks);
+    composition.bus.on::<ToolProgress>(owner, move |progress| {
+        seen.lock().expect("lock").push(format!(
+            "{}/{}/{}",
+            progress.call_id, progress.tool, progress.chunk
+        ));
+    });
+
     let mut agent = Agent::builder()
         .model(model())
         .tool(chatty("chatty"))
-        .plugin(ProgressWatcher {
-            chunks: Arc::clone(&chunks),
-        })
+        .compose(&composition)
         .stream_fn(backend)
         .build();
 
@@ -752,18 +698,6 @@ async fn tool_progress_reaches_a_subscribed_plugin_in_order() {
     );
     // The final result is still the authoritative output.
     assert_eq!(tool_result_texts(&agent), vec!["a,b,c".to_owned()]);
-}
-
-struct SilentProgress;
-
-impl Plugin for SilentProgress {
-    fn name(&self) -> &str {
-        "silent"
-    }
-
-    fn interests(&self) -> Interest {
-        Interest::empty()
-    }
 }
 
 #[tokio::test]
@@ -789,16 +723,31 @@ async fn a_tool_can_tell_when_nobody_is_watching_progress() {
         Turn::text("done"),
     ]);
 
+    // A composition with a component on it but nothing listening for progress.
+    let (composition, _owner) = composed().await;
+
     let mut agent = Agent::builder()
         .model(model())
         .tool(probe)
-        .plugin(SilentProgress)
+        .compose(&composition)
         .stream_fn(backend)
         .build();
 
     agent.prompt("go").await;
 
     assert_eq!(observed.lock().expect("lock").clone(), vec![false]);
+}
+
+/// The concatenated text of a tool result.
+fn text_of_result(content: &[ToolContent]) -> String {
+    content
+        .iter()
+        .filter_map(|block| match block {
+            ToolContent::Text(text) => Some(text.as_str()),
+            ToolContent::Image { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 /// The concatenated text of a message.
@@ -812,34 +761,27 @@ fn text_of(message: MessageRef<'_>) -> String {
         .collect()
 }
 
-/// Rewrites every prompt, and turns away one of them.
-struct Gatekeeper;
-
-impl Plugin for Gatekeeper {
-    fn name(&self) -> &str {
-        "gatekeeper"
-    }
-
-    fn interests(&self) -> Interest {
-        Interest::PROMPT
-    }
-
-    fn on_prompt(&self, draft: &mut PromptDraft<'_>) {
-        if draft.text().contains("secret") {
-            draft.reject("that one is off limits");
+/// A composition that rewrites every prompt, and turns away one of them.
+async fn gatekept() -> Composition {
+    let (composition, owner) = composed().await;
+    composition.bus.on::<Prompt>(owner, |prompt| {
+        if prompt.text.contains("secret") {
+            prompt.reject("that one is off limits");
             return;
         }
-        draft.set_text(format!("{} (reviewed)", draft.text()));
-    }
+        prompt.text = format!("{} (reviewed)", prompt.text);
+    });
+    composition
 }
 
 #[tokio::test]
 async fn a_prompt_hook_rewrites_before_the_transcript_sees_it() {
     let (backend, script) = scripted([Turn::text("done")]);
 
+    let composition = gatekept().await;
     let mut agent = Agent::builder()
         .model(model())
-        .plugin(Gatekeeper)
+        .compose(&composition)
         .stream_fn(backend)
         .build();
 
@@ -855,9 +797,10 @@ async fn a_prompt_hook_rewrites_before_the_transcript_sees_it() {
 async fn a_rejected_prompt_appends_nothing_and_sends_nothing() {
     let (backend, script) = scripted([Turn::text("never reached")]);
 
+    let composition = gatekept().await;
     let mut agent = Agent::builder()
         .model(model())
-        .plugin(Gatekeeper)
+        .compose(&composition)
         .stream_fn(backend)
         .build();
 
@@ -874,9 +817,10 @@ async fn a_rejected_prompt_appends_nothing_and_sends_nothing() {
 async fn rewriting_mixed_content_keeps_the_attachments() {
     let (backend, _script) = scripted([Turn::text("done")]);
 
+    let composition = gatekept().await;
     let mut agent = Agent::builder()
         .model(model())
-        .plugin(Gatekeeper)
+        .compose(&composition)
         .stream_fn(backend)
         .build();
 
@@ -899,35 +843,31 @@ async fn rewriting_mixed_content_keeps_the_attachments() {
     assert_eq!(images, 1, "the image survived the rewrite");
 }
 
-/// Records the assistant message of every turn.
-struct Recorder {
-    seen: Arc<Mutex<Vec<MessageId>>>,
-}
-
-impl Plugin for Recorder {
-    fn name(&self) -> &str {
-        "recorder"
-    }
-
-    fn interests(&self) -> Interest {
-        Interest::MESSAGE
-    }
-
-    fn on_message(&self, cx: &mut Cx<'_>, message: MessageId) {
-        // The message is committed by the time this fires, so it is readable.
-        assert_eq!(cx.transcript().message(message).role(), Role::Assistant);
-        self.seen.lock().expect("lock").push(message);
-    }
-}
-
 #[tokio::test]
-async fn a_message_hook_sees_every_committed_response() {
+async fn a_transcript_listener_sees_every_committed_response() {
     let seen = Arc::new(Mutex::new(Vec::new()));
 
     let (backend, _script) = scripted([
         Turn::call("call_1", "echo", r#"{"value":"x"}"#),
         Turn::text("done"),
     ]);
+
+    let (composition, owner) = composed().await;
+    let recorded = Arc::clone(&seen);
+    // Reading the transcript is what this needs, so it listens where transcript
+    // readers listen rather than on the bus.
+    composition
+        .transcript
+        .subscribe(owner, move |moment, transcript, _run| {
+            if moment != Moment::Message {
+                return;
+            }
+            let last = transcript.len().saturating_sub(1);
+            let id = transcript.id_at(last).expect("a committed message");
+            // Committed by the time this fires, so it is readable.
+            assert_eq!(transcript.message(id).role(), Role::Assistant);
+            recorded.lock().expect("lock").push(id);
+        });
 
     let mut agent = Agent::builder()
         .model(model())
@@ -937,9 +877,7 @@ async fn a_message_hook_sees_every_committed_response() {
             schema(),
             |args: Echo, _cx: ToolCx| async move { ToolOutcome::text(args.value) },
         ))
-        .plugin(Recorder {
-            seen: Arc::clone(&seen),
-        })
+        .compose(&composition)
         .stream_fn(backend)
         .build();
 

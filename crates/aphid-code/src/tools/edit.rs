@@ -7,9 +7,11 @@
 
 use std::sync::Arc;
 
+use aphid_agent::rt::Bus;
+
+use crate::events::{Change, FileChange};
 use aphid_agent::{ToolHandler, ToolOutcome, tool_fn};
 use aphid_core::Json;
-use aphid_plugin::{Change, PluginHost};
 use serde::Deserialize;
 
 use super::paths::Workspace;
@@ -61,12 +63,12 @@ pub const DESCRIPTION: &str = "Edit a file by replacing exact spans of text. Eac
      part of the file is changed.";
 
 #[must_use]
-pub fn tool(workspace: &Workspace, host: Option<Arc<PluginHost>>) -> impl ToolHandler {
+pub fn tool(workspace: &Workspace, bus: Option<Arc<Bus>>) -> impl ToolHandler {
     let workspace = workspace.clone();
     tool_fn(NAME, DESCRIPTION, schema(), move |params: Params, _cx| {
         let workspace = workspace.clone();
-        let host = host.clone();
-        async move { execute(&workspace, &params, host.as_deref()).await }
+        let bus = bus.clone();
+        async move { execute(&workspace, &params, bus.as_deref()).await }
     })
 }
 
@@ -78,7 +80,7 @@ struct Applied {
     new: String,
 }
 
-async fn execute(workspace: &Workspace, params: &Params, host: Option<&PluginHost>) -> ToolOutcome {
+async fn execute(workspace: &Workspace, params: &Params, bus: Option<&Bus>) -> ToolOutcome {
     let path = match workspace.resolve(&params.path) {
         Ok(path) => path,
         Err(error) => return ToolOutcome::error(error),
@@ -145,8 +147,13 @@ async fn execute(workspace: &Workspace, params: &Params, host: Option<&PluginHos
         return ToolOutcome::error(format!("could not write {}: {error}", params.path));
     }
 
-    if let Some(host) = host {
-        host.file_change(&path, Change::Edit, Some(&original), &working);
+    if let Some(bus) = bus {
+        bus.emit(&mut FileChange {
+            path: path.clone(),
+            kind: Change::Edit,
+            before: Some(original.clone()),
+            after: working.clone(),
+        });
     }
 
     let relative = workspace.display(&path);

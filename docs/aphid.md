@@ -71,7 +71,8 @@ workspace. A headless run has no terminal for a question. Thus `--confirm` and
 `-p` together refuse each such command, and do not permit it quietly.
 
 A plugin can answer these questions in place of you, with the `on_permission`
-hook. Refer to [Plugins](aphid/plugins.md).
+announcement a plugin can subscribe to. Refer to [Plugins](aphid/plugins.md)
+and [Composition](aphid/composition.md).
 
 ## Invocation
 

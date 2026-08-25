@@ -1,5 +1,7 @@
 //! Chat with this session from a browser. Use /server start and /server stop.
 
+const inject = ["commands"];
+
 // How it works. A plugin is only awake inside a hook, so the server cannot live
 // here: `/server start` writes a small Python server into /tmp and starts it
 // detached, which keeps it listening between hooks. What the browser sends is
@@ -360,22 +362,7 @@ def main():
 main()
 ` }
 
-register_command(#{
-    name: "server",
-    description: "Open or close the browser chat for this session.",
-    run: |args| {
-        let action = trimmed(args);
-        if action == "start" {
-            start()
-        } else if action == "stop" {
-            stop()
-        } else if action == "" || action == "status" {
-            report()
-        } else {
-            notice("usage: /server start | stop | status")
-        }
-    }
-});
+
 
 /// A trimmed copy.
 ///
@@ -516,7 +503,7 @@ fn push(kind, text) {
 ///
 /// The inbox is only ever appended to, and this remembers how far it has read,
 /// so nothing is deleted while the server may be writing it.
-fn on_tick() {
+fn poll_inbox() {
     let memory = state();
     if memory.serving != true {
         return;
@@ -556,34 +543,71 @@ fn on_tick() {
     save_state(memory);
 }
 
-// Everything the browser is shown. `on_prompt` is the one place a message is
-// echoed, so a line typed in the terminal reaches the browser as well.
-fn on_prompt(request) {
-    push("user", request.text);
-}
+// Everything the browser is shown.
+//
+// Subscribed rather than named, so the plugin decides what it listens to. The
+// token stream is the expensive one — every delta crosses into the script — and
+// it is subscribed to on purpose, because a browser watching a reply is the
+// whole point of this plugin.
+fn apply(ctx) {
+    command(#{
+        name: "server",
+        description: "Open or close the browser chat for this session.",
+        run: |args| {
+            let action = trimmed(args);
+            if action == "start" {
+                start()
+            } else if action == "stop" {
+                stop()
+            } else if action == "" || action == "status" {
+                report()
+            } else {
+                notice("usage: /server start | stop | status")
+            }
+        }
+    });
 
-fn on_event(event) {
-    if event.kind == "delta" && event.block == "text" {
-        push("delta", event.text);
-    }
-}
+    // `agent/prompt` is the one place a message is echoed, so a line typed in
+    // the terminal reaches the browser as well.
+    on("agent/prompt", |request| {
+        push("user", request.text);
+    });
 
-fn on_tool_call(tool) {
-    push("tool", tool.name + " " + tool.arguments);
-}
+    on("agent/event", |event| {
+        if event.kind == "delta" && event.block == "text" {
+            push("delta", event.text);
+        }
+    });
 
-fn on_run_end(cx, outcome) {
-    push("end", outcome.stop);
-}
+    on("agent/tool-call", |tool| {
+        push("tool", tool.name + " " + tool.arguments);
+    });
 
-fn on_notify(text) {
-    push("notice", text);
-}
+    on("agent/run-end", |cx, outcome| {
+        push("end", outcome.stop);
+    });
 
-/// A closed session should not leave a server holding the port.
-fn on_session_end(session) {
-    let memory = state();
-    if memory.serving == true {
-        close(memory);
-    }
+    // What the user was shown in the terminal, shown in the browser too.
+    on("code/notice", |text| {
+        push("notice", text);
+    });
+
+    // The browser talks back by appending to a file; nothing pushes into a
+    // session, so this is where the plugin looks.
+    on("code/tick", || {
+        poll_inbox();
+    });
+
+    // A closed session should not leave a server holding the port.
+    //
+    // Listening for the session's end rather than relying on the plugin
+    // unloading: `effect` would be the tidier shape, but the server is started
+    // by a command long after `apply` has returned, so there is no effect to
+    // hang it on. This is the honest place for it.
+    on("code/session-end", |session| {
+        let memory = state();
+        if memory.serving == true {
+            close(memory);
+        }
+    });
 }

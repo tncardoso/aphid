@@ -63,10 +63,10 @@ impl ToolCall<'_> {
 
 /// Where a tool's partial output goes.
 ///
-/// The agent installs one that fans out to [`Plugin::on_tool_progress`]; a tool
+/// The agent installs one that fans out to [`ToolProgress`]; a tool
 /// built and called on its own gets the no-op.
 ///
-/// [`Plugin::on_tool_progress`]: crate::Plugin::on_tool_progress
+/// [`ToolProgress`]: crate::ToolProgress
 pub trait ProgressSink: Send + Sync + 'static {
     fn progress(&self, call_id: &str, tool: &str, chunk: &str);
 

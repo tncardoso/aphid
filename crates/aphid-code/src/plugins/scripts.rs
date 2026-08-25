@@ -1,6 +1,6 @@
 //! Wiring Rhai plugins into the coding harness.
 //!
-//! [`aphid_plugin`] does the loading; this module decides what a script is
+//! [`crate::scripting`] does the loading; this module decides what a script is
 //! allowed to do here, and where its `notify` output goes. The two front ends
 //! answer that question differently — the terminal UI cannot have anything
 //! written under it, and headless has no UI to write to — so each supplies its
@@ -9,8 +9,12 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use aphid_plugin::trust::{self, Trust};
-use aphid_plugin::{Capabilities, Diagnostic, Permission, PluginFile, PluginHost, Sink};
+use crate::scripting::trust::{self, Trust};
+use aphid_agent::Sink;
+use aphid_agent::rt::Bus;
+
+use crate::events::{Ask, Permission};
+use crate::scripting::{Capabilities, Diagnostic, PluginFile, PluginHost};
 
 use crate::plugins::permissions::{Confirmer, Decision, Risk};
 use crate::tools::Workspace;
@@ -22,7 +26,7 @@ use crate::tools::Workspace;
 /// skills are discovered.
 #[must_use]
 pub fn discover(workspace: &Workspace, home: Option<&Path>) -> (Vec<PluginFile>, Vec<Diagnostic>) {
-    aphid_plugin::discover(workspace.root(), home)
+    crate::scripting::discover(workspace.root(), home)
 }
 
 /// What a plugin may do in a coding session.
@@ -102,47 +106,50 @@ pub fn load(
     (Arc::new(host), diagnostics)
 }
 
-/// Lets scripts answer a permission question before the user is asked.
+/// Lets a component answer a permission question before the user is asked.
 ///
-/// Wraps another [`Confirmer`] rather than replacing it, so a script decides the
-/// cases it has an opinion about and everything else still reaches whoever would
-/// have decided anyway. That also means the risk classifier keeps working: a
-/// script sees the summary and risk it produced, not the raw arguments.
-pub struct ScriptConfirmer {
-    host: Arc<PluginHost>,
+/// Wraps another [`Confirmer`] rather than replacing it, so a component decides
+/// the cases it has an opinion about and everything else still reaches whoever
+/// would have decided anyway. That also means the risk classifier keeps
+/// working: a listener sees the summary and risk it produced, not the raw
+/// arguments.
+pub struct AskFirst {
+    bus: Arc<Bus>,
     inner: Arc<dyn Confirmer>,
 }
 
-impl ScriptConfirmer {
+impl AskFirst {
     #[must_use]
-    pub fn new(host: Arc<PluginHost>, inner: Arc<dyn Confirmer>) -> Self {
-        Self { host, inner }
+    pub fn new(bus: Arc<Bus>, inner: Arc<dyn Confirmer>) -> Self {
+        Self { bus, inner }
     }
 
-    /// Wrap `inner` only when a script actually decides permissions.
+    /// Wrap `inner` unconditionally.
+    ///
+    /// Unlike the version this replaces, there is nothing to decide here: what
+    /// is subscribed changes while the session runs, so a wrapper installed
+    /// only when somebody was listening at startup would be the wrong wrapper
+    /// the moment a plugin loaded. Asking an empty bus is one lookup.
     #[must_use]
-    pub fn wrap(host: &Arc<PluginHost>, inner: Arc<dyn Confirmer>) -> Arc<dyn Confirmer> {
-        if !host.any_defines("on_permission") {
-            return inner;
-        }
-        Arc::new(Self::new(Arc::clone(host), inner))
+    pub fn wrap(bus: &Arc<Bus>, inner: Arc<dyn Confirmer>) -> Arc<dyn Confirmer> {
+        Arc::new(Self::new(Arc::clone(bus), inner))
     }
 }
 
-impl Confirmer for ScriptConfirmer {
+impl Confirmer for AskFirst {
     fn confirm(&self, tool: &str, summary: &str, risk: Risk) -> Decision {
-        let named = match risk {
-            Risk::Read => "read",
-            Risk::Mutate => "mutate",
-            Risk::Destructive => "destructive",
-        };
+        let answer = self.bus.bail(&Ask {
+            tool: tool.to_owned(),
+            summary: summary.to_owned(),
+            risk,
+        });
 
-        match self.host.permission(tool, summary, named) {
+        match answer {
             Some(Permission::Allow) => Decision::Allow,
             Some(Permission::AllowAlways) => Decision::AllowAlways,
             Some(Permission::Deny) => Decision::Deny,
-            // `Ask` and "no script had an opinion" mean the same thing here.
-            Some(Permission::Ask) | None => self.inner.confirm(tool, summary, risk),
+            // Nobody had an opinion, so whoever would have decided still does.
+            None => self.inner.confirm(tool, summary, risk),
         }
     }
 }

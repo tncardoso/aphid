@@ -11,13 +11,14 @@ mod scrollback;
 pub use scrollback::ScrollbackCache;
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Margin};
+use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 
 use crate::tui::app::{App, MAX_INPUT_ROWS};
 use crate::tui::msg::Msg;
 use crate::tui::scrollback::Viewport;
+use crate::tui::select;
 use crate::tui::surface::Hit;
 
 /// Everything a draw works out that the model does not hold.
@@ -39,6 +40,17 @@ pub struct Laid {
     pub viewport: Viewport,
     /// The clickable regions the panels drew, in the order they were drawn.
     pub hits: Vec<Hit>,
+    /// Where the transcript pane was put. A click cannot become a line and a
+    /// column without it, because the panels decide how wide the pane is.
+    pub main: Rect,
+    /// How many times the cache threw every block away.
+    pub generation: u64,
+    /// The first line the last layout moved, if it moved any.
+    pub shifted_from: Option<usize>,
+    /// The text under the selection, and only when the model asked for it.
+    /// The lines live here and nowhere else, so this is the one way they get
+    /// back to the model.
+    pub selected: Option<String>,
 }
 
 /// Paint the whole screen.
@@ -61,9 +73,27 @@ pub fn draw(app: &App, frame: &mut Frame<'_>, cache: &mut CodeCache) {
         cache
             .scrollback
             .layout(&app.scrollback, main.width as usize, main.height as usize);
-    frame.render_widget(Paragraph::new(cache.scrollback.visible(viewport)), main);
 
-    cache.laid_out = Some(Laid { viewport, hits });
+    let mut lines = cache.scrollback.visible(viewport);
+    if let Some(selection) = &app.selection {
+        select::highlight(&mut lines, viewport.top, selection.span());
+    }
+    frame.render_widget(Paragraph::new(lines), main);
+
+    cache.laid_out = Some(Laid {
+        viewport,
+        hits,
+        main,
+        generation: cache.scrollback.generation(),
+        shifted_from: cache.scrollback.shifted_from(),
+        // Read only when the mouse came up on something: the text is a fresh
+        // allocation, and every other frame must not pay for one.
+        selected: app
+            .selection
+            .as_ref()
+            .filter(|selection| selection.pending_copy)
+            .map(|selection| cache.scrollback.selected_text(selection.span())),
+    });
 
     frame.render_widget(app.input.textarea(), input_row);
 

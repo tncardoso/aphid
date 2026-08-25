@@ -16,6 +16,7 @@ include = ["/src", "/tests", "/examples", "/Cargo.toml"]
 aphid-core.workspace = true
 compact_str.workspace = true
 futures-core.workspace = true
+jsonschema = { version = "0.51.0", default-features = false }
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true

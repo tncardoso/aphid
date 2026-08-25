@@ -1,26 +1,29 @@
 //! Persisting a session as it happens.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use aphid_agent::{Cx, Flow, Interest, Plugin, RunOutcome, TurnSummary};
+use aphid_agent::TranscriptListeners;
+use aphid_agent::rt::{Component, Context, Disposer};
 
 use super::store::SessionStore;
 
 /// Appends new messages to a session file at every point the transcript grows.
 ///
-/// A plugin rather than something the app drives, because the hooks see the
-/// transcript at exactly the moments it changes — after the prompt is appended,
-/// and after each turn's results are committed. A crash therefore costs at most
-/// the turn that was in flight.
-pub struct SessionPlugin {
-    store: Mutex<SessionStore>,
+/// A component rather than something the app drives, because the moments it
+/// listens for are exactly the moments the transcript changes — after the
+/// prompt is appended, after each turn's results are committed, and at the end
+/// of the run. A crash therefore costs at most the turn that was in flight.
+pub struct SessionComponent {
+    store: Arc<Mutex<SessionStore>>,
+    listeners: Arc<TranscriptListeners>,
 }
 
-impl SessionPlugin {
+impl SessionComponent {
     #[must_use]
-    pub fn new(store: SessionStore) -> Self {
+    pub fn new(store: SessionStore, listeners: Arc<TranscriptListeners>) -> Self {
         Self {
-            store: Mutex::new(store),
+            store: Arc::new(Mutex::new(store)),
+            listeners,
         }
     }
 
@@ -37,37 +40,33 @@ impl SessionPlugin {
     pub fn id(&self) -> Option<String> {
         self.store.lock().ok().map(|store| store.id().to_owned())
     }
-
-    /// Write whatever is new. A write failure is reported once and then ignored:
-    /// losing the log is not a reason to lose the conversation.
-    fn flush(&self, cx: &Cx<'_>) {
-        if let Ok(mut store) = self.store.lock()
-            && let Err(error) = store.flush(cx.transcript())
-        {
-            eprintln!("aphid: could not write the session: {error}");
-        }
-    }
 }
 
-impl Plugin for SessionPlugin {
+impl Component for SessionComponent {
     fn name(&self) -> &str {
         "session"
     }
 
-    fn interests(&self) -> Interest {
-        Interest::RUN_START | Interest::TURN_END | Interest::RUN_END
-    }
+    fn apply(&self, ctx: &Context) -> Result<(), String> {
+        let store = Arc::clone(&self.store);
+        let listeners = Arc::clone(&self.listeners);
+        let owner = ctx.uid();
 
-    fn on_run_start(&self, cx: &mut Cx<'_>) {
-        self.flush(cx);
-    }
+        listeners.subscribe(owner, move |moment, transcript, _run| {
+            // Every moment this hears about is one where the transcript grew,
+            // so there is nothing to filter on.
+            let _ = moment;
+            // A write failure is reported once and then ignored: losing the log
+            // is not a reason to lose the conversation.
+            if let Ok(mut store) = store.lock()
+                && let Err(error) = store.flush(transcript)
+            {
+                eprintln!("aphid: could not write the session: {error}");
+            }
+        });
 
-    fn on_turn_end(&self, cx: &mut Cx<'_>, _turn: &TurnSummary) -> Flow {
-        self.flush(cx);
-        Flow::Continue
-    }
-
-    fn on_run_end(&self, cx: &mut Cx<'_>, _outcome: &RunOutcome) {
-        self.flush(cx);
+        let listeners = Arc::clone(&self.listeners);
+        ctx.effect(move || Disposer::sync(move || listeners.unsubscribe(owner)));
+        Ok(())
     }
 }

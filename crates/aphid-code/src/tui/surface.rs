@@ -5,7 +5,7 @@
 //! tree, and closed when it returns unit. Rendering is cached by the plugin's
 //! state version, then re-run after events and on the tick.
 
-use aphid_plugin::{Open, Side, Widget};
+use crate::scripting::{Open, Side, Widget};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
