@@ -23,12 +23,16 @@
 //! # }
 //! ```
 
+pub(crate) mod base64;
 pub mod context;
+pub mod events;
 pub mod harness;
 pub mod headless;
 pub mod model;
 pub mod plugins;
 pub mod prompt;
+pub mod registries;
+pub mod scripting;
 pub mod session;
 pub mod skills;
 pub mod tools;

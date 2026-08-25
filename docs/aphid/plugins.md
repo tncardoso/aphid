@@ -1,11 +1,17 @@
 # Plugins
 
 A plugin is one file of [Rhai](https://rhai.rs) code. It can look at a run, stop
-a tool, change a prompt, add a tool, add a command, and add an interactive
-terminal surface. You do not compile aphid again to add one.
+a tool, change a prompt, add a tool, add a command, add an interactive terminal
+surface, and offer a service to other plugins. You do not compile aphid again to
+add one.
 
 A plugin can also be written in Rust, and compiled in. Refer to
 [Plugins in Rust](#plugins-in-rust).
+
+This page is the reference. [Composition](composition.md) is the model behind
+it, and worth reading first — a plugin here declares what it needs and the
+runtime decides when it runs, which is a different bargain from the one most
+plugin systems offer.
 
 ## Where plugins go
 
@@ -27,15 +33,21 @@ file. The `/plugins` command and `aphid --list-plugins` show this text.
 ```rhai
 //! Keeps the model away from the changelog.
 
-fn on_tool_call(tool) {
-    if tool.name == "write" && tool.arguments.contains("CHANGELOG") {
-        return block("the changelog is written by hand");
-    }
+fn apply(ctx) {
+    on("agent/tool-call", |tool| {
+        if tool.name == "write" && tool.arguments.contains("CHANGELOG") {
+            return block("the changelog is written by hand");
+        }
+    });
 }
 ```
 
+`.aphid/plugins.json` overrides what was found: switch one off, configure it,
+isolate a service for it, or name a file that lives elsewhere. See
+[the composition file](composition.md#the-composition-file).
+
 **Important:** `call` is a reserved word in Rhai. Do not use it as the name of a
-parameter.
+parameter, and use `invoke` to reach a service.
 
 ## Trust
 
@@ -52,83 +64,123 @@ mode aphid does not ask, and does not load the plugins of the workspace. Use
 This controls which plugins load. It does not control what a plugin that loaded
 can do. A plugin that you agreed to can do all that you can do.
 
-## Hooks
+## `apply`
 
-To add a hook, write a function with the correct name. Aphid reads the names when
-it loads the file. A plugin pays only for the hooks that it has.
+Everything a plugin contributes happens in `apply`. It runs once, when the
+plugin loads — which is not necessarily at startup: a plugin that declared
+`inject` waits until what it declared is there.
 
-These hooks come from the agent loop:
+```rhai
+const inject   = ["shell"];
+const provides = ["todos"];
+const emits    = ["todos/changed"];
 
-| Function | When it runs |
+fn apply(ctx) {
+    on("agent/turn-start", |cx| { cx.note("…"); });
+    provide("todos", #{ add: |text| { … } });
+    effect(|| { … }, || { … });
+}
+```
+
+| In `apply` | What it does | Needs in `inject` |
+| --- | --- | --- |
+| `on(event, closure)` | Subscribe to something announced | — |
+| `tool(map)` | Contribute a tool the model may call | `tools` |
+| `command(map)` | Contribute a slash command | `commands` |
+| `surface(map)` | Contribute a panel | `surfaces` |
+| `provide(name, map)` | Offer a service, as a map of functions | — |
+| `invoke(name, method, args)` | Call a service | the service |
+| `effect(setup, teardown)` | Take something, give it back on unload | — |
+
+These work **only inside `apply`**. Outside it there is no component for the
+runtime to attach the registration to, so nothing could undo it when your plugin
+unloads — the call is refused, and says so.
+
+`tools`, `commands` and `surfaces` are ordinary services: a plugin that
+contributes one waits for the registry the same way it waits for anything else,
+and what it contributed leaves when it does. See
+[Composition](composition.md#services).
+
+## Events
+
+Subscribe with `on`. These come from the agent loop:
+
+| Event | When it fires |
 | --- | --- |
-| `on_prompt(draft)` | Before aphid puts your prompt in the transcript |
-| `on_run_start(cx)` | The run starts |
-| `on_turn_start(cx)` | Before each request to the model |
-| `on_event(event)` | For each protocol event. This is the fast path |
-| `on_message(cx, message)` | After the answer of the model is in the transcript |
-| `on_tool_call(tool)` | A tool call is asked for, but did not run |
-| `on_tool_progress(id, tool, chunk)` | A tool sent partial output |
-| `on_tool_result(result)` | A tool completed |
-| `on_turn_end(cx, turn)` | A turn is complete |
-| `on_run_end(cx, outcome)` | The run stopped |
+| `agent/prompt` | Before aphid puts your prompt in the transcript |
+| `agent/run-start` | The run starts |
+| `agent/turn-start` | Before each request to the model |
+| `agent/event` | For each protocol event. This is the fast path |
+| `agent/message` | After the answer of the model is in the transcript |
+| `agent/tool-call` | A tool call is asked for, but did not run |
+| `agent/tool-progress` | A tool sent partial output |
+| `agent/tool-result` | A tool completed |
+| `agent/turn-end` | A turn is complete |
+| `agent/run-end` | The run stopped |
 
-These hooks come from the coding agent:
+Subscribing to a name nothing announces is reported when you subscribe, rather
+than silently never firing.
 
-| Function | When it runs |
+These come from the coding harness — the things the loop has no word for,
+because a permission or a file change is this harness's idea rather than the
+loop's. They are announced on the same bus and subscribed to the same way:
+
+| Event | When it fires |
 | --- | --- |
-| `on_system_prompt(text)` | Aphid made the system prompt |
-| `on_session_start(session)` | A session opened |
-| `on_session_end(session)` | A session is closing |
-| `on_permission(request)` | A tool needs permission |
-| `on_file_change(change)` | `write` or `edit` changed a file |
-| `on_notify(text)` | Aphid showed a message to the user |
-| `on_tick()` | Every 250 milliseconds, in the terminal UI |
+| `code/system-prompt` | Aphid made the system prompt |
+| `code/session-start` | A session opened |
+| `code/session-end` | A session is closing |
+| `code/permission` | A tool needs permission |
+| `code/file-change` | `write` or `edit` changed a file |
+| `code/notice` | Aphid showed a message to the user |
+| `code/tick` | Every 250 milliseconds, in the terminal UI |
 
-One more hook is not a hook of the loop:
+`code/system-prompt` is a **waterfall**: each listener receives the prompt as it
+stands and returns what the next should see, so appending and replacing are the
+same operation from two ends. It fires while the harness is being built, which
+makes it the only announcement made before an agent exists.
 
-| Function | When it runs |
-| --- | --- |
-| `on_request(body)` | Before aphid sends the encoded request body |
+`code/permission` is a **bail**: the first listener with an opinion decides and
+the rest do not run, because a second opinion on a settled question is a second
+question for the user.
 
-The loop hands the transcript to a backend, and never sees a request body: the
-body is made inside the transport. Thus `on_request` **replaces** the transport
-rather than watching it. Return a map to send that body in place of the one you
-were given, and return nothing to send it unchanged. A script that fails here
-leaves the body as it was.
-
-Because it owns the transport, `on_request` cannot be joined with a backend that
-the program that embeds aphid supplied itself. The coding agent has no such
-backend, so this affects an embedder only.
-
-`on_tick` is the only hook that the agent does not cause. Use it to look at
+`code/tick` is the only one the agent does not cause. Use it to look at
 something outside the session: a file, a queue, a clock. Keep it short. It runs
 while the user is at the prompt, and `exec` and the http functions stop it until
-they are complete. Aphid does not start a tick while the last one runs. There
-are no ticks in headless mode.
+they are complete. A tick still being handled is not announced again, so a slow
+listener costs its own time rather than a queue behind it. There are no ticks in
+headless mode.
 
-Every call into a plugin — a hook, a tick, a command, a panel — runs on one
+`code/notice` is not reentrant either, and for the same kind of reason: a
+listener that shows the user something would announce itself.
+
+Every call into a plugin — a listener, a tick, a command, a panel — runs on one
 thread, one at a time. So a change a tick makes to the state is what the next
 panel render reads, and two calls can never both read the state, change it, and
 write it back over each other.
 
-Each hook gets a map. These are the fields:
+## What each listener is handed
 
-- `on_prompt`: `text`
-- `on_tool_call`: `id`, `name`, `arguments`, `known`, `blocked`
-- `on_tool_result`: `id`, `name`, `arguments`, `turn`, `content`, `is_error`,
+- `agent/prompt`: `text`
+- `agent/tool-call`: `id`, `name`, `arguments`, `known`, `blocked`
+- `agent/tool-result`: `id`, `name`, `arguments`, `turn`, `content`, `is_error`,
   `details`
-- `on_message`: `text`, `thinking`, `tool_calls`
-- `on_event`: `kind`, `turn`, and then `index`, `block`, `text` or `stop`
-- `on_turn_end`: `stop_reason`, `tool_calls`, `input`, `output`, `error`
-- `on_run_end`: `stop`, `turns`, `input`, `output`, `error`
-- `on_session_start` and `on_session_end`: `id`, `path`, `reason`, `restored`
-- `on_permission`: `tool`, `summary`, `risk`
-- `on_file_change`: `path`, `kind`, `before`, `after`
+- `agent/message`: `cx`, then `text`, `thinking`, `tool_calls`
+- `agent/event`: `kind`, `turn`, and then `index`, `block`, `text` or `stop`
+- `agent/turn-end`: `cx`, then `stop_reason`, `tool_calls`, `input`, `output`,
+  `error`
+- `agent/run-end`: `cx`, then `stop`, `turns`, `input`, `output`, `error`
+- `code/session-start` and `code/session-end`: `id`, `path`, `reason`, `restored`
+- `code/permission`: `tool`, `summary`, `risk`
+- `code/file-change`: `path`, `kind`, `before`, `after`
+- `code/system-prompt`: the prompt as text
+- `code/notice`: the text shown
+- `code/tick`: nothing
 
-## How a hook changes a run
+## How a listener changes a run
 
-Rhai sends the arguments of a function by value. Thus a hook cannot change the
-map that it receives. A hook changes the run with the value that it **returns**.
+Rhai sends the arguments of a function by value. Thus a listener cannot change
+the map that it receives. It changes the run with the value that it **returns**.
 
 Return nothing to change nothing.
 
@@ -136,26 +188,34 @@ Return nothing to change nothing.
 | --- | --- |
 | `block("why")` | The tool does not run. The model reads the reason |
 | `block_and_stop("why")` | The same, and the run stops after this batch |
-| `reject("why")` | From `on_prompt`: the prompt does not go to the model |
-| `stop()` | From `on_turn_end`: the run stops cleanly |
-| `#{ text: "…" }` | From `on_prompt`: use this text in place of the prompt |
-| `#{ arguments: "…" }` | From `on_tool_call`: use these arguments |
-| `#{ content: "…" }` | From `on_tool_result`: use this result |
-| `#{ append: "…" }` | From `on_system_prompt`: add this to the prompt |
-| `#{ replace: "…" }` | From `on_system_prompt`: use this prompt |
-| `"allow"`, `"deny"` | From `on_permission` |
+| `reject("why")` | From `agent/prompt`: the prompt does not go to the model |
+| `stop()` | From `agent/turn-end`: the run stops cleanly |
+| `#{ text: "…" }` | From `agent/prompt`: use this text in place of the prompt |
+| `#{ arguments: "…" }` | From `agent/tool-call`: use these arguments |
+| `#{ content: "…" }` | From `agent/tool-result`: use this result |
+| `#{ append: "…" }` | From `code/system-prompt`: add this to the prompt |
+| `#{ replace: "…" }` | From `code/system-prompt`: use this prompt |
+| `"allow"`, `"deny"` | From `code/permission` |
 
-`on_permission` also accepts `"allow_always"` and `"ask"`. Use `"ask"` when the
-plugin has no opinion. Aphid then asks the user.
+`code/permission` also accepts `"allow_always"` and `"ask"`. Use `"ask"` when
+the plugin has no opinion; the next listener, and finally the user, then
+decides.
+
+Every listener runs, even after one has refused a tool call — an observer still
+wants to see a call somebody else blocked. The first refusal is the one that
+stands.
 
 ## The run context
 
-The hooks that receive `cx` are different. `cx` holds a handle, not a copy, and
-thus its methods do change the run.
+The listeners that receive `cx` are different. `cx` holds a handle, not a copy,
+and thus its methods do change the run — whatever Rhai did with the value on the
+way in, and from wherever the listener happens to run.
 
 ```rhai
-fn on_turn_start(cx) {
-    cx.note("Today is a Tuesday.");   // adds a system message
+fn apply(ctx) {
+    on("agent/turn-start", |cx| {
+        cx.note("Today is a Tuesday.");   // adds a system message
+    });
 }
 ```
 
@@ -168,7 +228,7 @@ fn on_turn_start(cx) {
 | `cx.turn` | The number of the turn, from zero |
 | `cx.input_tokens`, `cx.output_tokens` | The tokens of the run until now |
 
-The transcript only grows. A hook adds to it, and cannot rewrite it.
+The transcript only grows. A listener adds to it, and cannot rewrite it.
 
 ## Capabilities
 
@@ -187,8 +247,8 @@ A Rhai script can only calculate. Aphid gives it these functions:
 | `http_get(url)` | Makes a GET request |
 | `http_post(url, body, headers)` | Makes a POST request |
 
-`prompt` is a call, not a value that a hook returns. A hook, a tool and a
-command all use it the same way. The text goes in the queue that a typed line
+`prompt` is a call, not a value that a listener returns. A listener, a tool
+and a command all use it the same way. The text goes in the queue that a typed line
 goes in, and the terminal UI shows it as a message from the user. Only the
 terminal UI has this queue: in headless mode, `prompt` does nothing.
 
@@ -231,11 +291,13 @@ in-memory state and marks it for writing. Aphid writes saved state to
 session. A plugin that does not call `save_state` does not write a file.
 
 ```rhai
-fn on_session_start(session) {
-    let s = state();
-    s.runs = if "runs" in s { s.runs + 1 } else { 1 };
-    save_state(s);
-    notify("session number " + s.runs);
+fn apply(ctx) {
+    on("code/session-start", |session| {
+        let s = state();
+        s.runs = if "runs" in s { s.runs + 1 } else { 1 };
+        save_state(s);
+        notify("session number " + s.runs);
+    });
 }
 ```
 
@@ -244,25 +306,28 @@ never written to disk.
 
 A surface keeps its own model beside the plugin's, under a `surfaces` key.
 `surface_state(name)` reads it and `surface_state(name, map)` replaces it, in
-memory. A tool or a hook uses those to reach what a panel is showing; the panel
+memory. A tool or a listener uses those to reach what a panel is showing; the panel
 itself is given the model and returns the new one, and never calls either.
 
 ## Tools
 
-Call `register_tool` at the top level of the file. Aphid runs the top level one
-time, when it loads the plugin.
+Call `tool` from `apply`, with `tools` in your `inject`.
 
 ```rhai
-register_tool(#{
-    name: "wordcount",
-    description: "Count the words in a file.",
-    parameters: #{
-        type: "object",
-        properties: #{ path: #{ type: "string" } },
-        required: ["path"]
-    },
-    execute: |args| { fs_read(args.path).split(' ').len() }
-});
+const inject = ["tools"];
+
+fn apply(ctx) {
+    tool(#{
+        name: "wordcount",
+        description: "Count the words in a file.",
+        parameters: #{
+            type: "object",
+            properties: #{ path: #{ type: "string" } },
+            required: ["path"]
+        },
+        execute: |args| { fs_read(args.path).split(' ').len() }
+    });
+}
 ```
 
 Write the `parameters` schema by hand, as a JSON Schema. Aphid sends it to the
@@ -279,37 +344,42 @@ running it at the same time as other tools.
 
 ## Commands
 
-A plugin adds a slash command with `register_command`, at the top level of the
-file. Refer to [Commands](commands.md#commands-from-plugins).
+A plugin adds a slash command with `command`, from `apply`, with `commands` in
+its `inject`. Refer to [Commands](commands.md#commands-from-plugins).
 
 ## Surfaces and widgets
 
-A plugin adds an interactive terminal surface with `register_surface`. A surface
-is a named region that the plugin fills with a declarative widget tree. The
-first cut renders side panels on the right and the left of the transcript.
+A plugin adds an interactive terminal surface with `surface`, from `apply`, with
+`surfaces` in its `inject`. A surface is a named region that the plugin fills
+with a declarative widget tree. The first cut renders side panels on the right
+and the left of the transcript.
 
 A surface is a small app of its own, with three parts: a model, a function that
 changes it, and a function that draws it.
 
 ```rhai
-register_surface(#{
-    name: "todos",
-    placement: #{ kind: "side", side: "right" },
+const inject = ["surfaces"];
 
-    init: || #{ items: [], selected: 0, open: false },
+fn apply(ctx) {
+    surface(#{
+        name: "todos",
+        placement: #{ kind: "side", side: "right" },
 
-    update: |s, msg| {
-        if msg.kind == "key" && msg.code == "down" {
-            s.selected = (s.selected + 1) % s.items.len();
+        init: || #{ items: [], selected: 0, open: false },
+
+        update: |s, msg| {
+            if msg.kind == "key" && msg.code == "down" {
+                s.selected = (s.selected + 1) % s.items.len();
+            }
+            s
+        },
+
+        view: |s| {
+            if !s.open { return (); }
+            #{ type: "list", items: s.items, selected: s.selected }
         }
-        s
-    },
-
-    view: |s| {
-        if !s.open { return (); }
-        #{ type: "list", items: s.items, selected: s.selected }
-    }
-});
+    });
+}
 ```
 
 ### The model
@@ -318,7 +388,7 @@ register_surface(#{
 that is already in the surface's state wins over its default, so `init` says
 what a key means and not what it is. Nothing has to write `if "open" in s`.
 
-The model is the surface's own, under the plugin's state. A hook, a tool or a
+The model is the surface's own, under the plugin's state. A listener, a tool or a
 command reaches it with `surface_state(name)`, and replaces it with
 `surface_state(name, map)`. That is how a tool writes what its panel draws: the
 todo plugin's `todo_add` tool adds to the very list the todo panel shows.
@@ -407,15 +477,23 @@ what to rename.
 ## When a plugin fails
 
 A plugin that does not compile becomes a message, and aphid continues. The other
-plugins still load.
+plugins still load, and so does the rest of the session.
 
-If a hook fails while it runs, aphid shows the error and continues without that
-hook. Two hooks are different:
+A plugin whose `apply` raises goes to `failed` and stays down. Its own
+registrations are taken back off — whatever it managed to put in place before it
+raised does not survive it. `/plugins` shows the state and the reason.
 
-- `on_tool_call` stops the tool.
-- `on_permission` refuses the permission.
+A plugin that is waiting on a service nobody provides is **not** failed. It is
+`pending`, which is a legitimate state and therefore a silent one; `/plugins`
+names the key it is short of.
 
-These two are the hooks that people write to be safe. A guard that failed did not
+If a listener fails while it runs, aphid shows the error and continues without
+that listener. Two are different:
+
+- `agent/tool-call` stops the tool.
+- `code/permission` refuses the permission.
+
+These two are the ones people write to be safe. A guard that failed did not
 agree to anything, and thus aphid does not continue as if it did.
 
 A tool that fails becomes an error result. The model reads it and can correct
@@ -423,8 +501,8 @@ itself.
 
 ## Limits
 
-Each hook can do 5 000 000 operations. Strings can be 8 MB. Arrays and maps can
-hold 100 000 items. A hook that goes past a limit stops with an error.
+Each call into a plugin can do 5 000 000 operations. Strings can be 8 MB. Arrays and maps can
+hold 100 000 items. A call that goes past a limit stops with an error.
 
 ## Command-line options
 
@@ -435,44 +513,61 @@ hold 100 000 items. A hook that goes past a limit stops with an error.
 | `--plugin PATH` | Loads one plugin from a path. No trust question |
 | `--trust-plugins` | Agrees to the plugins of this workspace |
 
-In the terminal user interface, `/plugins` shows what loaded, the commands that
-plugins added, and the files that did not load.
+In the terminal user interface, `/plugins` shows what loaded, what state each
+one is in, the commands they added, and the files that did not load. `/reload`
+brings the set back in step with the files on disk.
 
 ## Plugins in Rust
 
-A program that embeds aphid can supply a plugin as a Rust type. The hooks are
-the same hooks, with the same names.
+A program that embeds aphid supplies a plugin as a `Component`. It is the same
+model a `.rhai` file follows, in Rust: declare, subscribe in `apply`, and
+everything registered is taken back when it unloads.
 
 ```rust
-use aphid_agent::{Guard, PendingCall, Plugin};
+use std::sync::Arc;
 
-struct NoCityName;
+use aphid_agent::rt::{Component, Composition, Context};
+use aphid_agent::{Blocked, ToolRequest};
 
-impl Plugin for NoCityName {
-    fn name(&self) -> &str { "no-lisbon" }
+struct NoCityName {
+    composition: Composition,
+}
 
-    fn on_tool_call(&self, call: &mut PendingCall<'_>) -> Guard {
-        if call.arguments().contains("CityName") {
-            return Guard::block("CityName is off limits.");
-        }
-        Guard::Allow
+impl Component for NoCityName {
+    fn name(&self) -> &str {
+        "no-lisbon"
+    }
+
+    fn apply(&self, ctx: &Context) -> Result<(), String> {
+        self.composition.bus.on::<ToolRequest>(ctx.uid(), |request| {
+            if request.arguments.contains("CityName") {
+                request.refuse(Blocked::new("CityName is off limits."));
+            }
+        });
+        Ok(())
     }
 }
 ```
 
-The hooks are **synchronous**. The only hook that runs for each token is
-`on_event`, and to box a future for each token would remove the point of the
-memory layout that [Core](../core.md) describes. Anything that must wait belongs
-in a tool, because a tool is the one part of this surface that is asynchronous.
+A component declares what it needs with `inject`, offers services with
+`provide`, and contributes tools through `Composition::tools`. Mount it with
+`Composition::plug`, and hand the composition to the agent with
+`AgentBuilder::compose` — components that mounted first are already subscribed
+when the loop starts announcing.
 
-A plugin declares an `Interest` set, and thus a hook that no plugin wants costs
-the check of an empty list.
+Listeners are **synchronous** and their payloads own their data, so one may be
+kept, moved to another thread, or answered from a task. The exception is the
+per-token stream, which hands out a borrow into the response arena: copying it
+out would undo the memory layout that [Core](../core.md) describes, so it has a
+list of its own. Anything that must await belongs in a tool, which is the one
+asynchronous part of this surface.
 
-Use `cargo doc -p aphid-agent --open` for the full trait.
+Use `cargo doc -p aphid-agent --open` for the full API, and
+[Composition](composition.md) for the model.
 
 ## Examples
 
-The `crates/aphid-plugin/examples/plugins` directory holds plugins that work:
+The `crates/aphid-code/examples/plugins` directory holds plugins that work:
 
 | File | What it does |
 | --- | --- |
@@ -504,9 +599,9 @@ and the answer of the model goes to the browser while it writes it. What you
 type in the terminal also shows in the browser.
 
 The plugin writes a small Python server to `/tmp/aphid-webchat/<project>`, and
-starts it with `exec`. Python 3 must be on the machine. `on_tick` reads what the
-browser sends, and each hook sends the answer of the model back. The workspace
-stays clean, because the plugin writes nothing in it.
+starts it with `exec`. Python 3 must be on the machine. A `code/tick` listener
+reads what the browser sends, and the other listeners send the answer of the
+model back. The workspace stays clean, because the plugin writes nothing in it.
 
 Settings go in `.aphid/plugins/webchat.json`:
 

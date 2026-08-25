@@ -7,7 +7,7 @@ use aphid_code::harness::HarnessOptions;
 use aphid_code::model::Catalog;
 use aphid_code::plugins::scripts;
 use aphid_code::plugins::scripts::Gate;
-use aphid_code::plugins::{DenyAll, Permissions};
+use aphid_code::plugins::{DenyAll, PermissionGate, Permissions};
 use aphid_code::session::{self, sessions_dir};
 use aphid_code::{Workspace, headless, tui};
 use aphid_core::providers::deepseek;
@@ -219,11 +219,15 @@ pub async fn run(args: Args) -> ExitCode {
         // than silently allowing what `--confirm` was meant to stop.
         Some(prompt) => {
             if args.confirm {
-                options
-                    .plugins
-                    .push(std::sync::Arc::new(Permissions::new(std::sync::Arc::new(
-                        DenyAll,
-                    ))));
+                let permissions =
+                    std::sync::Arc::new(Permissions::new(std::sync::Arc::new(DenyAll)));
+                if let Err(error) = options.composition.mount(
+                    std::sync::Arc::new(PermissionGate::new(permissions, &options.composition)),
+                    serde_json::Value::Null,
+                ) {
+                    eprintln!("aphid: could not install the permission gate: {error}");
+                    return ExitCode::FAILURE;
+                }
             }
 
             // Headless runs are recorded too, so `--sessions` and `--resume`
@@ -235,6 +239,7 @@ pub async fn run(args: Args) -> ExitCode {
                 &options.cwd,
                 Some(&model_id),
                 resume.as_deref(),
+                std::sync::Arc::clone(&options.composition.transcript),
             ) {
                 Ok(attached) => attached,
                 Err(error) => {
@@ -242,7 +247,10 @@ pub async fn run(args: Args) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            options.plugins.push(store);
+            if let Err(error) = options.composition.mount(store, serde_json::Value::Null) {
+                eprintln!("aphid: could not record the session: {error}");
+                return ExitCode::FAILURE;
+            }
 
             let (_harness, outcome) = headless::run(options, &prompt, args.quiet, resumed).await;
             if outcome.is_failure() {
@@ -270,7 +278,7 @@ fn collect_plugins(
     workspace: &Workspace,
     no_plugins: bool,
     explicit: &[PathBuf],
-) -> Vec<aphid_plugin::PluginFile> {
+) -> Vec<aphid_code::scripting::PluginFile> {
     let mut files = Vec::new();
 
     if !no_plugins {
@@ -283,7 +291,7 @@ fn collect_plugins(
     }
 
     for path in explicit {
-        match aphid_plugin::explicit(path) {
+        match aphid_code::scripting::explicit(path) {
             Ok(file) => {
                 files.retain(|existing| existing.name != file.name);
                 files.push(file);
@@ -303,11 +311,11 @@ fn collect_plugins(
 /// be answered would either hang or silently allow.
 fn gate(
     workspace: &Workspace,
-    files: Vec<aphid_plugin::PluginFile>,
+    files: Vec<aphid_code::scripting::PluginFile>,
     home: Option<&Path>,
     trusted: bool,
     interactive: bool,
-) -> Vec<aphid_plugin::PluginFile> {
+) -> Vec<aphid_code::scripting::PluginFile> {
     if trusted {
         if let Some(home) = home
             && let Err(error) = scripts::remember(workspace, home, true)

@@ -5,12 +5,12 @@
 //! mechanism — a UI is just a plugin that happens to print.
 
 use std::process::ExitCode;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use aphid_agent::rt::{Component, Composition, Context, Disposer};
 use aphid_agent::{
-    Agent, Cx, Flow, Guard, Interest, PendingCall, Plugin, ResultCx, StreamCx, ToolCx, ToolOutcome,
-    TurnSummary, tool_fn,
+    Agent, ToolContent, ToolCx, ToolOutcome, ToolRequest, ToolResult, TurnEnd, tool_fn,
 };
 use aphid_core::providers::deepseek;
 use aphid_core::{Event, SimpleStreamOptions};
@@ -45,68 +45,104 @@ impl Reporter {
     }
 }
 
-impl Plugin for Reporter {
+impl Reporter {
+    /// Subscribe to a composition. Everything registered here leaves again if
+    /// this component is ever unloaded.
+    fn subscribe(self: &Arc<Self>, ctx: &Context, composition: &Composition) {
+        let owner = ctx.uid();
+        let bus = Arc::clone(&composition.bus);
+
+        let reporter = Arc::clone(self);
+        bus.on::<ToolRequest>(owner, move |request| {
+            reporter.flush();
+            println!(
+                "  {} {} {}",
+                reporter.style.cyan("→ tool"),
+                reporter.style.bold(&request.name),
+                reporter.style.dim(&request.arguments),
+            );
+        });
+
+        let reporter = Arc::clone(self);
+        bus.on::<ToolResult>(owner, move |result| {
+            let body = text_of(&result.content);
+            let arrow = if result.is_error {
+                reporter.style.red("← error")
+            } else {
+                reporter.style.cyan("← result")
+            };
+            println!(
+                "  {} {} {}",
+                arrow,
+                reporter.style.bold(&result.name),
+                reporter.style.dim(body.trim()),
+            );
+        });
+
+        let reporter = Arc::clone(self);
+        bus.on::<TurnEnd>(owner, move |end| {
+            reporter.flush();
+            let usage = end.summary.usage;
+            println!(
+                "  {}",
+                reporter.style.dim(&format!(
+                    "turn {} · in {} · cached {} · out {} · ${:.6}",
+                    end.run.turn, usage.input, usage.cache_read, usage.output, usage.cost.total,
+                )),
+            );
+            println!();
+        });
+
+        let reporter = Arc::clone(self);
+        composition.stream.subscribe(owner, move |event, cx| {
+            let delta = match *event {
+                Event::Delta { span, .. } => cx.text(span),
+                _ => "",
+            };
+            if let Ok(mut printer) = reporter.printer.lock() {
+                printer.event(event, delta);
+            }
+        });
+
+        let stream = Arc::clone(&composition.stream);
+        ctx.effect(move || {
+            Disposer::sync(move || {
+                bus.unsubscribe::<ToolRequest>(owner);
+                bus.unsubscribe::<ToolResult>(owner);
+                bus.unsubscribe::<TurnEnd>(owner);
+                stream.unsubscribe(owner);
+            })
+        });
+    }
+}
+
+/// Wraps the reporter so a composition can mount it.
+struct Reporting {
+    reporter: Arc<Reporter>,
+    composition: Composition,
+}
+
+impl Component for Reporting {
     fn name(&self) -> &str {
         "reporter"
     }
 
-    fn interests(&self) -> Interest {
-        Interest::EVENT | Interest::TOOL_CALL | Interest::TOOL_RESULT | Interest::TURN_END
+    fn apply(&self, ctx: &Context) -> Result<(), String> {
+        self.reporter.subscribe(ctx, &self.composition);
+        Ok(())
     }
+}
 
-    fn on_event(&self, event: &Event, cx: &StreamCx<'_>) {
-        let delta = match *event {
-            Event::Delta { span, .. } => cx.text(span),
-            _ => "",
-        };
-        if let Ok(mut printer) = self.printer.lock() {
-            printer.event(event, delta);
-        }
-    }
-
-    fn on_tool_call(&self, call: &mut PendingCall<'_>) -> Guard {
-        self.flush();
-        println!(
-            "  {} {} {}",
-            self.style.cyan("→ tool"),
-            self.style.bold(call.name()),
-            self.style.dim(call.arguments()),
-        );
-        Guard::Allow
-    }
-
-    fn on_tool_result(&self, outcome: &mut ToolOutcome, cx: &ResultCx<'_>) {
-        let body = outcome.text_content();
-        let arrow = if outcome.is_error {
-            self.style.red("← error")
-        } else {
-            self.style.cyan("← result")
-        };
-        println!(
-            "  {} {} {}",
-            arrow,
-            self.style.bold(cx.name()),
-            self.style.dim(body.trim()),
-        );
-    }
-
-    fn on_turn_end(&self, cx: &mut Cx<'_>, turn: &TurnSummary) -> Flow {
-        self.flush();
-        let usage = turn.usage;
-        println!(
-            "  {}",
-            self.style.dim(&format!(
-                "turn {} · in {} · cached {} · out {} · ${:.6}",
-                cx.turn(),
-                usage.input,
-                usage.cache_read,
-                usage.output,
-                usage.cost.total,
-            )),
-        );
-        println!();
-        Flow::Continue
-    }
+/// The text of a tool result, joined across its blocks.
+fn text_of(content: &[ToolContent]) -> String {
+    content
+        .iter()
+        .filter_map(|block| match block {
+            ToolContent::Text(text) => Some(text.as_str()),
+            ToolContent::Image { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 /// A demo tool with a real implementation, so the loop has something to do.
@@ -160,10 +196,22 @@ pub async fn run(args: ProtocolArgs) -> ExitCode {
         }
     }
 
+    let composition = Composition::new();
+    composition
+        .add(
+            Arc::new(Reporting {
+                reporter: Arc::new(Reporter::new(style.clone(), args.events)),
+                composition: composition.clone(),
+            }),
+            serde_json::Value::Null,
+        )
+        .await
+        .expect("the reporter has no dependencies and no schema");
+
     let mut builder = Agent::builder()
         .model(model.clone())
         .options(options)
-        .plugin(Reporter::new(style.clone(), args.events));
+        .compose(&composition);
 
     if let Some(system) = &args.system {
         builder = builder.system(system);

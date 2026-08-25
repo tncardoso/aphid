@@ -8,7 +8,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use aphid_agent::{Cx, Interest, Plugin, PromptDraft, ToolHandler, ToolOutcome, tool_fn};
+use aphid_agent::rt::{Bus, Component, Composition, Context, Disposer};
+use aphid_agent::{Prompt, RunStart, ToolHandler, ToolOutcome, Toolbox, tool_fn};
 use aphid_core::Json;
 use serde::Deserialize;
 
@@ -167,56 +168,48 @@ fn details(hits: &[Hit]) -> Json {
 
 /// Offers the memory unasked, and ships the two tools.
 ///
-/// The recall happens at [`Plugin::on_prompt`], which is the only hook that can
-/// read the prompt, and the facts are appended at [`Plugin::on_run_start`],
-/// which is the first that has a transcript to append to. A run that appended
-/// no prompt — a resume — finds nothing waiting and adds nothing.
-pub struct MemoryPlugin {
+/// The recall happens on [`Prompt`], the only announcement that can read what
+/// was typed, and the facts are appended on [`RunStart`], the first that has a
+/// transcript to append to. A run that appended no prompt — a resume — finds
+/// nothing waiting and adds nothing.
+pub struct MemoryComponent {
     memory: Shared,
     limit: usize,
     /// What the last prompt recalled, waiting for a transcript to go into.
-    pending: Mutex<Option<String>>,
+    pending: Arc<Mutex<Option<String>>>,
+    bus: Arc<Bus>,
+    tools: Arc<Toolbox>,
 }
 
-impl MemoryPlugin {
+impl MemoryComponent {
     #[must_use]
-    pub fn new(memory: Shared, config: &MemoryConfig) -> Self {
+    pub fn new(memory: Shared, config: &MemoryConfig, composition: &Composition) -> Self {
         Self {
             memory,
             limit: config.recall,
-            pending: Mutex::new(None),
+            pending: Arc::default(),
+            bus: Arc::clone(&composition.bus),
+            tools: Arc::clone(&composition.tools),
         }
     }
 }
 
-impl Plugin for MemoryPlugin {
-    fn name(&self) -> &str {
-        "memory"
-    }
-
-    fn interests(&self) -> Interest {
-        Interest::PROMPT | Interest::RUN_START
-    }
-
-    fn tools(&self) -> Vec<Arc<dyn ToolHandler>> {
-        vec![
-            Arc::new(remember_tool(self.memory.clone())),
-            Arc::new(recall_tool(self.memory.clone())),
-        ]
-    }
-
-    fn on_prompt(&self, draft: &mut PromptDraft<'_>) {
-        if self.limit == 0 {
-            return;
+/// What the memory has to say about a prompt, if anything.
+///
+/// A free function rather than a method: the listener that calls it outlives
+/// the borrow of the component that registered it, and needs nothing from it
+/// beyond these two values.
+fn recalled(memory: &Shared, limit: usize, text: &str) -> Option<String> {
+    {
+        if limit == 0 {
+            return None;
         }
         // A memory that cannot be read must not stop a conversation. The agent
         // still has `recall`, which reports the failure where it can be acted
         // on, rather than here where nobody asked anything.
-        let Ok(hits) = lock(&self.memory).recall(draft.text(), None, self.limit) else {
-            return;
-        };
+        let hits = lock(memory).recall(text, None, limit).ok()?;
         if hits.is_empty() {
-            return;
+            return None;
         }
 
         let mut note = String::from(
@@ -227,19 +220,51 @@ impl Plugin for MemoryPlugin {
             note.push_str(&format!("{} · {}\n", hit.path, hit.fact));
         }
         note.push_str("</recalled_facts>");
+        Some(note)
+    }
+}
 
-        if let Ok(mut pending) = self.pending.lock() {
-            *pending = Some(note);
-        }
+impl Component for MemoryComponent {
+    fn name(&self) -> &str {
+        "memory"
     }
 
-    fn on_run_start(&self, cx: &mut Cx<'_>) {
-        let note = match self.pending.lock() {
-            Ok(mut pending) => pending.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        };
-        if let Some(note) = note {
-            cx.push_system_note(&note);
-        }
+    fn apply(&self, ctx: &Context) -> Result<(), String> {
+        let owner = ctx.uid();
+
+        self.tools
+            .contribute(ctx, Arc::new(remember_tool(self.memory.clone())));
+        self.tools
+            .contribute(ctx, Arc::new(recall_tool(self.memory.clone())));
+
+        let memory = self.memory.clone();
+        let limit = self.limit;
+        let pending = Arc::clone(&self.pending);
+        self.bus.on::<Prompt>(owner, move |prompt| {
+            let note = recalled(&memory, limit, &prompt.text);
+            if let Ok(mut slot) = pending.lock() {
+                *slot = note;
+            }
+        });
+
+        let pending = Arc::clone(&self.pending);
+        self.bus.on::<RunStart>(owner, move |start| {
+            let note = match pending.lock() {
+                Ok(mut slot) => slot.take(),
+                Err(poisoned) => poisoned.into_inner().take(),
+            };
+            if let Some(note) = note {
+                start.0.note(note);
+            }
+        });
+
+        let bus = Arc::clone(&self.bus);
+        ctx.effect(move || {
+            Disposer::sync(move || {
+                bus.unsubscribe::<Prompt>(owner);
+                bus.unsubscribe::<RunStart>(owner);
+            })
+        });
+        Ok(())
     }
 }

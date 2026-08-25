@@ -9,7 +9,7 @@ mod plugin;
 mod store;
 
 pub use format::{AssistantRecord, Block, Header, Line, Record, ToolResultRecord};
-pub use plugin::SessionPlugin;
+pub use plugin::SessionComponent;
 pub use store::{SessionStore, Summary, list, list_for, newest_for, resolve, sessions_dir};
 
 use std::path::Path;
@@ -34,7 +34,8 @@ pub fn attach(
     cwd: &Path,
     model: Option<&str>,
     resume: Option<&Path>,
-) -> std::io::Result<(Arc<SessionPlugin>, Option<Transcript>)> {
+    listeners: Arc<aphid_agent::TranscriptListeners>,
+) -> std::io::Result<(Arc<SessionComponent>, Option<Transcript>)> {
     let (store, restored) = match resume {
         Some(path) => {
             let mut transcript = Transcript::new();
@@ -43,7 +44,7 @@ pub fn attach(
         }
         None => (SessionStore::create(dir, root, cwd, model)?, None),
     };
-    Ok((Arc::new(SessionPlugin::new(store)), restored))
+    Ok((Arc::new(SessionComponent::new(store, listeners)), restored))
 }
 
 /// Read a session file, without opening it to write.

@@ -23,7 +23,7 @@ Type `/help` to see the list in the terminal.
 
 | Key | Effect |
 | --- | --- |
-| `Esc` | Stop the run. |
+| `Esc` | Clear the selection, or stop the run. |
 | `Ctrl-C` | Quit. |
 | `Ctrl-P` | Change to the next model. |
 | `Ctrl-T` | Show the reasoning. |
@@ -31,6 +31,20 @@ Type `/help` to see the list in the terminal.
 | `Enter` | Send the message. |
 | `Shift-Enter` | Make a new line in the same message. |
 | `Up`, `Down` | Move through the messages you sent before. |
+| Mouse wheel | Scroll. |
+| Mouse drag | Select text in the transcript. Release to copy it. |
+
+To copy text out of the transcript, hold the left mouse button and move the
+pointer over it. The text under the pointer is shown in reverse video. Release
+the button, and the text goes to the clipboard. The status line says how many
+lines it took. `Esc` clears the selection.
+
+A drag takes the characters that are on the screen, the prompt markers
+included: a selection that starts at the left edge of a message you sent takes
+the `> ` with it. To leave the marker out, start the drag after it.
+
+Aphid sends the text to your terminal with OSC 52, so a copy also works over
+SSH and in tmux. Some terminals keep OSC 52 off until you turn it on.
 
 Text that you paste goes into the editor as it is, on as many lines as it has.
 A paste does not send the message: press `Enter` when the message is complete.
@@ -73,20 +87,25 @@ does not.
 
 ## Commands from plugins
 
-A plugin adds a command with `register_command`, at the top level of the file.
-The command shows in `/plugins`.
+A plugin adds a command with `command`, from its `apply`, with `commands` in its
+`inject`. The command shows in `/plugins`, and it is on offer for as long as the
+plugin is loaded — no longer.
 
 ```rhai
-register_command(#{
-    name: "review",
-    description: "Ask for a review of the changes.",
-    run: |args| {
-        let diff = exec("git diff").stdout;
-        if diff == "" { return notice("nothing to review"); }
-        prompt("Review this diff:\n" + diff);
-        notice("reviewing…")
-    }
-});
+const inject = ["commands"];
+
+fn apply(ctx) {
+    command(#{
+        name: "review",
+        description: "Ask for a review of the changes.",
+        run: |args| {
+            let diff = exec("git diff").stdout;
+            if diff == "" { return notice("nothing to review"); }
+            prompt("Review this diff:\n" + diff);
+            notice("reviewing…")
+        }
+    });
+}
 ```
 
 `args` is the text after the name of the command.

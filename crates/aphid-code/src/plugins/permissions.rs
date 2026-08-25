@@ -4,7 +4,7 @@
 //! for every `ls` teaches you to hit yes without reading. What this catches is
 //! the small set of commands you would want to have been asked about.
 //!
-//! The decision itself is somebody else's job. The plugin holds a
+//! The decision itself is somebody else's job. [`Permissions`] holds a
 //! [`Confirmer`] — the TUI shows a modal, headless mode refuses — so the policy
 //! and the interface stay separate.
 
@@ -12,7 +12,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use aphid_agent::{Guard, Interest, PendingCall, Plugin};
+use aphid_agent::Blocked;
+use aphid_agent::ToolRequest;
+use aphid_agent::rt::{Bus, Component, Composition, Context, Disposer};
 use tokio::runtime::RuntimeFlavor;
 
 /// How much damage a command could do.
@@ -94,6 +96,45 @@ impl Permissions {
     /// place as before; there is no other worker for it to strand.
     ///
     /// [`block_in_place`]: tokio::task::block_in_place
+    /// Whether this call needs refusing, asking the user if it has to.
+    ///
+    /// `None` means it may run: either nothing about it is worth a question, or
+    /// the user has already said yes to exactly this.
+    #[must_use]
+    pub fn verdict(&self, tool: &str, arguments: &str) -> Option<Blocked> {
+        let (risk, summary) = assess(tool, arguments)?;
+        if risk == Risk::Read {
+            return None;
+        }
+
+        let key = format!("{tool}\u{0}{summary}");
+        if self
+            .remembered
+            .lock()
+            .is_ok_and(|remembered| remembered.contains(&key))
+        {
+            return None;
+        }
+
+        match self.ask(tool, &summary, risk) {
+            Decision::Allow => None,
+            Decision::AllowAlways => {
+                if let Ok(mut remembered) = self.remembered.lock() {
+                    remembered.insert(key);
+                }
+                None
+            }
+            // Refusing is not an error to recover from by retrying, so the run
+            // is asked to stop once the batch finishes.
+            Decision::Deny => Some(
+                Blocked::new(format!(
+                    "The user declined to run this. Ask before trying again: {summary}"
+                ))
+                .and_stop(),
+            ),
+        }
+    }
+
     fn ask(&self, tool: &str, summary: &str, risk: Risk) -> Decision {
         let multi = tokio::runtime::Handle::try_current()
             .is_ok_and(|handle| handle.runtime_flavor() == RuntimeFlavor::MultiThread);
@@ -105,46 +146,46 @@ impl Permissions {
     }
 }
 
-impl Plugin for Permissions {
+/// Subscribes the gate to a composition.
+pub struct PermissionGate {
+    permissions: Arc<Permissions>,
+    bus: Arc<Bus>,
+}
+
+impl PermissionGate {
+    #[must_use]
+    pub fn new(permissions: Arc<Permissions>, composition: &Composition) -> Self {
+        Self {
+            permissions,
+            bus: Arc::clone(&composition.bus),
+        }
+    }
+}
+
+impl Component for PermissionGate {
     fn name(&self) -> &str {
         "permissions"
     }
 
-    fn interests(&self) -> Interest {
-        Interest::TOOL_CALL
-    }
+    fn apply(&self, ctx: &Context) -> Result<(), String> {
+        let owner = ctx.uid();
+        let permissions = Arc::clone(&self.permissions);
 
-    fn on_tool_call(&self, call: &mut PendingCall<'_>) -> Guard {
-        let Some((risk, summary)) = assess(call.name(), call.arguments()) else {
-            return Guard::Allow;
-        };
-        if risk == Risk::Read {
-            return Guard::Allow;
-        }
-
-        let key = format!("{}\u{0}{summary}", call.name());
-        if self
-            .remembered
-            .lock()
-            .is_ok_and(|remembered| remembered.contains(&key))
-        {
-            return Guard::Allow;
-        }
-
-        match self.ask(call.name(), &summary, risk) {
-            Decision::Allow => Guard::Allow,
-            Decision::AllowAlways => {
-                if let Ok(mut remembered) = self.remembered.lock() {
-                    remembered.insert(key);
-                }
-                Guard::Allow
+        self.bus.on::<ToolRequest>(owner, move |request| {
+            // Somebody already refused, so there is nothing left to ask about
+            // — and asking anyway would put a question in front of the user
+            // for a call that is not going to run either way.
+            if request.is_blocked() {
+                return;
             }
-            // Blocking is not an error to recover from by retrying, so the run
-            // is asked to stop once the batch finishes.
-            Decision::Deny => Guard::block_and_stop(format!(
-                "The user declined to run this. Ask before trying again: {summary}"
-            )),
-        }
+            if let Some(blocked) = permissions.verdict(&request.name, &request.arguments) {
+                request.refuse(blocked);
+            }
+        });
+
+        let bus = Arc::clone(&self.bus);
+        ctx.effect(move || Disposer::sync(move || bus.unsubscribe::<ToolRequest>(owner)));
+        Ok(())
     }
 }
 

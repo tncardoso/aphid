@@ -30,7 +30,6 @@ aphid-code.workspace = true
 aphid-colony = { version = "0.2.0", path = "../aphid-colony", default-features = false, features = ["client"], optional = true }
 aphid-core.workspace = true
 aphid-nostr = { workspace = true, optional = true }
-aphid-plugin.workspace = true
 chrono.workspace = true
 compact_str.workspace = true
 croner.workspace = true

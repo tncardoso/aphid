@@ -11,6 +11,7 @@ use aphid_core::{Json, StopReason, Usage};
 use ratatui::crossterm::event::{KeyEvent, MouseEvent};
 
 use crate::plugins::permissions::Risk;
+use crate::tui::clipboard::Copied;
 use crate::tui::runtime::RequestId;
 
 /// What happened.
@@ -87,6 +88,11 @@ pub enum Msg {
     /// A mouse button, drag or wheel event. The app decides who it belongs to.
     Mouse(MouseEvent),
     Resize,
+    /// What became of a selection the app asked to copy.
+    Copied {
+        lines: usize,
+        outcome: Copied,
+    },
 
     // ---- the runtime ------------------------------------------------------
     /// The repaint tick, while something is streaming.
@@ -111,6 +117,6 @@ pub enum Msg {
     /// A surface handled an event and asked for these.
     SurfaceDone {
         plugin: String,
-        actions: Vec<aphid_plugin::SurfaceAction>,
+        actions: Vec<crate::scripting::SurfaceAction>,
     },
 }

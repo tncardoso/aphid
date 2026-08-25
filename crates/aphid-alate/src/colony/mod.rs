@@ -40,4 +40,4 @@ pub mod tools;
 
 pub use bridge::{Bridge, Connect, ConnectFuture, spawn};
 pub use relay::{Ask, Live, Next, Relay, RelayFn, keys};
-pub use tools::{Colony, ColonyPlugin, Directory, Outbound, Shared, read_tool, send_tool};
+pub use tools::{Colony, ColonyComponent, Directory, Outbound, Shared, read_tool, send_tool};

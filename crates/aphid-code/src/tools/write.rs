@@ -2,9 +2,11 @@
 
 use std::sync::Arc;
 
+use aphid_agent::rt::Bus;
+
+use crate::events::{Change, FileChange};
 use aphid_agent::{ToolCx, ToolHandler, ToolOutcome, tool_fn};
 use aphid_core::Json;
-use aphid_plugin::{Change, PluginHost};
 use serde::Deserialize;
 
 use super::paths::Workspace;
@@ -37,19 +39,19 @@ pub const DESCRIPTION: &str = "Write content to a file, creating it and any miss
      prefer the edit tool.";
 
 #[must_use]
-pub fn tool(workspace: &Workspace, host: Option<Arc<PluginHost>>) -> impl ToolHandler {
+pub fn tool(workspace: &Workspace, bus: Option<Arc<Bus>>) -> impl ToolHandler {
     let workspace = workspace.clone();
     tool_fn(NAME, DESCRIPTION, schema(), move |params: Params, cx| {
         let workspace = workspace.clone();
-        let host = host.clone();
-        async move { execute(&workspace, &params, host.as_deref(), &cx).await }
+        let bus = bus.clone();
+        async move { execute(&workspace, &params, bus.as_deref(), &cx).await }
     })
 }
 
 async fn execute(
     workspace: &Workspace,
     params: &Params,
-    host: Option<&PluginHost>,
+    bus: Option<&Bus>,
     cx: &ToolCx,
 ) -> ToolOutcome {
     let path = match workspace.resolve(&params.path) {
@@ -74,7 +76,7 @@ async fn execute(
     }
     // Read before writing, and only when a plugin is listening: the old text is
     // what makes a change hook useful, and reading every file for nobody is not.
-    let before = if host.is_some() && existed {
+    let before = if bus.is_some() && existed {
         tokio::fs::read_to_string(&path).await.ok()
     } else {
         None
@@ -96,8 +98,13 @@ async fn execute(
         ));
     }
 
-    if let Some(host) = host {
-        host.file_change(&path, Change::Write, before.as_deref(), &params.content);
+    if let Some(bus) = bus {
+        bus.emit(&mut FileChange {
+            path: path.clone(),
+            kind: Change::Write,
+            before: before.clone(),
+            after: params.content.clone(),
+        });
     }
 
     let verb = if existed { "Overwrote" } else { "Created" };

@@ -278,7 +278,7 @@ gated by a trust question: there is no terminal to ask at, and the home is a
 directory that you made for this agent.
 
 A plugin that calls `prompt` puts words to the agent in the same queue that a
-terminal uses. A plugin with an `on_tick` hook runs four times each second. See
+terminal uses. A plugin listening for `code/tick` runs four times each second. See
 [Plugins](aphid/plugins.md).
 
 Skills in `<home>/.aphid/skills` and `<home>/.agents/skills` work as they do in

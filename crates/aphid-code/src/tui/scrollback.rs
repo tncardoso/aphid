@@ -133,6 +133,10 @@ impl Scrollback {
     }
 
     pub fn clear(&mut self) {
+        // Counted before the clear, not after it: everything the cache holds
+        // is about entries that no longer exist, and the count is the only way
+        // it is told so.
+        self.evicted += self.entries.len();
         self.entries.clear();
         self.revs.clear();
         self.by_call.clear();
@@ -140,9 +144,6 @@ impl Scrollback {
         self.scroll = Scroll::Bottom;
         self.pending = 0;
         self.turn_start = None;
-        // Everything the cache holds is about entries that no longer exist,
-        // and the count says so.
-        self.evicted += self.entries.len();
     }
 
     /// Where the pane is parked.

@@ -12,6 +12,7 @@
 use ratatui::text::Line;
 
 use crate::tui::scrollback::{Scroll, Scrollback, Viewport, render_entry};
+use crate::tui::select::{self, Spot};
 
 /// What the last draw of the pane produced.
 #[derive(Default)]
@@ -28,6 +29,19 @@ pub struct ScrollbackCache {
     /// How many evictions the cached blocks account for. When the pane has
     /// dropped more than this, the same prefix has to go from here.
     evicted: usize,
+    /// Rises whenever every cached block was thrown away.
+    ///
+    /// A selection holds line numbers, and line numbers only mean something
+    /// for as long as the lines they count do. This is how the model is told
+    /// that they no longer do.
+    generation: u64,
+    /// The first line the last pass moved, if it moved any.
+    ///
+    /// A block that grows pushes everything below it down. Text arriving at
+    /// the end of the transcript therefore leaves a selection above it alone,
+    /// while a tool's output growing above one does not — and the model needs
+    /// to tell those two apart.
+    shifted_from: Option<usize>,
     /// How many blocks the last pass rendered. One changed entry must cost
     /// one block, so a test asserts the work and not only the bookkeeping.
     #[cfg(test)]
@@ -46,6 +60,7 @@ impl ScrollbackCache {
         {
             self.rebuilt = 0;
         }
+        self.shifted_from = None;
 
         self.drain_evicted(pane);
         if self.width != width || self.show_thinking != pane.show_thinking {
@@ -79,6 +94,24 @@ impl ScrollbackCache {
                 self.anchor_at(top)
             },
         }
+    }
+
+    /// How many times every block was thrown away.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The first line the last layout moved, if it moved any.
+    #[must_use]
+    pub fn shifted_from(&self) -> Option<usize> {
+        self.shifted_from
+    }
+
+    /// The text a selection covers.
+    #[must_use]
+    pub fn selected_text(&self, span: (Spot, Spot)) -> String {
+        select::extract(&self.lines, span)
     }
 
     /// The lines a viewport shows, cloned out of the cache.
@@ -118,6 +151,7 @@ impl ScrollbackCache {
         }
 
         let removed_lines = self.starts[gone];
+        self.generation += 1;
         self.starts.drain(0..gone);
         self.revs.drain(0..gone);
         self.lines.drain(0..removed_lines);
@@ -131,6 +165,7 @@ impl ScrollbackCache {
         self.starts.clear();
         self.revs.clear();
         self.width = 0;
+        self.generation += 1;
     }
 
     /// Rebuild every block. Only a new width or a thinking toggle needs this:
@@ -139,6 +174,7 @@ impl ScrollbackCache {
         self.lines.clear();
         self.starts.clear();
         self.revs.clear();
+        self.generation += 1;
 
         for (entry, rev) in pane.blocks() {
             let rendered = render_entry(entry, width, pane.show_thinking);
@@ -176,6 +212,11 @@ impl ScrollbackCache {
                         - start;
                     let delta = rendered.len() as isize - old_len as isize;
                     self.lines.splice(start..start + old_len, rendered);
+                    // From here down, a line number no longer names the text it
+                    // named before: this block was re-wrapped, and anything a
+                    // length change pushed came after it.
+                    self.shifted_from =
+                        Some(self.shifted_from.map_or(start, |first| first.min(start)));
                     if delta != 0 {
                         for start in &mut self.starts[index + 1..] {
                             *start = (*start as isize + delta) as usize;
@@ -348,6 +389,75 @@ mod tests {
             pane.scroll(),
             Scroll::Bottom,
             "the content it held is gone, so it holds nothing"
+        );
+    }
+
+    #[test]
+    fn clearing_the_pane_empties_the_cache() {
+        let mut pane = notices(10);
+        let mut cache = ScrollbackCache::default();
+        assert!(frame(&mut pane, &mut cache, 5).total > 0);
+
+        pane.clear();
+        assert_eq!(
+            frame(&mut pane, &mut cache, 5).total,
+            0,
+            "a cleared transcript leaves nothing on the screen"
+        );
+    }
+
+    #[test]
+    fn text_arriving_below_a_line_does_not_move_it() {
+        let mut pane = notices(10);
+        let mut cache = ScrollbackCache::default();
+        let above = frame(&mut pane, &mut cache, 5).total;
+
+        pane.push_text("an answer");
+        frame(&mut pane, &mut cache, 5);
+        pane.push_text(" with more");
+        frame(&mut pane, &mut cache, 5);
+
+        let shifted = cache.shifted_from().expect("the answer was re-wrapped");
+        assert!(
+            shifted >= above,
+            "the notices above the growing answer stayed where they were: \
+             moved from {shifted}, and there are {above} lines above"
+        );
+    }
+
+    #[test]
+    fn a_block_growing_above_reports_the_line_it_moved_from() {
+        let mut pane = Scrollback::default();
+        pane.push_tool_call("c1", "bash", r#"{"command":"ls"}"#);
+        for number in 0..10 {
+            pane.push_notice(format!("line {number}"));
+        }
+        let mut cache = ScrollbackCache::default();
+        frame(&mut pane, &mut cache, 5);
+        assert_eq!(cache.shifted_from(), None, "a settled pane moves nothing");
+
+        pane.push_tool_progress("c1", "output");
+        frame(&mut pane, &mut cache, 5);
+
+        assert_eq!(
+            cache.shifted_from(),
+            Some(0),
+            "the first block grew, so everything after it moved"
+        );
+    }
+
+    #[test]
+    fn a_new_width_moves_the_generation_on() {
+        let pane = notices(10);
+        let mut cache = ScrollbackCache::default();
+        cache.layout(&pane, 40, 10);
+        let before = cache.generation();
+        cache.layout(&pane, 20, 10);
+
+        assert_ne!(
+            cache.generation(),
+            before,
+            "every line was re-wrapped, so no line number carries over"
         );
     }
 

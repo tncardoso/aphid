@@ -16,7 +16,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use aphid_agent::{Interest, Plugin, ToolHandler, ToolOutcome, tool_fn};
+use aphid_agent::rt::{Component, Composition, Context};
+use aphid_agent::{ToolHandler, ToolOutcome, Toolbox, tool_fn};
 use aphid_nostr::nostr::event::Event;
 use aphid_nostr::nostr::filter::{Filter, SingleLetterTag};
 use aphid_nostr::nostr::key::PublicKey;
@@ -426,34 +427,35 @@ fn transcript(colony: &Colony, events: &[Event]) -> String {
 
 /// Ships `colony_send` and `colony_read`, and nothing else.
 ///
-/// It subscribes to no hooks, exactly as [`CronPlugin`] does: the connection is
+/// It subscribes to nothing, exactly as [`CronComponent`] does: the connection is
 /// driven by the bridge task, and nothing inside a run touches it.
 ///
-/// [`CronPlugin`]: crate::cron::CronPlugin
-pub struct ColonyPlugin {
+/// [`CronComponent`]: crate::cron::CronComponent
+pub struct ColonyComponent {
     colony: Shared,
+    tools: Arc<Toolbox>,
 }
 
-impl ColonyPlugin {
+impl ColonyComponent {
     #[must_use]
-    pub fn new(colony: Shared) -> Self {
-        Self { colony }
+    pub fn new(colony: Shared, composition: &Composition) -> Self {
+        Self {
+            colony,
+            tools: Arc::clone(&composition.tools),
+        }
     }
 }
 
-impl Plugin for ColonyPlugin {
+impl Component for ColonyComponent {
     fn name(&self) -> &str {
         "colony"
     }
 
-    fn interests(&self) -> Interest {
-        Interest::empty()
-    }
-
-    fn tools(&self) -> Vec<Arc<dyn ToolHandler>> {
-        vec![
-            Arc::new(send_tool(self.colony.clone())),
-            Arc::new(read_tool(self.colony.clone())),
-        ]
+    fn apply(&self, ctx: &Context) -> Result<(), String> {
+        self.tools
+            .contribute(ctx, Arc::new(send_tool(self.colony.clone())));
+        self.tools
+            .contribute(ctx, Arc::new(read_tool(self.colony.clone())));
+        Ok(())
     }
 }

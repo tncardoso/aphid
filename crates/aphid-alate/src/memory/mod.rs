@@ -19,7 +19,7 @@ pub mod store;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-pub use plugin::MemoryPlugin;
+pub use plugin::MemoryComponent;
 pub use store::Memory;
 
 /// The deepest a memory path may go. A tree deeper than this is a filing system

@@ -11,11 +11,11 @@
 //! process could reach the agent, and file permissions are a better answer than
 //! a token nobody rotates.
 //!
-//! [`GatewayPlugin`] and [`GatewaySink`] are what turn a run into frames. They
-//! follow [`UiPlugin`] and [`UiSink`] closely — the same hooks and the same
+//! [`GatewayComponent`] and [`GatewaySink`] are what turn a run into frames. They
+//! follow [`UiComponent`] and [`UiSink`] closely — the same events and the same
 //! mapping — because the fan-out channel differs and nothing else does.
 //!
-//! [`UiPlugin`]: aphid_code::tui::UiPlugin
+//! [`UiComponent`]: aphid_code::tui::UiComponent
 //! [`UiSink`]: aphid_code::tui::UiSink
 
 pub mod client;
@@ -26,9 +26,11 @@ pub use client::{Client, Reader, Writer, is_listening};
 pub use server::{Event, Publisher, Server};
 pub use wire::{Answer, Envelope, Frame, Request};
 
+use std::sync::Arc;
+
+use aphid_agent::rt::{Component, Composition, Context, Disposer};
 use aphid_agent::{
-    Cx, Flow, Guard, Interest, PendingCall, Plugin, ResultCx, RunOutcome, StreamCx, ToolOutcome,
-    TurnSummary,
+    RunEnd, StreamCx, ToolContent, ToolProgress, ToolRequest, ToolResult, TurnEnd, TurnStart,
 };
 // Renamed: this module also exports a gateway `Event`, which is what the
 // daemon hears from the socket rather than what a provider streams.
@@ -50,7 +52,7 @@ impl GatewaySink {
     }
 }
 
-impl aphid_plugin::Sink for GatewaySink {
+impl aphid_agent::Sink for GatewaySink {
     fn notify(&self, plugin: &str, text: &str) {
         self.publisher.send(Frame::Notice {
             text: format!("{plugin}: {text}"),
@@ -67,113 +69,142 @@ impl aphid_plugin::Sink for GatewaySink {
 }
 
 /// Turns the run into frames.
-pub struct GatewayPlugin {
+pub struct GatewayComponent {
     publisher: Publisher,
+    composition: Composition,
 }
 
-impl GatewayPlugin {
+impl GatewayComponent {
     #[must_use]
-    pub fn new(publisher: Publisher) -> Self {
-        Self { publisher }
+    pub fn new(publisher: Publisher, composition: &Composition) -> Self {
+        Self {
+            publisher,
+            composition: composition.clone(),
+        }
     }
 }
 
-impl Plugin for GatewayPlugin {
+impl Component for GatewayComponent {
     fn name(&self) -> &str {
         "gateway"
     }
 
-    fn interests(&self) -> Interest {
-        Interest::TURN_START
-            | Interest::EVENT
-            | Interest::TOOL_CALL
-            | Interest::TOOL_PROGRESS
-            | Interest::TOOL_RESULT
-            | Interest::TURN_END
-            | Interest::RUN_END
-    }
+    fn apply(&self, ctx: &Context) -> Result<(), String> {
+        let owner = ctx.uid();
+        let bus = Arc::clone(&self.composition.bus);
 
-    fn on_turn_start(&self, _cx: &mut Cx<'_>) {
-        self.publisher.send(Frame::TurnStarted);
-    }
+        let publisher = self.publisher.clone();
+        bus.on::<TurnStart>(owner, move |_| publisher.send(Frame::TurnStarted));
 
-    fn on_event(&self, event: &Protocol, cx: &StreamCx<'_>) {
-        match *event {
-            Protocol::BlockStart {
-                index,
-                kind: BlockKind::ToolCall,
-            } => self.publisher.send(Frame::ToolStreamStart {
-                block: index,
-                name: tool_name(cx, index),
-            }),
-            Protocol::Delta {
-                index,
-                kind: BlockKind::ToolCall,
-                span,
-            } => self.publisher.send(Frame::ToolStreamDelta {
-                block: index,
-                bytes: span.len() as usize,
-            }),
-            Protocol::Delta {
-                kind: BlockKind::Text,
-                span,
-                ..
-            } => self.publisher.send(Frame::Text {
-                text: cx.text(span).to_owned(),
-            }),
-            Protocol::Delta {
-                kind: BlockKind::Thinking,
-                span,
-                ..
-            } => self.publisher.send(Frame::Thinking {
-                text: cx.text(span).to_owned(),
-            }),
-            _ => {}
-        }
-    }
-
-    fn on_tool_call(&self, call: &mut PendingCall<'_>) -> Guard {
-        self.publisher.send(Frame::ToolCall {
-            id: call.id().to_owned(),
-            name: call.name().to_owned(),
-            arguments: call.arguments().to_owned(),
+        let publisher = self.publisher.clone();
+        bus.on::<ToolRequest>(owner, move |request| {
+            publisher.send(Frame::ToolCall {
+                id: request.id.clone(),
+                name: request.name.clone(),
+                arguments: request.arguments.clone(),
+            });
         });
-        Guard::Allow
-    }
 
-    fn on_tool_progress(&self, call_id: &str, _tool: &str, chunk: &str) {
-        self.publisher.send(Frame::ToolProgress {
-            id: call_id.to_owned(),
-            chunk: chunk.to_owned(),
+        let publisher = self.publisher.clone();
+        bus.on::<ToolProgress>(owner, move |progress| {
+            publisher.send(Frame::ToolProgress {
+                id: progress.call_id.clone(),
+                chunk: progress.chunk.clone(),
+            });
         });
-    }
 
-    fn on_tool_result(&self, outcome: &mut ToolOutcome, cx: &ResultCx<'_>) {
-        self.publisher.send(Frame::ToolResult {
-            id: cx.id().to_owned(),
-            name: cx.name().to_owned(),
-            text: outcome.text_content(),
-            is_error: outcome.is_error,
-            details: outcome.details.clone(),
+        let publisher = self.publisher.clone();
+        bus.on::<ToolResult>(owner, move |result| {
+            publisher.send(Frame::ToolResult {
+                id: result.id.clone(),
+                name: result.name.clone(),
+                text: text_of(&result.content),
+                is_error: result.is_error,
+                details: result.details.clone(),
+            });
         });
-    }
 
-    fn on_turn_end(&self, _cx: &mut Cx<'_>, turn: &TurnSummary) -> Flow {
-        self.publisher.send(Frame::TurnEnded {
-            usage: turn.usage,
-            stop: turn.stop_reason,
-            error: turn.error.clone(),
+        let publisher = self.publisher.clone();
+        bus.on::<TurnEnd>(owner, move |end| {
+            publisher.send(Frame::TurnEnded {
+                usage: end.summary.usage,
+                stop: end.summary.stop_reason,
+                error: end.summary.error.clone(),
+            });
         });
-        Flow::Continue
-    }
 
-    fn on_run_end(&self, _cx: &mut Cx<'_>, outcome: &RunOutcome) {
-        self.publisher.send(Frame::RunEnded {
-            stop: outcome.stop,
-            turns: outcome.turns,
-            error: outcome.error.clone(),
+        let publisher = self.publisher.clone();
+        bus.on::<RunEnd>(owner, move |end| {
+            publisher.send(Frame::RunEnded {
+                stop: end.stop,
+                turns: end.turns,
+                error: end.error.clone(),
+            });
         });
+
+        let publisher = self.publisher.clone();
+        self.composition
+            .stream
+            .subscribe(owner, move |event, cx| match *event {
+                Protocol::BlockStart {
+                    index,
+                    kind: BlockKind::ToolCall,
+                } => publisher.send(Frame::ToolStreamStart {
+                    block: index,
+                    name: tool_name(cx, index),
+                }),
+                Protocol::Delta {
+                    index,
+                    kind: BlockKind::ToolCall,
+                    span,
+                } => publisher.send(Frame::ToolStreamDelta {
+                    block: index,
+                    bytes: span.len() as usize,
+                }),
+                Protocol::Delta {
+                    kind: BlockKind::Text,
+                    span,
+                    ..
+                } => publisher.send(Frame::Text {
+                    text: cx.text(span).to_owned(),
+                }),
+                Protocol::Delta {
+                    kind: BlockKind::Thinking,
+                    span,
+                    ..
+                } => publisher.send(Frame::Thinking {
+                    text: cx.text(span).to_owned(),
+                }),
+                _ => {}
+            });
+
+        let bus = Arc::clone(&self.composition.bus);
+        let stream = Arc::clone(&self.composition.stream);
+        ctx.effect(move || {
+            Disposer::sync(move || {
+                bus.unsubscribe::<TurnStart>(owner);
+                bus.unsubscribe::<ToolRequest>(owner);
+                bus.unsubscribe::<ToolProgress>(owner);
+                bus.unsubscribe::<ToolResult>(owner);
+                bus.unsubscribe::<TurnEnd>(owner);
+                bus.unsubscribe::<RunEnd>(owner);
+                stream.unsubscribe(owner);
+            })
+        });
+        Ok(())
     }
+}
+
+/// The text of a tool result, joined across its blocks.
+fn text_of(content: &[ToolContent]) -> String {
+    content
+        .iter()
+        .filter_map(|block| match block {
+            ToolContent::Text(text) => Some(text.as_str()),
+            ToolContent::Image { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 /// The name of the tool call in the block at `index`.

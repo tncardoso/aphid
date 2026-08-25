@@ -9,7 +9,7 @@ Aphid is a fast and hackable agent harness.
 - Fast startup times
 - Full debuggability, and extensibility via plugins
 - Plugins can be written in rhai (https://github.com/rhaiscript/rhai) — see `docs/aphid/plugins.md`
-  and the `aphid-plugin` crate. WebAssembly plugins are still to come
+  and `aphid-code`'s `scripting` module. WebAssembly plugins are still to come
 
 ## Instructions
 

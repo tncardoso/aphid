@@ -15,23 +15,24 @@
 
 use std::borrow::Cow;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::task::Context;
 
-use aphid_core::{
-    ContentInput, ContentRef, Event, Model, StopReason, ToolResultMeta, Transcript, Usage,
-};
+use aphid_core::{ContentInput, ContentRef, Event, StopReason, ToolResultMeta, Transcript, Usage};
 use futures_core::Stream;
 use tokio::task::JoinSet;
 
 use crate::agent::{Agent, RunOutcome};
-use crate::plugin::{Cx, Flow, Guard, PendingCall, PromptDraft, ResultCx, StreamCx, TurnSummary};
-use crate::registry::Plugins;
-use crate::tool::{Execution, ToolCall, ToolContent, ToolCx, ToolOutcome};
+use crate::events::{self, Blocked, Edit, Moment, Run};
+use crate::plugin::{StreamCx, TurnSummary};
+use crate::rt::Bus;
+use crate::tool::{Execution, ToolCall, ToolContent, ToolCx, ToolHandler, ToolOutcome};
 
 impl Agent {
     /// Append a user message and run to completion.
     pub async fn prompt(&mut self, text: &str) -> RunOutcome {
+        self.ready().await;
         let text = match self.draft(text) {
             Ok(text) => text,
             Err(reason) => return RunOutcome::rejected(reason),
@@ -43,9 +44,10 @@ impl Agent {
     /// Append a user message built from mixed content — text and images — and
     /// run to completion.
     pub async fn prompt_parts(&mut self, parts: &[ContentInput<'_>]) -> RunOutcome {
+        self.ready().await;
         // Plugins are shown the text, not the attachments. A rewrite therefore
         // replaces every text part with one, and the images ride along in order.
-        if self.plugins.observes_prompts() {
+        if self.observes_prompts() {
             let joined = join_text(parts);
             let edited = match self.draft(&joined) {
                 Ok(text) => text,
@@ -70,23 +72,35 @@ impl Agent {
 
     /// Show a prompt to the plugins before anything is appended.
     ///
-    /// `Err` is the reason a hook turned it away. A rejected prompt leaves the
-    /// transcript untouched, so the conversation is exactly as it was.
+    /// `Err` is the reason a listener turned it away. A rejected prompt leaves
+    /// the transcript untouched, so the conversation is exactly as it was.
     fn draft<'a>(&self, text: &'a str) -> Result<Cow<'a, str>, String> {
-        if !self.plugins.observes_prompts() {
+        if !self.observes_prompts() {
             return Ok(Cow::Borrowed(text));
         }
 
-        let mut draft = PromptDraft {
-            text: Cow::Borrowed(text),
-            rejected: None,
-        };
-        self.plugins.prompt(&mut draft);
+        let mut prompt = events::Prompt::new(text.to_owned());
+        self.bus.emit(&mut prompt);
 
-        match draft.rejected {
-            Some(reason) => Err(reason),
-            None => Ok(draft.text),
+        match prompt.rejection() {
+            Some(reason) => Err(reason.to_owned()),
+            None => Ok(Cow::Owned(prompt.text)),
         }
+    }
+
+    fn observes_prompts(&self) -> bool {
+        self.bus.has_listeners::<events::Prompt>()
+    }
+
+    /// A payload for the run-scoped events, and the handle that applies what a
+    /// listener asked for.
+    fn run_payload(&self, turn: u32, usage: Usage) -> Run {
+        Run::new(
+            self.model.clone(),
+            turn,
+            usage,
+            std::sync::Arc::clone(&self.cancel),
+        )
     }
 
     /// Run from the transcript as it stands, without appending anything.
@@ -97,7 +111,24 @@ impl Agent {
         self.run().await
     }
 
+    /// Load anything mounted since the last time through.
+    ///
+    /// Called before the prompt is drafted, not just before the run: the
+    /// prompt is announced first, and a component mounted for it would
+    /// otherwise miss the very thing it was mounted for.
+    async fn ready(&self) {
+        if let Some(composition) = &self.composition {
+            composition.settle().await;
+        }
+    }
+
     async fn run(&mut self) -> RunOutcome {
+        // Assembly code that could not await gets to be ordinary assembly
+        // code: whatever it mounted is loaded by the time anything is
+        // announced. `prompt` settles earlier still, because the prompt is
+        // announced before the run begins.
+        self.ready().await;
+
         self.cancel.store(false, Ordering::Relaxed);
         let tool_cx = self.tool_cx();
 
@@ -110,14 +141,11 @@ impl Agent {
         };
 
         {
-            let mut cx = cx(
-                &mut self.transcript,
-                &self.model,
-                0,
-                outcome.usage,
-                &self.cancel,
-            );
-            self.plugins.run_start(&mut cx);
+            let mut start = events::RunStart(self.run_payload(0, outcome.usage));
+            self.bus.emit(&mut start);
+            apply_edits(&mut self.transcript, &start.0);
+            self.transcript_listeners
+                .announce(Moment::RunStart, &self.transcript, &start.0);
         }
 
         let mut turn: u32 = 0;
@@ -128,36 +156,34 @@ impl Agent {
                 break;
             }
             {
-                let mut cx = cx(
-                    &mut self.transcript,
-                    &self.model,
-                    turn,
-                    outcome.usage,
-                    &self.cancel,
-                );
-                self.plugins.turn_start(&mut cx);
+                let mut start = events::TurnStart(self.run_payload(turn, outcome.usage));
+                self.bus.emit(&mut start);
+                apply_edits(&mut self.transcript, &start.0);
             }
 
             // The stream borrows nothing once it resolves, so the immutable
             // borrows of the transcript and the tool table end here.
             let backend = self.stream_fn.clone();
+            // Read afresh each turn rather than once at build, which is what
+            // lets a component contribute or withdraw a tool mid-session.
+            let declarations = self.tools.declarations();
             let mut stream = backend
-                .stream(
-                    &self.model,
-                    &self.transcript,
-                    self.tools.declarations(),
-                    &self.options,
-                )
+                .stream(&self.model, &self.transcript, &declarations, &self.options)
                 .await;
 
-            let observed = self.plugins.observes_events();
+            // Taken once per stream, not once per token: the list cannot
+            // change under a response, and the read costs nothing thereafter.
+            let listeners = self.stream_listeners.snapshot();
+            let observed = !listeners.is_empty();
             while let Some(event) = next(&mut stream).await {
                 if observed {
                     let stream_cx = StreamCx {
                         stream: &*stream,
                         turn,
                     };
-                    self.plugins.event(&event, &stream_cx);
+                    for listener in listeners.iter() {
+                        listener(&event, &stream_cx);
+                    }
                 }
             }
 
@@ -178,14 +204,14 @@ impl Agent {
             outcome.last = Some(message);
 
             {
-                let mut cx = cx(
-                    &mut self.transcript,
-                    &self.model,
-                    turn - 1,
-                    outcome.usage,
-                    &self.cancel,
-                );
-                self.plugins.message(&mut cx, message);
+                let mut event = events::Message {
+                    run: self.run_payload(turn - 1, outcome.usage),
+                    message,
+                };
+                self.bus.emit(&mut event);
+                apply_edits(&mut self.transcript, &event.run);
+                self.transcript_listeners
+                    .announce(Moment::Message, &self.transcript, &event.run);
             }
 
             // Read the requested calls out of the arena. `calls` borrows the
@@ -198,8 +224,8 @@ impl Agent {
                         id: call.id(),
                         name: call.name(),
                         arguments: Cow::Borrowed(call.arguments_raw()),
-                        handler: self.tools.get(call.name()).map(Clone::clone),
-                        block: None,
+                        handler: self.tools.get(call.name()),
+                        blocked: None,
                     });
                 }
             }
@@ -210,11 +236,38 @@ impl Agent {
 
             if !done {
                 for call in &mut calls {
-                    self.plugins.tool_call(call);
+                    // A rewrite and a refusal are different decisions, so
+                    // they are different events: a listener that only edits
+                    // the arguments cannot accidentally block the call. The
+                    // rewrite runs first, so what the guards are shown is what
+                    // the tool would actually receive.
+                    if self.bus.has_listeners::<events::ToolArguments>() {
+                        let before = call.arguments.clone().into_owned();
+                        let edited = self
+                            .bus
+                            .waterfall::<events::ToolArguments>(before.clone(), &|args| args);
+                        if edited != before {
+                            call.arguments = Cow::Owned(edited);
+                        }
+                    }
+
+                    let mut request = events::ToolRequest {
+                        id: call.id.to_owned(),
+                        name: call.name.to_owned(),
+                        arguments: call.arguments.clone().into_owned(),
+                        known: call.handler.is_some(),
+                        blocked: None,
+                    };
+                    self.bus.emit(&mut request);
+                    if request.arguments != *call.arguments {
+                        call.arguments = Cow::Owned(request.arguments);
+                    }
+                    if call.blocked.is_none() {
+                        call.blocked = request.blocked;
+                    }
                 }
 
-                let (batch, all_terminate) =
-                    execute(&self.plugins, &calls, &tool_cx, turn - 1).await;
+                let (batch, all_terminate) = execute(&self.bus, &calls, &tool_cx, turn - 1).await;
                 results = batch;
                 done = all_terminate;
             }
@@ -235,18 +288,20 @@ impl Agent {
                 tool_calls,
                 error,
             };
-            let flow = {
-                let mut cx = cx(
-                    &mut self.transcript,
-                    &self.model,
-                    turn - 1,
-                    outcome.usage,
-                    &self.cancel,
-                );
-                self.plugins.turn_end(&mut cx, &summary)
+            let stop_asked = {
+                let mut event = events::TurnEnd {
+                    run: self.run_payload(turn - 1, outcome.usage),
+                    summary,
+                    stop: false,
+                };
+                self.bus.emit(&mut event);
+                apply_edits(&mut self.transcript, &event.run);
+                self.transcript_listeners
+                    .announce(Moment::TurnEnd, &self.transcript, &event.run);
+                event.stop
             };
 
-            if done || flow == Flow::Stop || turn >= self.max_turns {
+            if done || stop_asked || turn >= self.max_turns {
                 break;
             }
         }
@@ -258,34 +313,45 @@ impl Agent {
         }
 
         {
-            let mut cx = cx(
-                &mut self.transcript,
-                &self.model,
-                turn,
-                outcome.usage,
-                &self.cancel,
-            );
-            self.plugins.run_end(&mut cx, &outcome);
+            let mut event = events::RunEnd::new(self.run_payload(turn, outcome.usage), &outcome);
+            self.bus.emit(&mut event);
+            apply_edits(&mut self.transcript, &event.run);
         }
 
         outcome
     }
 }
 
-fn cx<'a>(
-    transcript: &'a mut Transcript,
-    model: &'a Model,
-    turn: u32,
-    usage: Usage,
-    cancel: &'a AtomicBool,
-) -> Cx<'a> {
-    Cx {
-        transcript,
-        model,
-        turn,
-        usage,
-        cancel,
+/// Apply what listeners asked for, in the order they asked.
+///
+/// Deferred rather than applied inside the listener because the payload holds
+/// no borrow of the transcript — which is what lets a listener keep it, or
+/// answer from another thread.
+fn apply_edits(transcript: &mut Transcript, run: &Run) {
+    for edit in run.take_edits() {
+        match edit {
+            Edit::Note(text) => {
+                transcript.push_system(&text);
+            }
+            Edit::User(text) => {
+                transcript.push_user(&text);
+            }
+        }
     }
+}
+
+/// A tool call read out of the transcript and not yet run.
+///
+/// The loop's own bookkeeping, not a public surface: `arguments` borrows the
+/// transcript arena until a listener replaces it, so inspecting a call costs
+/// nothing and rewriting one costs a single allocation.
+struct PendingCall<'a> {
+    id: &'a str,
+    name: &'a str,
+    arguments: Cow<'a, str>,
+    handler: Option<Arc<dyn ToolHandler>>,
+    /// Why this call will not run, if a listener refused it.
+    blocked: Option<Blocked>,
 }
 
 /// `futures_core` gives us the trait but no combinators, and one `poll_fn` is
@@ -314,7 +380,7 @@ fn join_text(parts: &[ContentInput<'_>]) -> String {
 }
 
 async fn execute(
-    plugins: &Plugins,
+    bus: &Bus,
     calls: &[PendingCall<'_>],
     tool_cx: &ToolCx,
     turn: u32,
@@ -326,9 +392,9 @@ async fn execute(
     // and correct.
     let mut pending: Vec<usize> = Vec::with_capacity(calls.len());
     for (index, call) in calls.iter().enumerate() {
-        match (&call.block, &call.handler) {
-            (Some(Guard::Block { reason, .. }), _) => {
-                outcomes[index] = Some(ToolOutcome::error(reason.clone()));
+        match (&call.blocked, &call.handler) {
+            (Some(blocked), _) => {
+                outcomes[index] = Some(ToolOutcome::error(blocked.reason.clone()));
             }
             (_, None) => {
                 outcomes[index] = Some(ToolOutcome::error(format!(
@@ -408,19 +474,25 @@ async fn execute(
             .take()
             .unwrap_or_else(|| ToolOutcome::error(format!("`{}` produced no result", call.name)));
 
-        if let Some(Guard::Block { terminate, .. }) = &call.block {
-            outcome.terminate = *terminate;
+        if let Some(blocked) = &call.blocked {
+            outcome.terminate = blocked.terminate;
         }
 
-        plugins.tool_result(
-            &mut outcome,
-            &ResultCx {
-                id: call.id,
-                name: call.name,
-                arguments: &call.arguments,
+        if bus.has_listeners::<events::ToolResult>() {
+            let mut event = events::ToolResult {
+                id: call.id.to_owned(),
+                name: call.name.to_owned(),
+                arguments: call.arguments.clone().into_owned(),
                 turn,
-            },
-        );
+                content: std::mem::take(&mut outcome.content),
+                is_error: outcome.is_error,
+                details: outcome.details.clone(),
+            };
+            bus.emit(&mut event);
+            outcome.content = event.content;
+            outcome.is_error = event.is_error;
+            outcome.details = event.details;
+        }
 
         all_terminate &= outcome.terminate;
         results.push(outcome.into_meta(call.id, call.name));
