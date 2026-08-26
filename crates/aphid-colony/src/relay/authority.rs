@@ -11,6 +11,11 @@
 //! moderation log is hundreds of rows. When it is not, the answer is a snapshot
 //! table with a `last_applied` id, and not a second source of truth.
 //!
+//! The one thing the log does not say is that a channel the configuration names
+//! exists, so those are made before the fold runs and not after it. A join is an
+//! action on a group, and a fold that met one before the group was there would
+//! drop it — which is how a colony forgets who is in `#general` at every start.
+//!
 //! Because [`group::metadata`] and its siblings are a function of the group
 //! alone, re-signing is free: the relay builds all four for every group at
 //! start-up and hands them to the store, and a group that has not changed
@@ -61,14 +66,22 @@ pub struct Authority {
 impl Authority {
     /// Replay the log and take charge of what it says.
     ///
+    /// The channels the configuration names are made **before** the replay.
+    /// Nothing in the log makes them — they are there because the configuration
+    /// says so — and a join is an action on a group that has to exist for it to
+    /// apply to. A colony that made them after the fold would drop every join,
+    /// every invite and every kick they ever had, and so would forget who is in
+    /// them at each start.
+    ///
     /// # Errors
     ///
     /// Fails when the log cannot be read.
-    pub fn rebuild(store: &Store, keys: Keys) -> Result<Self, Error> {
+    pub fn rebuild(store: &Store, keys: Keys, channels: &[String]) -> Result<Self, Error> {
         let mut authority = Self {
             keys,
             groups: HashMap::new(),
         };
+        authority.make_channels(channels);
 
         for event in store.moderation_log()? {
             // A malformed event that was stored before a rule tightened is
@@ -107,6 +120,11 @@ impl Authority {
     /// A fresh colony needs somewhere to talk before anybody can ask for one.
     /// The relay is the owner, which is what lets anybody join them.
     ///
+    /// [`Authority::rebuild`] has already made the ones that were there at the
+    /// last start, so this is for a channel the configuration gained since —
+    /// and for one the log unmade, because the configuration is what says a
+    /// colony has it.
+    ///
     /// # Errors
     ///
     /// Fails when a group cannot be signed for or stored.
@@ -115,7 +133,16 @@ impl Authority {
         store: &Store,
         names: &[String],
     ) -> Result<Vec<Event>, Error> {
-        let mut made = Vec::new();
+        if self.make_channels(names) == 0 {
+            return Ok(Vec::new());
+        }
+        self.publish_metadata(store)
+    }
+
+    /// Put every named channel that is missing into the state, and say how many
+    /// that was. Signs nothing: the caller says when the metadata goes out.
+    fn make_channels(&mut self, names: &[String]) -> usize {
+        let mut made = 0;
         for name in names {
             let Ok(id) = GroupId::parse(name) else {
                 continue;
@@ -126,12 +153,9 @@ impl Authority {
             let now = Timestamp::now();
             self.groups
                 .insert(id.clone(), Group::create(id, self.keys.public_key(), now));
-            made.push(());
+            made += 1;
         }
-        if made.is_empty() {
-            return Ok(Vec::new());
-        }
-        self.publish_metadata(store)
+        made
     }
 
     /// Sign what every group is, and store what is not already stored.

@@ -55,6 +55,10 @@
   the model about the word `/tools`.
 - `/model` and `/think` typed while the model is replying now take effect when
   the reply ends. The change used to be dropped without a word.
+- A colony no longer forgets who joined its channels when it is restarted.
+  Anybody who had joined `#general` was quietly put out of it at the next
+  start, and their next message came back as `restricted: join general before
+  you talk in it`. Re-joining is no longer necessary.
 
 ## [0.2.0] - 2026-08-16
 

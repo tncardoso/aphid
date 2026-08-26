@@ -641,3 +641,48 @@ async fn an_admin_may_invite_and_a_member_may_not() {
     let why = refused(&client).await;
     assert!(why.contains("only an admin"), "{why}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_may_still_talk_after_a_restart() {
+    let temp = Temp::new("rejoin");
+    let database = temp.path("colony.db");
+    let address = "127.0.0.1:0".parse().expect("an address");
+    let keys = Keys::generate();
+    let general = id("general");
+    let joiner = Keys::generate();
+
+    let start = |keys: Keys| {
+        let database = database.clone();
+        async move {
+            Relay::bind(Options {
+                address,
+                store: Store::open(&database).expect("a store"),
+                keys,
+                channels: vec!["general".to_owned()],
+                history: 1_000,
+            })
+            .await
+            .expect("starts")
+        }
+    };
+
+    {
+        let relay = start(keys.clone()).await;
+        let url = format!("ws://{}", relay.address());
+        let client = join(&url, &joiner, &general).await;
+        client
+            .publish(said(&joiner, &general, "morning"))
+            .await
+            .expect("says something");
+        accepted(&client).await;
+    }
+
+    let again = start(keys).await;
+    let url = format!("ws://{}", again.address());
+    let client = Client::connect(&url).await.expect("connects");
+    client
+        .publish(said(&joiner, &general, "still here"))
+        .await
+        .expect("tries");
+    accepted(&client).await;
+}
