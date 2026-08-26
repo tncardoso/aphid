@@ -32,7 +32,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::config::Config;
 use crate::cron::{self, Crontab};
-use crate::gateway::wire::{Envelope, Frame, Request};
+use crate::gateway::wire::{Envelope, Frame, ProcessInfo, Request};
 use crate::gateway::{Event, GatewaySink, Server};
 use crate::heartbeat::Schedule;
 use crate::home::Home;
@@ -562,6 +562,24 @@ fn handle(alate: &mut Alate, event: Event) {
                 }) {
                     alate.watch(connection, &id);
                 }
+            }
+            Request::Processes => {
+                // The registry is the daemon's, one for every session, so the
+                // answer can only come from here. Sent to the connection that
+                // asked, exactly as `Sessions` is.
+                let live = alate
+                    .blueprint
+                    .processes
+                    .snapshot()
+                    .iter()
+                    .map(ProcessInfo::from_process)
+                    .collect();
+                alate
+                    .server
+                    .reply(connection, Envelope::daemon(Frame::Processes { live }));
+            }
+            Request::Kill { id } => {
+                alate.blueprint.processes.kill(id);
             }
             // Both answered inside the server: an answer belongs to the tool
             // waiting on it, and an attach has already been turned into

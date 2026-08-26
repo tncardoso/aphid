@@ -52,6 +52,68 @@ pub enum Request {
     Sessions,
     /// Open another session on this connection.
     New,
+    /// What processes the alate has started. Answered to this connection
+    /// alone, with a [`Frame::Processes`].
+    Processes,
+    /// Ask a process to stop. The registry is shared, so the ask is made here
+    /// whoever is watching; the next [`Request::Processes`] shows it stopping.
+    Kill { id: u32 },
+}
+
+/// One process, as the wire needs it.
+///
+/// A copy of [`aphid_agent::exec::Process`] without its locks and clocks: the
+/// registry's records are not serde and should not grow derives for one
+/// caller's sake. `status` is a word the daemon chose, and `elapsed` is in
+/// seconds.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProcessInfo {
+    /// The registry's own numbering, never reused.
+    pub id: u32,
+    /// The system pid, once it has one.
+    pub pid: Option<u32>,
+    /// Who started it: `bash`, or the name of the plugin that called `exec`.
+    pub origin: String,
+    pub command: String,
+    /// `running`, `stopping`, `exited 0`, `signalled`, `timeout`, `cancelled`,
+    /// `killed`, or `failed`.
+    pub status: String,
+    /// Output produced, both pipes together.
+    pub bytes: u64,
+    /// How long it has been going, or went.
+    pub elapsed: u64,
+}
+
+impl ProcessInfo {
+    /// The wire's view of one process in the registry.
+    #[must_use]
+    pub fn from_process(process: &aphid_agent::exec::Process) -> Self {
+        Self {
+            id: process.id,
+            pid: process.pid,
+            origin: process.origin.clone(),
+            command: process.command.clone(),
+            status: status_word(&process.status),
+            bytes: process.bytes,
+            elapsed: process.elapsed().as_secs(),
+        }
+    }
+}
+
+/// How a process is going, in a word a terminal or a chat can print.
+#[must_use]
+pub fn status_word(status: &aphid_agent::exec::Status) -> String {
+    match status {
+        aphid_agent::exec::Status::Running => "running".to_owned(),
+        aphid_agent::exec::Status::Killing => "stopping".to_owned(),
+        aphid_agent::exec::Status::Exited(0) => "exited".to_owned(),
+        aphid_agent::exec::Status::Exited(code) => format!("exited {code}"),
+        aphid_agent::exec::Status::Signalled => "signalled".to_owned(),
+        aphid_agent::exec::Status::TimedOut => "timeout".to_owned(),
+        aphid_agent::exec::Status::Cancelled => "cancelled".to_owned(),
+        aphid_agent::exec::Status::Killed => "killed".to_owned(),
+        aphid_agent::exec::Status::Failed(_) => "failed".to_owned(),
+    }
 }
 
 /// What a client said about a tool that asked permission.
@@ -183,6 +245,12 @@ pub enum Frame {
         /// Finished, and on disk.
         stored: Vec<crate::sessions::Info>,
     },
+    /// The processes there are. An answer to [`Request::Processes`], and sent
+    /// to the connection that asked and to nobody else.
+    Processes {
+        /// Every process the alate has started, running or lately finished.
+        live: Vec<ProcessInfo>,
+    },
     /// A replay of a session is starting. Whatever a client has drawn for this
     /// session is stale; clear it and take what follows.
     HistoryStart {
@@ -280,6 +348,7 @@ impl Frame {
             Frame::Confirm { .. }
                 | Frame::Hello { .. }
                 | Frame::Sessions { .. }
+                | Frame::Processes { .. }
                 | Frame::HistoryStart { .. }
                 | Frame::HistoryEnd { .. }
         )

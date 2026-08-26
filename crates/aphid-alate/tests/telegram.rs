@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use aphid_alate::config::Telegram;
-use aphid_alate::gateway::wire::{Envelope, Frame, Request, Risk};
+use aphid_alate::gateway::wire::{Envelope, Frame, ProcessInfo, Request, Risk};
 use aphid_alate::gateway::{Event, Server};
 use aphid_alate::telegram::{self, Api, Bridge, Call};
 use aphid_code::plugins::permissions::{Decision, Risk as PermissionRisk};
@@ -409,6 +409,73 @@ async fn the_commands_are_requests_and_the_rest_is_words() {
             .await
             .is_err(),
         "help is the bridge's to give"
+    );
+
+    bridge.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ps_and_kill_are_requests_and_kill_needs_an_id() {
+    let temp = Temp::new("telegram-ps");
+    let (api, feed) = Fake::new();
+    let (server, mut events, bridge) = bridge(&temp, allowed(), api.clone());
+    feed.send(json!([message(1, MINE, "/ps")])).expect("feed");
+    feed.send(json!([message(2, MINE, "/kill 3")]))
+        .expect("feed");
+    feed.send(json!([message(3, MINE, "/kill")])).expect("feed");
+
+    let Event::Opened { connection } = event(&mut events).await else {
+        panic!("attached");
+    };
+    greet(&server, connection);
+
+    let asked = |event| match event {
+        Event::Asked { request, .. } => request,
+        other => panic!("expected a request, and got {other:?}"),
+    };
+    assert_eq!(asked(event(&mut events).await), Request::Processes);
+    assert_eq!(asked(event(&mut events).await), Request::Kill { id: 3 });
+
+    // A bare `/kill` is answered by the bridge and never reaches the daemon.
+    let usage: Vec<String> = {
+        let _ = api.nth("sendMessage", 0).await;
+        api.calls("sendMessage").iter().map(text).collect()
+    };
+    assert!(
+        usage.iter().any(|message| message.contains("/kill <id>")),
+        "a bare /kill is answered with its usage: {usage:?}"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), events.recv())
+            .await
+            .is_err(),
+        "the usage is the bridge's to give"
+    );
+
+    // The daemon's answer to `/ps` becomes a message in the chat, columns and
+    // all.
+    server.reply(
+        connection,
+        Envelope::daemon(Frame::Processes {
+            live: vec![ProcessInfo {
+                id: 1,
+                pid: Some(4242),
+                origin: "bash".to_owned(),
+                command: "sleep 60".to_owned(),
+                status: "running".to_owned(),
+                bytes: 0,
+                elapsed: 12,
+            }],
+        }),
+    );
+    let said: Vec<String> = {
+        let _ = api.nth("sendMessage", 1).await;
+        api.calls("sendMessage").iter().map(text).collect()
+    };
+    assert!(
+        said.iter()
+            .any(|message| message.contains("sleep 60") && message.contains("running")),
+        "the process list is said in the chat: {said:?}"
     );
 
     bridge.abort();

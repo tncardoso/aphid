@@ -55,6 +55,8 @@ const LONGEST: Duration = Duration::from_secs(60);
 /// What `/start` answers with.
 const HELP: &str = "Say anything and the agent answers.\n\
                     /new starts a new conversation.\n\
+                    /ps lists what is running.\n\
+                    /kill <id> stops a process.\n\
                     /cancel stops the run in flight.";
 
 /// What to start a bridge with.
@@ -209,6 +211,15 @@ async fn handle(
                 tracing::info!(chat, "telegram: /new");
                 to(chat, Request::New, state, shared, notices).await;
             }
+            Command::Processes => {
+                tracing::info!(chat, "telegram: /ps");
+                to(chat, Request::Processes, state, shared, notices).await;
+            }
+            Command::Kill(id) => {
+                tracing::info!(chat, "telegram: /kill {id}");
+                to(chat, Request::Kill { id }, state, shared, notices).await;
+            }
+            Command::Usage(usage) => say(shared, chat, &usage).await,
             Command::Cancel => {
                 tracing::info!(chat, "telegram: /cancel");
                 to(chat, Request::Cancel, state, shared, notices).await;
@@ -348,6 +359,11 @@ async fn say(shared: &Shared, chat: i64, text: &str) {
 enum Command {
     Help,
     New,
+    Processes,
+    Kill(u32),
+    /// A line the bridge answers itself, without the agent: the usage of a
+    /// command that was missing its argument.
+    Usage(String),
     Cancel,
     Say(String),
 }
@@ -358,11 +374,17 @@ enum Command {
 /// The `@name` a group chat puts on a command is taken off first: in a group
 /// Telegram sends `/new@my_bot`, and only the bare word is worth matching.
 fn command(text: &str) -> Command {
-    let first = text.split_whitespace().next().unwrap_or_default();
+    let mut words = text.split_whitespace();
+    let first = words.next().unwrap_or_default();
     let bare = first.split('@').next().unwrap_or(first);
     match bare {
         "/start" | "/help" => Command::Help,
         "/new" => Command::New,
+        "/ps" => Command::Processes,
+        "/kill" => match words.next().and_then(|id| id.parse().ok()) {
+            Some(id) => Command::Kill(id),
+            None => Command::Usage("/kill <id> stops a process; /ps lists them".to_owned()),
+        },
         "/cancel" | "/stop" => Command::Cancel,
         _ => Command::Say(text.to_owned()),
     }

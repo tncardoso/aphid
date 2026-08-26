@@ -5,7 +5,7 @@
 //! process on the other end. That was not possible while every keypress wrote
 //! to a socket in the middle of deciding what to do.
 
-use aphid_alate::gateway::wire::{Answer, Envelope, Frame, Request, Risk};
+use aphid_alate::gateway::wire::{Answer, Envelope, Frame, ProcessInfo, Request, Risk};
 use aphid_alate::sessions::Info;
 use aphid_alate::tui::{App, Effect, Msg};
 use aphid_code::tui::runtime::Program;
@@ -260,6 +260,50 @@ fn the_daemon_stopping_is_said_rather_than_silent() {
     );
 }
 
+#[test]
+fn ps_and_kill_are_requests_and_a_process_list_is_a_notice() {
+    let mut app = attached();
+
+    assert_eq!(type_line(&mut app, "/ps"), [sent(Request::Processes)]);
+    assert_eq!(
+        type_line(&mut app, "/kill 3"),
+        [sent(Request::Kill { id: 3 })]
+    );
+
+    // A bare `/kill` is answered here, not asked of the daemon.
+    assert_eq!(type_line(&mut app, "/kill"), []);
+    assert!(
+        shown(&app, "s1")
+            .iter()
+            .any(|line| line.contains("which one?")),
+        "{:?}",
+        shown(&app, "s1")
+    );
+
+    // The daemon's answer to `/ps` lands as a notice, columns and all.
+    app.update(wire(
+        None,
+        Frame::Processes {
+            live: vec![ProcessInfo {
+                id: 1,
+                pid: Some(4242),
+                origin: "bash".to_owned(),
+                command: "sleep 60".to_owned(),
+                status: "running".to_owned(),
+                bytes: 0,
+                elapsed: 12,
+            }],
+        },
+    ));
+    let lines = shown(&app, "s1");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("sleep 60") && line.contains("running")),
+        "{lines:?}"
+    );
+}
+
 /// Every frame a terminal can be sent reaches the model. A new one added to
 /// the wire without a home here would be dropped in silence.
 #[test]
@@ -296,6 +340,17 @@ fn no_frame_a_terminal_is_sent_is_dropped_in_silence() {
         Frame::Heartbeat {
             at: "now".to_owned(),
             note: "awake".to_owned(),
+        },
+        Frame::Processes {
+            live: vec![ProcessInfo {
+                id: 1,
+                pid: Some(4242),
+                origin: "bash".to_owned(),
+                command: "sleep 60".to_owned(),
+                status: "running".to_owned(),
+                bytes: 0,
+                elapsed: 12,
+            }],
         },
     ];
 

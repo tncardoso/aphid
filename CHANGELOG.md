@@ -33,6 +33,11 @@
 - A plugin surface gets its defaults from `init`, and a value already stored
   wins over its default. A panel no longer has to write
   `if "open" in s { s.open } else { false }` for each of its keys.
+- **An alate answers `/ps` and `/kill`.** `aphid alate attach` and the Telegram
+  bot now list what the alate has running — the same registry the coding
+  agent's `/ps` shows — and stop a process by its id. `/new` was already
+  there; `/ps` and `/kill` complete the pair, answered by the daemon through
+  new `Request::Processes` and `Request::Kill` frames on the gateway.
 
 ### Fixed
 

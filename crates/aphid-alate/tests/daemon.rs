@@ -185,6 +185,66 @@ async fn a_terminal_is_not_put_in_the_resident_session() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn what_is_running_is_answered_to_the_terminal_that_asked() {
+    let temp = Temp::new("daemon-ps");
+    let config = quiet();
+    let home = home(&temp, &config);
+    let socket = home.socket();
+
+    let (stream_fn, _script) = scripted([Turn::text("Hello.")]);
+    let daemon = tokio::spawn(daemon::run(Options {
+        home,
+        config,
+        model: Some(dummy_model()),
+        stream_fn: Some(stream_fn),
+        sessions_dir: temp.path("sessions"),
+    }));
+
+    let mut client = attach(&socket).await;
+    let _ = greeting(&mut client).await;
+
+    // Nothing has started a process yet, so the answer is an empty list — but
+    // it is an answer, and the asking connection's alone.
+    client.send(&Request::Processes).await.expect("send");
+    let envelope = until(&mut client, |envelope| {
+        matches!(envelope.frame, Frame::Processes { .. })
+    })
+    .await;
+    assert!(
+        envelope.session.is_none(),
+        "the answer is the daemon's, not a conversation's"
+    );
+    let Frame::Processes { live } = envelope.frame else {
+        unreachable!("matched above")
+    };
+    assert!(live.is_empty(), "{live:?}");
+
+    // A second terminal, watching its own session, is not shown the reply:
+    // `Processes` is answered to the connection that asked, as `Sessions` is.
+    //
+    // The window tolerates whatever else the daemon broadcasts — its own
+    // session opening can legally arrive after the greeting, because the
+    // gateway chooses between two channels — and only objects to the reply
+    // itself.
+    let mut other = attach(&socket).await;
+    let _ = greeting(&mut other).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+    loop {
+        match tokio::time::timeout_at(deadline, other.recv()).await {
+            Ok(Ok(Some(envelope))) if matches!(envelope.frame, Frame::Processes { .. }) => {
+                panic!("the process list was broadcast: {envelope:?}")
+            }
+            Ok(Ok(Some(_))) => {}
+            Ok(Ok(None)) => break,
+            Ok(Err(error)) => panic!("read error: {error}"),
+            Err(_) => break,
+        }
+    }
+
+    daemon.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_job_runs_in_a_session_of_its_own() {
     // The whole point of the change: a scheduled job neither reads nor
     // disturbs the conversation somebody is having.

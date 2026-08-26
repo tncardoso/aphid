@@ -18,7 +18,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use super::{LIMIT, Shared, chunks};
 use crate::gateway::Client;
-use crate::gateway::wire::{Envelope, Frame, Request, Risk};
+use crate::gateway::wire::{Envelope, Frame, ProcessInfo, Request, Risk};
 
 /// Attach a connection for `chat` and start serving it.
 ///
@@ -196,6 +196,10 @@ impl Chat {
             // every chat.
             Frame::Notice { text } if mine => self.say(&format!("note: {text}")).await,
 
+            // The answer to this chat's own `/ps`. A direct reply, so it is
+            // this connection's alone and needs no `mine` guard.
+            Frame::Processes { live } => self.say(&processes(&live)).await,
+
             // A permission question is the daemon's and goes to everybody, so
             // the run in flight is what says whose it is. With nothing running
             // here, a terminal or the timeout answers it instead.
@@ -297,6 +301,28 @@ fn word(risk: Risk) -> &'static str {
         Risk::Mutate => "changes things",
         Risk::Destructive => "destructive",
     }
+}
+
+/// One `/ps` answer, as text for a chat.
+///
+/// What it is, then how it is going, then the command — the columns of the
+/// terminal's list, without the colours.
+fn processes(live: &[ProcessInfo]) -> String {
+    if live.is_empty() {
+        return "nothing running".to_owned();
+    }
+    let mut text = String::from("processes");
+    for process in live {
+        let pid = process
+            .pid
+            .map_or_else(|| "—".to_owned(), |pid| pid.to_string());
+        text.push_str(&format!(
+            "\n#{:<3} {:>7} {:<9} {:<9} {}",
+            process.id, pid, process.origin, process.status, process.command
+        ));
+    }
+    text.push_str("\n\n/kill <id> stops one");
+    text
 }
 
 /// The one line a tool call gets when `tools` is on.

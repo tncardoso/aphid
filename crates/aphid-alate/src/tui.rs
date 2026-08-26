@@ -48,6 +48,8 @@ const HELP: &str = "\
 /sessions      what conversations there are, running and stored
 /session <id>  look at one of them
 /new           start another conversation here
+/ps            what the alate has running
+/kill <id>     stop a process
 /log           show or hide notices, heartbeats and jobs
 /clear         clear this screen, not the alate's memory
 /help          this
@@ -400,6 +402,25 @@ impl App {
                 text.push_str("\n\n/session <id> looks at one. An id can be shortened.");
                 self.scrollback().push_notice(text);
             }
+            Wire::Processes { live } => {
+                // The answer to this terminal's own `/ps`: a direct reply, so
+                // it is this connection's alone and needs no `mine` guard.
+                let mut text = String::from("processes");
+                if live.is_empty() {
+                    text.push_str("\nnothing running");
+                }
+                for process in live {
+                    let pid = process
+                        .pid
+                        .map_or_else(|| "—".to_owned(), |pid| pid.to_string());
+                    text.push_str(&format!(
+                        "\n#{:<3} {:>7} {:<9} {:<9} {}",
+                        process.id, pid, process.origin, process.status, process.command
+                    ));
+                }
+                text.push_str("\n\n/kill <id> stops one");
+                self.scrollback().push_notice(text);
+            }
             Wire::SessionOpened { info } => {
                 if !self.show_log || info.id == self.current {
                     return Cmd::none();
@@ -603,6 +624,14 @@ impl App {
             }
             "sessions" => ask(Request::Sessions),
             "new" => ask(Request::New),
+            "ps" => ask(Request::Processes),
+            "kill" => match rest.trim().parse::<u32>() {
+                Ok(id) => ask(Request::Kill { id }),
+                Err(_) => {
+                    self.scrollback().push_notice("which one? /ps lists them");
+                    Cmd::none()
+                }
+            },
             "session" => {
                 let id = rest.trim();
                 if id.is_empty() {
