@@ -26,7 +26,7 @@ colony = ["aphid-alate/colony"]
 [dependencies]
 aphid-agent.workspace = true
 aphid-alate.workspace = true
-aphid-code.workspace = true
+aphid-code = { workspace = true, features = ["gui"] }
 aphid-colony.workspace = true
 aphid-core.workspace = true
 clap.workspace = true

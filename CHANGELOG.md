@@ -25,6 +25,10 @@
 
 ### Added
 
+- `aphid gui` opens a GPUI desktop interface on Linux and macOS. It has a
+  collapsible session drawer, streamed agent messages, tool cards, permission
+  prompts, Markdown, and Rhai side panels. Remote Markdown images load only
+  after you select them.
 - **You can now select text in the terminal transcript and copy it.** Hold the
   left mouse button and move the pointer over what you want. The text is shown
   in reverse video while you hold the button, and it goes to the clipboard when

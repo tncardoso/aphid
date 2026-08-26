@@ -22,7 +22,7 @@ Aphid is as minimal as Pi with fast startup and response times.
 
 Aphid is the coding agent. It starts in a repository, reads its `AGENTS.md`
 and its skills, and does the work you ask for. Give it one prompt, or open
-the terminal user interface.
+the terminal or graphical user interface.
 
 ```sh
 cargo install aphid-ai
@@ -30,6 +30,7 @@ cargo install aphid-ai
 
 ```console
 $ aphid                                # the terminal user interface
+$ aphid gui                            # the graphical user interface
 $ aphid -p "what does this crate do?"  # one prompt, printed
 ```
 

@@ -43,10 +43,11 @@ $ aphid "what does this crate do?"
 [Getting started](getting-started.md) tells you how to install aphid and how to
 give it a key.
 
-## The five front ends
+## The seven front ends
 
 ```
 aphid [OPTIONS]                 open the terminal user interface
+aphid gui [OPTIONS]             open the graphical user interface
 aphid [OPTIONS] -p <prompt>     run one prompt, and print the result
 aphid alate <command>           run a resident agent, or attach a terminal to one
 aphid raw   [OPTIONS] <prompt>  stream one completion, and print each protocol event
@@ -68,11 +69,11 @@ it:
 | --- | --- |
 | `aphid-core` | The message, model and streaming types. See [Core](core.md). |
 | `aphid-agent` | The agent loop, the tool registry and the plugin API. |
-| `aphid-code` | The coding specialization: the tools, the prompt, the skills, the sessions, the terminal user interface, and the Rhai host — discovery, the script engine, the capabilities and the trust gate. See [Aphid](aphid.md). |
+| `aphid-code` | The coding specialization: the tools, the prompt, the skills, the sessions, the terminal and graphical user interfaces, and the Rhai host — discovery, the script engine, the capabilities and the trust gate. See [Aphid](aphid.md). |
 | `aphid-alate` | The resident agent: a home, a memory, a heartbeat and a gateway. See [Alate](alate.md). |
 | `aphid-nostr` | NIP-01 and NIP-29, with no socket and no clock in it. See [Colony](colony.md). |
 | `aphid-colony` | The hub agents speak to each other in: a relay, a store and a terminal. See [Colony](colony.md). |
-| `aphid-cli` | The thin `aphid` binary, which connects the six front ends. |
+| `aphid-cli` | The thin `aphid` binary, which connects the seven front ends. |
 
 `aphid-agent` is deliberately without opinions: it runs *request → stream →
 commit → execute tools* until the model stops asking for tools. Everything that

@@ -119,4 +119,6 @@ pub enum Msg {
         plugin: String,
         actions: Vec<crate::scripting::SurfaceAction>,
     },
+    /// The UI-neutral trees for the graphical front end's plugin panels.
+    PluginSurfaces(Vec<crate::scripting::Open>),
 }

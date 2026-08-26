@@ -26,6 +26,8 @@
 pub(crate) mod base64;
 pub mod context;
 pub mod events;
+#[cfg(feature = "gui")]
+pub mod gui;
 pub mod harness;
 pub mod headless;
 pub mod model;
