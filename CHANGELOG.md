@@ -40,6 +40,8 @@
 
 ### Fixed
 
+- Plugin commands now update their graphical side panels immediately instead
+  of waiting for the next periodic refresh.
 - The graphical interface can now start an agent reply, a shell command, or a
   plugin reload. These actions no longer exit with a missing Tokio reactor.
 - `/clear` and `/new` now empty the screen. The transcript was dropped, but the

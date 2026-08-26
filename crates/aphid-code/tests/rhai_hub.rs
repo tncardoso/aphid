@@ -244,11 +244,10 @@ fn an_event_for_a_surface_that_is_gone_says_so() {
     assert_eq!(actions, None, "no surface by that name");
 }
 
-/// The tick asks for a redraw four times a second. A panel whose plugin has
-/// not moved must not answer, or every quarter second is a copy of every
-/// widget tree for nothing.
+/// An unchanged panel says nothing, while a command that changes it reports
+/// the new projection without waiting for a periodic refresh.
 #[test]
-fn a_redraw_says_nothing_when_no_panel_moved() {
+fn only_changed_panels_are_reported_immediately() {
     let host = host(
         r#"const inject = ["surfaces", "commands"];
 
@@ -290,10 +289,23 @@ fn apply(ctx) {
         name: "bump".to_owned(),
         args: String::new(),
     });
-    let seen = settle(&hub, &reports);
-    assert!(
-        seen.iter()
-            .any(|report| matches!(report, Report::Surfaces(_))),
-        "and it speaks up again the moment one does"
+    let command = reports
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the command should answer");
+    assert!(matches!(command, Report::Command(_)));
+
+    let changed = reports
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the changed panel should answer without a refresh job");
+    let Report::Surfaces(open) = changed else {
+        panic!("the panel should follow the command");
+    };
+    assert_eq!(open.len(), 1);
+    assert_eq!(
+        open[0].widget,
+        aphid_code::scripting::Widget::Text {
+            id: None,
+            text: "n 1".to_owned(),
+        }
     );
 }
