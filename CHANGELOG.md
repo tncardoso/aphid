@@ -40,6 +40,8 @@
 
 ### Fixed
 
+- The graphical interface can now start an agent reply, a shell command, or a
+  plugin reload. These actions no longer exit with a missing Tokio reactor.
 - `/clear` and `/new` now empty the screen. The transcript was dropped, but the
   lines already drawn stayed where they were, so a new conversation started
   under the old one.

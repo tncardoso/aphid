@@ -1428,6 +1428,9 @@ pub async fn run(
 /// run's own task while one is in flight, which is why no update can reach for
 /// it and why every use of it is an effect.
 pub(crate) struct Executor {
+    /// The runtime that owns async work, including work requested by a GUI
+    /// callback that does not run inside Tokio's entered context.
+    runtime: tokio::runtime::Handle,
     /// The agent, parked between runs.
     ///
     /// Behind a lock because the run's own task is what puts it back: nothing
@@ -1487,6 +1490,7 @@ impl Executor {
     /// Everything the loop will need that the model must not hold.
     pub(crate) fn new(agent: Agent, app: &App, hub: Hub<Msg>) -> Self {
         Self {
+            runtime: tokio::runtime::Handle::current(),
             handle: agent.handle(),
             idle: Arc::new(Mutex::new(Some(agent))),
             running: None,
@@ -1526,7 +1530,7 @@ impl Executor {
                 let processes = Arc::clone(&self.processes);
                 let root = self.workspace.root().to_path_buf();
                 let hub = self.hub.clone();
-                tokio::spawn(async move {
+                self.runtime.spawn(async move {
                     let output = run_bang(&processes, &root, &command).await;
                     hub.send(Msg::BangOutput { command, output });
                 });
@@ -1580,7 +1584,7 @@ impl Executor {
         };
         let hub = self.hub.clone();
 
-        tokio::spawn(async move {
+        self.runtime.spawn(async move {
             let mut guard = loader.lock().await;
             let PluginLoader { loader, root, home } = &mut *guard;
 
@@ -1630,7 +1634,7 @@ impl Executor {
             apply_to_agent(&mut agent, held, &self.hub);
         }
 
-        let work = tokio::spawn(async move {
+        let work = self.runtime.spawn(async move {
             let outcome = agent.prompt(&prompt).await;
             (agent, outcome)
         });
@@ -1640,7 +1644,7 @@ impl Executor {
         // every later prompt is accepted and never sent.
         let slot = Arc::clone(&self.idle);
         let hub = self.hub.clone();
-        self.running = Some(tokio::spawn(async move {
+        self.running = Some(self.runtime.spawn(async move {
             match work.await {
                 Ok((agent, outcome)) => {
                     // Back in the slot *before* the news goes out, so a
@@ -1926,6 +1930,7 @@ mod tests {
     /// are about the hand-off rather than about the model.
     fn executor(agent: Agent, hub: Hub<Msg>) -> Executor {
         Executor {
+            runtime: tokio::runtime::Handle::current(),
             handle: agent.handle(),
             idle: Arc::new(Mutex::new(Some(agent))),
             running: None,
@@ -1969,6 +1974,35 @@ mod tests {
         // system, user, assistant
         assert_eq!(agent.transcript().len(), 3);
         assert_eq!(agent.transcript().get(1).unwrap().role(), Role::User);
+    }
+
+    /// GPUI owns its main thread, so callbacks there have no entered Tokio
+    /// context even though the GUI keeps a Tokio runtime alive for the agent.
+    #[test]
+    fn a_run_can_start_outside_the_runtime_context() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let agent = agent_with(vec![Turn::text("hello back")]);
+        let (hub, mut inbox) = crate::tui::runtime::channel();
+        let mut ex = {
+            let _entered = runtime.enter();
+            executor(agent, hub)
+        };
+
+        // This is deliberately outside `runtime.enter()`. It is the context
+        // in which the graphical interface submits a line.
+        ex.perform(Effect::StartRun("hello".to_owned()));
+
+        let ended = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), inbox.recv())
+                .await
+                .expect("the run should report back")
+                .expect("a message")
+        });
+        assert!(matches!(ended, Msg::RunEnded { .. }), "{ended:?}");
+        assert!(parked(&ex).is_some(), "the agent came back");
     }
 
     /// The regression: the agent went into the run's task and nothing ever
