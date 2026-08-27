@@ -10,6 +10,7 @@
   - [Plugins](aphid/plugins.md)
   - [Composition](aphid/composition.md)
 - [Alate — the live agent](alate.md)
+  - [Sandbox](sandbox.md)
   - [Gateway](alate/gateway.md)
     - [CLI](alate/gateway/cli.md)
     - [Telegram](alate/gateway/telegram.md)

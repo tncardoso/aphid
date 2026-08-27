@@ -58,6 +58,15 @@ const CANCEL_POLL: Duration = Duration::from_millis(50);
 /// other for no reason a user could see.
 const SHELL: &str = "bash";
 
+/// Builds the child process for one command.
+///
+/// The ordinary launcher starts `bash -c`. A front end may install a launcher
+/// that wraps that shell in a sandbox without making tools choose separate
+/// execution paths.
+pub trait Launcher: Send + Sync + 'static {
+    fn command(&self, spec: &Spec) -> Command;
+}
+
 /// What to run.
 pub struct Spec {
     pub command: String,
@@ -117,16 +126,23 @@ pub type Sink = Arc<dyn Fn(Stream, &str) + Send + Sync>;
 pub async fn run(registry: &Arc<Registry>, spec: Spec, cx: Option<&ToolCx>, sink: Sink) -> Status {
     let entry = registry.start(&spec.origin, &spec.command);
 
-    let mut builder = Command::new(SHELL);
+    let mut builder = registry.launcher().map_or_else(
+        || {
+            let mut builder = Command::new(SHELL);
+            builder.arg("-c").arg(&spec.command);
+            builder
+        },
+        |launcher| launcher.command(&spec),
+    );
     builder
-        .arg("-c")
-        .arg(&spec.command)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         // So an abandoned future does not leave a process behind.
         .kill_on_drop(true);
-    if let Some(cwd) = &spec.cwd {
+    if registry.launcher().is_none()
+        && let Some(cwd) = &spec.cwd
+    {
         builder.current_dir(cwd);
     }
     // Its own group, so stopping it can reach whatever it starts.

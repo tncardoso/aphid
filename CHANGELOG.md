@@ -25,6 +25,10 @@
 
 ### Added
 
+- Alate now runs shell commands and plugin commands in a Bubblewrap sandbox.
+  By default they can change only the Alate workspace. The user can grant
+  extra paths and selected host environment variables in a policy outside the
+  agent workspace.
 - `aphid gui` opens a GPUI desktop interface on Linux and macOS. It has a
   collapsible session drawer, streamed agent messages, tool cards, permission
   prompts, Markdown, and Rhai side panels. Remote Markdown images load only

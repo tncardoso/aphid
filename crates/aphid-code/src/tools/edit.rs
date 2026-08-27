@@ -81,7 +81,7 @@ struct Applied {
 }
 
 async fn execute(workspace: &Workspace, params: &Params, bus: Option<&Bus>) -> ToolOutcome {
-    let path = match workspace.resolve(&params.path) {
+    let path = match workspace.resolve_write(&params.path) {
         Ok(path) => path,
         Err(error) => return ToolOutcome::error(error),
     };

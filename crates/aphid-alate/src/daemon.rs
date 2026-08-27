@@ -37,6 +37,7 @@ use crate::gateway::{Event, GatewaySink, Server};
 use crate::heartbeat::Schedule;
 use crate::home::Home;
 use crate::memory::Memory;
+use crate::sandbox::Policy as SandboxPolicy;
 use crate::sessions::{Blueprint, Kind, Sessions, stored};
 
 /// How often the rhai plugins get their `on_tick`. The terminal UI's cadence,
@@ -132,12 +133,17 @@ pub async fn run(options: Options) -> Result<(), String> {
 
     // The workspace is the home unless the configuration points elsewhere, so a
     // fresh alate can only write inside the directory it was given.
-    let workspace = Workspace::new(
+    let sandbox = SandboxPolicy::load(&home.sandbox_file())?;
+    let workspace = Workspace::with_grants(
         config
             .workspace
             .clone()
             .unwrap_or_else(|| home.root().to_path_buf()),
-    );
+        sandbox.read_only.clone(),
+        sandbox.read_write.clone(),
+    )?;
+
+    let launcher = crate::sandbox::prepare(&sandbox, &workspace, &config.environment)?;
 
     let memory = Arc::new(Mutex::new(
         Memory::open(&home.memory_dir()).map_err(|error| error.to_string())?,
@@ -170,11 +176,17 @@ pub async fn run(options: Options) -> Result<(), String> {
     // Once for the whole daemon, not once per session: loading the scripts
     // twice would double every hook, and the host's own session is the
     // daemon's lifetime.
-    let processes = Arc::new(aphid_agent::exec::Registry::new());
+    let processes = Arc::new(match launcher {
+        Some(launcher) => aphid_agent::exec::Registry::with_launcher(launcher),
+        None => aphid_agent::exec::Registry::new(),
+    });
     let (files, discovery) = scripts::discover(&workspace, None);
-    let (host, mut problems) = scripts::load(
-        &workspace,
+    let (host, mut problems) = scripts::load_with_capabilities(
         &files,
+        aphid_code::scripting::Capabilities::sandboxed(
+            workspace.root(),
+            sandbox.network == crate::sandbox::Network::Host,
+        ),
         Arc::new(GatewaySink::new(server.publisher())),
         &processes,
     );

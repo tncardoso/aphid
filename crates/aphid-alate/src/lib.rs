@@ -33,6 +33,7 @@ pub mod heartbeat;
 pub mod home;
 pub mod memory;
 pub mod prompts;
+pub mod sandbox;
 pub mod sessions;
 #[cfg(feature = "telegram")]
 pub mod telegram;

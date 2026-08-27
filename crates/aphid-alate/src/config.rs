@@ -5,6 +5,7 @@
 //! too — that is what a truncated write leaves behind — and a file written by a
 //! newer aphid is refused by name rather than half-read.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -49,6 +50,9 @@ pub struct Config {
     pub heartbeat: Heartbeat,
     pub memory: MemoryConfig,
     pub gateway: Gateway,
+    /// Literal environment values passed to sandboxed commands. Host values are
+    /// deliberately configured in the user-owned sandbox policy instead.
+    pub environment: BTreeMap<String, String>,
 }
 
 impl Default for Config {
@@ -62,6 +66,7 @@ impl Default for Config {
             heartbeat: Heartbeat::default(),
             memory: MemoryConfig::default(),
             gateway: Gateway::default(),
+            environment: BTreeMap::new(),
         }
     }
 }

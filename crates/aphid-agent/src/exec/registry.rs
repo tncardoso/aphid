@@ -82,9 +82,19 @@ pub(crate) struct Entry {
 /// Shared behind an `Arc` by whoever starts processes and whoever displays
 /// them. There is one per session, created by the front end and passed down:
 /// nothing here is global.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Registry {
     inner: Mutex<Inner>,
+    launcher: Option<Arc<dyn super::Launcher>>,
+}
+
+impl std::fmt::Debug for Registry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Registry")
+            .field("processes", &self.snapshot())
+            .field("sandboxed", &self.launcher.is_some())
+            .finish()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -97,6 +107,19 @@ impl Registry {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A registry whose commands are built by `launcher`.
+    #[must_use]
+    pub fn with_launcher(launcher: Arc<dyn super::Launcher>) -> Self {
+        Self {
+            inner: Mutex::new(Inner::default()),
+            launcher: Some(launcher),
+        }
+    }
+
+    pub(crate) fn launcher(&self) -> Option<&Arc<dyn super::Launcher>> {
+        self.launcher.as_ref()
     }
 
     /// Every process, oldest first.
