@@ -66,6 +66,16 @@ async fn greeting(client: &mut Client) -> String {
 fn home(temp: &Temp, config: &Config) -> Home {
     let home = Home::open_in(&temp.root, "test").expect("open");
     config.save(&home.config_file()).expect("save");
+    // These tests are about the daemon, not about Bubblewrap. Leaving the
+    // sandbox on would tie them to a kernel that grants unprivileged user
+    // namespaces — which CI runners and every non-Linux machine do not.
+    let sandbox = home.sandbox_file();
+    std::fs::create_dir_all(sandbox.parent().expect("parent")).expect("dirs");
+    std::fs::write(
+        &sandbox,
+        serde_json::json!({ "version": 1, "enabled": false }).to_string(),
+    )
+    .expect("write");
     home
 }
 

@@ -270,10 +270,16 @@ mod tests {
     fn escaping_the_workspace_is_refused() {
         let workspace = workspace();
         let error = workspace.resolve("../../etc/passwd").unwrap_err();
-        assert!(error.contains("outside the workspace"), "{error}");
+        assert!(
+            error.contains("outside the allowed workspace roots"),
+            "{error}"
+        );
 
         let error = workspace.resolve("/etc/passwd").unwrap_err();
-        assert!(error.contains("outside the workspace"), "{error}");
+        assert!(
+            error.contains("outside the allowed workspace roots"),
+            "{error}"
+        );
     }
 
     #[test]

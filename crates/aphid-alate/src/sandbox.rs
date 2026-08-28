@@ -1,13 +1,20 @@
 //! The user-owned policy that confines an alate's commands.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(target_os = "linux")]
+use std::collections::BTreeSet;
+#[cfg(target_os = "linux")]
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::process::Command as StdCommand;
 use std::sync::Arc;
 
-use aphid_agent::exec::{Launcher, Spec};
+use aphid_agent::exec::Launcher;
+#[cfg(target_os = "linux")]
+use aphid_agent::exec::Spec;
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "linux")]
 use tokio::process::Command;
 
 /// The policy format written by this build.
@@ -89,7 +96,7 @@ pub fn prepare(
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (workspace, literals);
-        return Err("the Bubblewrap sandbox needs Linux; set enabled to false in the sandbox policy to run without it".to_owned());
+        Err("the Bubblewrap sandbox needs Linux; set enabled to false in the sandbox policy to run without it".to_owned())
     }
     #[cfg(target_os = "linux")]
     {
