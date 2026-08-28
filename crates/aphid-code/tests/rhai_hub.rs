@@ -87,10 +87,15 @@ fn futures_lite_block<T>(future: impl std::future::Future<Output = T>) -> T {
     }
 }
 
-/// Wait for the thread to have nothing left to do.
+/// Wait for the answer to what has just been asked.
 ///
 /// A redraw answers only when something moved, so this pokes a plugin's state
 /// first to make sure there is an answer to wait for.
+///
+/// It waits for **an** answer, not for the queue: the first redraw in a batch
+/// of many answers while the rest of the batch is still to run. A test that
+/// needs the thread to have finished everything stops the hub, which drains
+/// what is queued and joins.
 fn settle(hub: &PluginHub, reports: &Receiver<Report>) -> Vec<Report> {
     hub.send(Job::Refresh);
     let mut seen = Vec::new();
@@ -143,7 +148,7 @@ fn two_calls_into_one_plugin_never_overlap() {
         }
 "#,
     );
-    let (hub, reports) = hub(Arc::clone(&host));
+    let (hub, _reports) = hub(Arc::clone(&host));
 
     // Interleave every kind of job that reaches a script.
     for _ in 0..50 {
@@ -155,7 +160,11 @@ fn two_calls_into_one_plugin_never_overlap() {
         });
         hub.send(Job::Notice("something happened".to_owned()));
     }
-    let _ = settle(&hub, &reports);
+    // Stopped rather than settled: `settle` comes back at the first redraw that
+    // answers, and there are fifty of them queued behind the rest of the batch.
+    // The depth is only zero between jobs, so the state is read once the thread
+    // has drained everything and joined.
+    hub.stop();
 
     let state = host.state_of("kit").expect("the plugin's state");
     let max = state
