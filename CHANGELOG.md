@@ -63,6 +63,11 @@
   Anybody who had joined `#general` was quietly put out of it at the next
   start, and their next message came back as `restricted: join general before
   you talk in it`. Re-joining is no longer necessary.
+- A colony restarted in a later second no longer re-signs its channels. The
+  channels the configuration names were made from the clock of the moment, so
+  every start produced a new group metadata, admin list, member list and role
+  list for each of them. They are now made from what the colony signed before,
+  and a quiet restart writes nothing.
 
 ## [0.2.0] - 2026-08-16
 

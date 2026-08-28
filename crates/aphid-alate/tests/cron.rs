@@ -6,6 +6,18 @@ use aphid_alate::cron::{Crontab, MAX_ENTRIES, parse};
 use chrono::{Local, TimeZone};
 use common::Temp;
 
+/// A daily job, set for twelve hours from now.
+///
+/// A test that measures from `Local::now()` needs the next occurrence to be
+/// nowhere near now, and a fixed `0 9 * * *` is only far away depending on what
+/// time the suite happens to run: between eight and nine in the morning, a job
+/// that has just caught up comes due again an hour later, and the test fails on
+/// the clock rather than on the code.
+fn daily_in_twelve_hours() -> String {
+    use chrono::Timelike;
+    format!("0 {} * * *", (Local::now().hour() + 12) % 24)
+}
+
 fn at(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> chrono::DateTime<Local> {
     Local
         .with_ymd_and_hms(year, month, day, hour, minute, 0)
@@ -136,7 +148,9 @@ fn a_newer_version_is_refused_by_name() {
 fn nothing_is_due_before_its_time() {
     let temp = Temp::new("cron");
     let (mut crontab, _) = Crontab::open(&temp.path("cron.json"));
-    crontab.set("morning", "0 9 * * *", "Wake.").expect("set");
+    crontab
+        .set("morning", &daily_in_twelve_hours(), "Wake.")
+        .expect("set");
 
     // The crontab was opened now, and an entry that never ran measures from
     // there, so nothing fires the moment a daemon starts.
@@ -165,7 +179,9 @@ fn a_week_of_downtime_is_one_run_and_not_seven() {
     // occurrence that was missed, so a daily job catches up exactly once.
     let temp = Temp::new("cron");
     let (mut crontab, _) = Crontab::open(&temp.path("cron.json"));
-    crontab.set("daily", "0 9 * * *", "Wake.").expect("set");
+    crontab
+        .set("daily", &daily_in_twelve_hours(), "Wake.")
+        .expect("set");
 
     let next_week = Local::now() + chrono::Duration::days(7);
     assert_eq!(crontab.due(next_week).len(), 1);

@@ -15,6 +15,9 @@
 //! exists, so those are made before the fold runs and not after it. A join is an
 //! action on a group, and a fold that met one before the group was there would
 //! drop it — which is how a colony forgets who is in `#general` at every start.
+//! Nor does the log say *when* one was made: that is read back from the
+//! metadata the relay signed the last time, because a channel remade from the
+//! clock of the moment would be a different group at every start.
 //!
 //! Because [`group::metadata`] and its siblings are a function of the group
 //! alone, re-signing is free: the relay builds all four for every group at
@@ -81,7 +84,8 @@ impl Authority {
             keys,
             groups: HashMap::new(),
         };
-        authority.make_channels(channels);
+        let made_at = made_at(&store.signed_by(&authority.keys.public_key())?);
+        authority.make_channels(channels, &made_at);
 
         for event in store.moderation_log()? {
             // A malformed event that was stored before a rule tightened is
@@ -123,7 +127,7 @@ impl Authority {
     /// [`Authority::rebuild`] has already made the ones that were there at the
     /// last start, so this is for a channel the configuration gained since —
     /// and for one the log unmade, because the configuration is what says a
-    /// colony has it.
+    /// colony has it. Both are new here and now, so both are made by the clock.
     ///
     /// # Errors
     ///
@@ -133,7 +137,9 @@ impl Authority {
         store: &Store,
         names: &[String],
     ) -> Result<Vec<Event>, Error> {
-        if self.make_channels(names) == 0 {
+        // A channel that is new to the configuration, or one the log unmade,
+        // is made now and has nothing signed about it to be made from.
+        if self.make_channels(names, &HashMap::new()) == 0 {
             return Ok(Vec::new());
         }
         self.publish_metadata(store)
@@ -141,7 +147,11 @@ impl Authority {
 
     /// Put every named channel that is missing into the state, and say how many
     /// that was. Signs nothing: the caller says when the metadata goes out.
-    fn make_channels(&mut self, names: &[String]) -> usize {
+    ///
+    /// A channel `made_at` remembers is made at the moment it says, so that the
+    /// group is the one that was here before and not a fresh one wearing its
+    /// name. Anything it does not know about is made now.
+    fn make_channels(&mut self, names: &[String], made_at: &HashMap<GroupId, Timestamp>) -> usize {
         let mut made = 0;
         for name in names {
             let Ok(id) = GroupId::parse(name) else {
@@ -150,9 +160,9 @@ impl Authority {
             if self.groups.contains_key(&id) {
                 continue;
             }
-            let now = Timestamp::now();
+            let at = made_at.get(&id).copied().unwrap_or_else(Timestamp::now);
             self.groups
-                .insert(id.clone(), Group::create(id, self.keys.public_key(), now));
+                .insert(id.clone(), Group::create(id, self.keys.public_key(), at));
             made += 1;
         }
         made
@@ -386,6 +396,34 @@ impl Authority {
         }
         Ok(events)
     }
+}
+
+/// When each group the relay has already signed about was made.
+///
+/// The 39000 to 39003 already stored are the only record of that: a channel the
+/// configuration names is in no log, so the alternative is the clock of the
+/// moment, and then a restart makes a group that only shares a name with the one
+/// that was here — a later `created_at`, a later `changed_at`, four freshly
+/// signed events every time a colony wakes up, and a membership list that
+/// replaces the stored one for no reason.
+///
+/// The oldest of the four is the moment: three carry `changed_at`, which is
+/// never earlier than the `created_at` the fourth carries.
+fn made_at(signed: &[Event]) -> HashMap<GroupId, Timestamp> {
+    let mut when: HashMap<GroupId, Timestamp> = HashMap::new();
+    for event in signed {
+        let Some(id) = event
+            .tags
+            .identifier()
+            .and_then(|name| GroupId::parse(&name).ok())
+        else {
+            continue;
+        };
+        when.entry(id)
+            .and_modify(|at| *at = (*at).min(event.created_at))
+            .or_insert(event.created_at);
+    }
+    when
 }
 
 /// The `OK` a ruling deserves, given the id it is about.
