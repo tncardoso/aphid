@@ -238,6 +238,12 @@ fn run(
         Job::Command { name, args } => {
             if let Some(actions) = host.run_command(registries.commands(), &name, &args) {
                 report(Report::Command(actions));
+                // A command can change the model a surface projects. Report
+                // that projection in the same turn instead of leaving the GUI
+                // to discover it on the next quarter-second refresh.
+                if let Some(open) = panels.render(host, registries) {
+                    report(Report::Surfaces(open));
+                }
             }
         }
         Job::Surface {

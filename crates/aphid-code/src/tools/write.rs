@@ -54,7 +54,7 @@ async fn execute(
     bus: Option<&Bus>,
     cx: &ToolCx,
 ) -> ToolOutcome {
-    let path = match workspace.resolve(&params.path) {
+    let path = match workspace.resolve_write(&params.path) {
         Ok(path) => path,
         Err(error) => return ToolOutcome::error(error),
     };

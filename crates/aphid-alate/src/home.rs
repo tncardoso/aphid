@@ -198,6 +198,17 @@ impl Home {
         self.root.join("alate.json")
     }
 
+    /// The user-owned sandbox policy. It is beside, rather than inside, the
+    /// instance directory so an alate cannot widen its own authority.
+    #[must_use]
+    pub fn sandbox_file(&self) -> PathBuf {
+        self.root
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(".sandbox")
+            .join(format!("{}.json", self.name))
+    }
+
     /// The instructions this alate always carries, found by
     /// [`aphid_code::context::discover`] because the home is the workspace root.
     #[must_use]

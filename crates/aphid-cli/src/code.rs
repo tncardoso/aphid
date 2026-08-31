@@ -77,6 +77,113 @@ pub struct Args {
     pub quiet: bool,
 }
 
+/// Options for the graphical coding agent.
+#[derive(Debug, clap::Args)]
+pub struct GuiArgs {
+    /// Model id, or a unique part of one (default: the first known)
+    #[arg(long, value_name = "NAME")]
+    pub model: Option<String>,
+    /// How hard to think
+    #[arg(long, value_name = "LEVEL")]
+    pub think: Option<Think>,
+    /// Replace the built-in instructions
+    #[arg(long, value_name = "TEXT")]
+    pub system: Option<String>,
+    /// Add to the instructions
+    #[arg(long, value_name = "TEXT")]
+    pub append_system: Option<String>,
+    /// Continue the newest session here, or one named by id
+    #[arg(long, value_name = "ID", num_args = 0..=1)]
+    pub resume: Option<Option<String>>,
+    /// Ask before running anything that changes the workspace
+    #[arg(long)]
+    pub confirm: bool,
+    /// Skip AGENTS.md and skills
+    #[arg(long)]
+    pub no_context: bool,
+    /// Skip every .aphid/plugins file
+    #[arg(long)]
+    pub no_plugins: bool,
+    /// Load one plugin from a path, on top of whatever was discovered
+    #[arg(long = "plugin", value_name = "PATH")]
+    pub plugins: Vec<PathBuf>,
+    /// Trust this workspace's own plugins without asking
+    #[arg(long)]
+    pub trust_plugins: bool,
+    /// Stop a run after this many provider requests
+    #[arg(long, value_name = "N")]
+    pub max_turns: Option<u32>,
+}
+
+/// Prepare and open the graphical front end.
+pub fn gui(args: GuiArgs) -> ExitCode {
+    let catalog = Catalog::new();
+    for diagnostic in catalog.diagnostics() {
+        eprintln!("aphid: {diagnostic}");
+    }
+    if catalog.models().is_empty() {
+        eprintln!("aphid: {NO_MODELS_MESSAGE}");
+        return ExitCode::FAILURE;
+    }
+
+    let workspace = Workspace::discover();
+    let model = match &args.model {
+        Some(name) => match catalog.resolve(name) {
+            Ok(model) => model,
+            Err(error) => {
+                eprintln!("aphid: --model {name}: {error}");
+                return ExitCode::from(2);
+            }
+        },
+        None => catalog
+            .default_model()
+            .expect("the empty catalog check ran above"),
+    };
+    let found = collect_plugins(&workspace, args.no_plugins, &args.plugins);
+    let plugin_files = gate(
+        &workspace,
+        found,
+        aphid_code::home_dir().as_deref(),
+        args.trust_plugins,
+        true,
+    );
+    let api_key = match api_key(&model) {
+        Ok(key) => key,
+        Err(message) => {
+            eprintln!("aphid: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let mut options = HarnessOptions::new(workspace, model);
+    if let Some(think) = args.think {
+        options.thinking = think.level();
+    }
+    options.system = args.system;
+    options.append_system = args.append_system;
+    options.load_context = !args.no_context;
+    options.plugin_files = plugin_files;
+    options.api_key = Some(api_key.into());
+    if let Some(max_turns) = args.max_turns {
+        options.max_turns = max_turns;
+    }
+    let resume = match resolve_resume(&options.cwd, args.resume.as_ref()) {
+        Ok(path) => path,
+        Err(message) => {
+            eprintln!("aphid: {message}");
+            return ExitCode::from(2);
+        }
+    };
+
+    match aphid_code::gui::run(options, resume, args.confirm) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("aphid: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 impl Args {
     /// The prompt, however it was given.
     ///

@@ -88,6 +88,25 @@ impl Capabilities {
         }
     }
 
+    /// The capabilities an isolated resident agent gives its plugins. Commands
+    /// use the shared process launcher; filesystem functions stay under the
+    /// workspace root instead of inheriting the daemon's ambient authority.
+    #[must_use]
+    pub fn sandboxed(root: impl Into<PathBuf>, http: bool) -> Self {
+        let root = root.into();
+        let plugins = root.join(".aphid").join("plugins");
+        Self {
+            root: Some(root),
+            unconfined: false,
+            write: true,
+            exec: true,
+            http,
+            config_dirs: vec![plugins.clone()],
+            state_dir: Some(plugins.join("state")),
+            ..Self::default()
+        }
+    }
+
     /// Also read settings from a home directory, behind the project's.
     #[must_use]
     pub fn with_home(mut self, home: &Path) -> Self {

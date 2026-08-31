@@ -23,6 +23,8 @@ use common::Temp;
 
 /// Nothing here should take a second. A test that hangs is a test that failed.
 const PATIENCE: Duration = Duration::from_secs(5);
+/// A hair, so that a wait for a clock boundary lands after it and not on it.
+const GRACE: Duration = Duration::from_millis(10);
 
 fn id(name: &str) -> GroupId {
     GroupId::parse(name).expect("a group id")
@@ -536,6 +538,19 @@ async fn an_event_accepted_during_the_stored_phase_is_not_lost() {
     }
 }
 
+/// Wait until the clock has moved on to the next whole second.
+///
+/// A timestamp is a second, so a test about what survives a restart has to be
+/// sure the restart is in a second of its own.
+async fn next_second() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock after 1970");
+    let into = Duration::from_nanos(u64::from(now.subsec_nanos()));
+    // A hair past the boundary, so a clock read after this is in the next second.
+    tokio::time::sleep(Duration::from_secs(1) - into + GRACE).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_groups_survive_a_restart() {
     let temp = Temp::new("relay");
@@ -574,6 +589,12 @@ async fn the_groups_survive_a_restart() {
         (stored, relay.groups())
     };
     assert_eq!(groups, vec!["general".to_owned()]);
+
+    // Into the next second before restarting. The relay used to make the
+    // configured channels from the clock of the moment, so this test only saw
+    // that when it happened to cross a second boundary — a flake in CI and a
+    // colony that re-signed everything at every start.
+    next_second().await;
 
     // The same log and the same key, in a new relay.
     let again = start(keys).await;
@@ -640,4 +661,49 @@ async fn an_admin_may_invite_and_a_member_may_not() {
 
     let why = refused(&client).await;
     assert!(why.contains("only an admin"), "{why}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_may_still_talk_after_a_restart() {
+    let temp = Temp::new("rejoin");
+    let database = temp.path("colony.db");
+    let address = "127.0.0.1:0".parse().expect("an address");
+    let keys = Keys::generate();
+    let general = id("general");
+    let joiner = Keys::generate();
+
+    let start = |keys: Keys| {
+        let database = database.clone();
+        async move {
+            Relay::bind(Options {
+                address,
+                store: Store::open(&database).expect("a store"),
+                keys,
+                channels: vec!["general".to_owned()],
+                history: 1_000,
+            })
+            .await
+            .expect("starts")
+        }
+    };
+
+    {
+        let relay = start(keys.clone()).await;
+        let url = format!("ws://{}", relay.address());
+        let client = join(&url, &joiner, &general).await;
+        client
+            .publish(said(&joiner, &general, "morning"))
+            .await
+            .expect("says something");
+        accepted(&client).await;
+    }
+
+    let again = start(keys).await;
+    let url = format!("ws://{}", again.address());
+    let client = Client::connect(&url).await.expect("connects");
+    client
+        .publish(said(&joiner, &general, "still here"))
+        .await
+        .expect("tries");
+    accepted(&client).await;
 }

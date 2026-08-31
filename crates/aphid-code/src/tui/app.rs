@@ -70,14 +70,14 @@ pub struct App {
     /// The plugin surfaces, for focus, events and rendering.
     pub surfaces: SurfaceLayer,
     /// The loaded plugins, for the commands they registered and `/plugins`.
-    host: Option<Arc<crate::scripting::PluginHost>>,
+    pub(crate) host: Option<Arc<crate::scripting::PluginHost>>,
     /// The composition the plugins are mounted on, so `/plugins` can say what
     /// state each fiber is in without asking anybody.
-    composition: Option<aphid_agent::rt::Composition>,
+    pub(crate) composition: Option<aphid_agent::rt::Composition>,
     /// What is on offer right now: the commands and panels loaded components
     /// registered. Not what the files declared — a component that never loaded
     /// has offered nothing.
-    registries: Option<Arc<crate::registries::Registries>>,
+    pub(crate) registries: Option<Arc<crate::registries::Registries>>,
     catalog: Catalog,
     /// The model the agent is pointed at. Held because clamping a thinking
     /// level is a question about the model, and the update must answer it
@@ -88,17 +88,17 @@ pub struct App {
     /// a session, so a copy is as good as the agent's own.
     tools: Vec<String>,
     /// What `/session` says. Settled when the session opens.
-    session_label: String,
+    pub(crate) session_label: String,
     /// The slash commands the plugins registered, so an unknown one can be
     /// told from one that is simply somebody else's.
-    plugin_commands: Vec<String>,
+    pub(crate) plugin_commands: Vec<String>,
     /// Whether any plugin asked to hear about notices.
-    plugins_watch_notices: bool,
+    pub(crate) plugins_watch_notices: bool,
     /// Whether any plugin wants the background tick.
-    plugins_tick: bool,
+    pub(crate) plugins_tick: bool,
     /// Whether any plugin has a panel at all.
-    plugins_draw: bool,
-    session: Option<Arc<SessionComponent>>,
+    pub(crate) plugins_draw: bool,
+    pub(crate) session: Option<Arc<SessionComponent>>,
     /// Waiting for the agent, in the order it arrived. A queue and not one slot
     /// because a plugin can send while the user types, and neither should lose.
     queued: VecDeque<String>,
@@ -112,7 +112,7 @@ pub struct App {
     skill_diagnostics: Vec<skills::Diagnostic>,
     /// The reply channels for questions on screen. Runtime state, held here
     /// until the executor exists to own it.
-    answers: Answers<Decision>,
+    pub(crate) answers: Answers<Decision>,
     /// What is selected in the transcript, if anything.
     pub selection: Option<Selection>,
     /// Where the transcript pane was at the last draw, so a mouse cell can be
@@ -126,7 +126,7 @@ pub struct App {
 
 impl App {
     #[must_use]
-    fn new(
+    pub(crate) fn new(
         harness: &Harness,
         thinking: Option<ThinkingLevel>,
         processes: &Arc<exec::Registry>,
@@ -202,7 +202,7 @@ impl App {
 
     /// Replay a resumed transcript into the scrollback, so the pane shows the
     /// conversation you are continuing rather than starting blank.
-    fn replay(&mut self, transcript: &Transcript) {
+    pub(crate) fn replay(&mut self, transcript: &Transcript) {
         use aphid_core::{ContentRef, Role};
 
         for message in transcript.iter() {
@@ -465,6 +465,9 @@ impl App {
                 cmd.push(Effect::RefreshSurfaces);
                 cmd
             }
+            // The graphical front end reads these trees before forwarding the
+            // message here. They have no terminal representation.
+            Msg::PluginSurfaces(_) => Cmd::none(),
         }
     }
 
@@ -841,7 +844,7 @@ impl App {
     }
 
     /// A finished line: a command, or a prompt for the agent.
-    fn submit(&mut self, line: String) -> Cmd<Effect> {
+    pub(crate) fn submit(&mut self, line: String) -> Cmd<Effect> {
         if let Some((name, rest)) = split_command(&line) {
             let (name, rest) = (name.to_owned(), rest.to_owned());
             return self.command(&name, &rest);
@@ -1424,7 +1427,10 @@ pub async fn run(
 /// The agent above all: it is parked here between runs and moved into the
 /// run's own task while one is in flight, which is why no update can reach for
 /// it and why every use of it is an effect.
-struct Executor {
+pub(crate) struct Executor {
+    /// The runtime that owns async work, including work requested by a GUI
+    /// callback that does not run inside Tokio's entered context.
+    runtime: tokio::runtime::Handle,
     /// The agent, parked between runs.
     ///
     /// Behind a lock because the run's own task is what puts it back: nothing
@@ -1442,10 +1448,10 @@ struct Executor {
     answers: Answers<Decision>,
     /// The one thread that calls into a script. Nothing here waits on it: a
     /// job goes in and its answer comes back as a message.
-    plugins: Option<PluginHub>,
+    pub(crate) plugins: Option<PluginHub>,
     /// Keeps the plugin composition in step with the files on disk. `None`
     /// when no plugins were loaded, and there is nothing to reconcile.
-    loader: Option<Arc<tokio::sync::Mutex<PluginLoader>>>,
+    pub(crate) loader: Option<Arc<tokio::sync::Mutex<PluginLoader>>>,
     hub: Hub<Msg>,
 }
 
@@ -1482,8 +1488,9 @@ pub(crate) struct PluginLoader {
 
 impl Executor {
     /// Everything the loop will need that the model must not hold.
-    fn new(agent: Agent, app: &App, hub: Hub<Msg>) -> Self {
+    pub(crate) fn new(agent: Agent, app: &App, hub: Hub<Msg>) -> Self {
         Self {
+            runtime: tokio::runtime::Handle::current(),
             handle: agent.handle(),
             idle: Arc::new(Mutex::new(Some(agent))),
             running: None,
@@ -1501,7 +1508,7 @@ impl Executor {
     ///
     /// Reads nothing of the model and writes nothing to it. Everything it
     /// learns goes back on the hub.
-    fn perform(&mut self, effect: Effect) {
+    pub(crate) fn perform(&mut self, effect: Effect) {
         match effect {
             Effect::StartRun(prompt) => self.start_run(prompt),
             Effect::Cancel => self.handle.cancel(),
@@ -1523,7 +1530,7 @@ impl Executor {
                 let processes = Arc::clone(&self.processes);
                 let root = self.workspace.root().to_path_buf();
                 let hub = self.hub.clone();
-                tokio::spawn(async move {
+                self.runtime.spawn(async move {
                     let output = run_bang(&processes, &root, &command).await;
                     hub.send(Msg::BangOutput { command, output });
                 });
@@ -1577,7 +1584,7 @@ impl Executor {
         };
         let hub = self.hub.clone();
 
-        tokio::spawn(async move {
+        self.runtime.spawn(async move {
             let mut guard = loader.lock().await;
             let PluginLoader { loader, root, home } = &mut *guard;
 
@@ -1627,7 +1634,7 @@ impl Executor {
             apply_to_agent(&mut agent, held, &self.hub);
         }
 
-        let work = tokio::spawn(async move {
+        let work = self.runtime.spawn(async move {
             let outcome = agent.prompt(&prompt).await;
             (agent, outcome)
         });
@@ -1637,7 +1644,7 @@ impl Executor {
         // every later prompt is accepted and never sent.
         let slot = Arc::clone(&self.idle);
         let hub = self.hub.clone();
-        self.running = Some(tokio::spawn(async move {
+        self.running = Some(self.runtime.spawn(async move {
             match work.await {
                 Ok((agent, outcome)) => {
                     // Back in the slot *before* the news goes out, so a
@@ -1923,6 +1930,7 @@ mod tests {
     /// are about the hand-off rather than about the model.
     fn executor(agent: Agent, hub: Hub<Msg>) -> Executor {
         Executor {
+            runtime: tokio::runtime::Handle::current(),
             handle: agent.handle(),
             idle: Arc::new(Mutex::new(Some(agent))),
             running: None,
@@ -1966,6 +1974,35 @@ mod tests {
         // system, user, assistant
         assert_eq!(agent.transcript().len(), 3);
         assert_eq!(agent.transcript().get(1).unwrap().role(), Role::User);
+    }
+
+    /// GPUI owns its main thread, so callbacks there have no entered Tokio
+    /// context even though the GUI keeps a Tokio runtime alive for the agent.
+    #[test]
+    fn a_run_can_start_outside_the_runtime_context() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let agent = agent_with(vec![Turn::text("hello back")]);
+        let (hub, mut inbox) = crate::tui::runtime::channel();
+        let mut ex = {
+            let _entered = runtime.enter();
+            executor(agent, hub)
+        };
+
+        // This is deliberately outside `runtime.enter()`. It is the context
+        // in which the graphical interface submits a line.
+        ex.perform(Effect::StartRun("hello".to_owned()));
+
+        let ended = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), inbox.recv())
+                .await
+                .expect("the run should report back")
+                .expect("a message")
+        });
+        assert!(matches!(ended, Msg::RunEnded { .. }), "{ended:?}");
+        assert!(parked(&ex).is_some(), "the agent came back");
     }
 
     /// The regression: the agent went into the run's task and nothing ever

@@ -25,6 +25,14 @@
 
 ### Added
 
+- Alate now runs shell commands and plugin commands in a Bubblewrap sandbox.
+  By default they can change only the Alate workspace. The user can grant
+  extra paths and selected host environment variables in a policy outside the
+  agent workspace.
+- `aphid gui` opens a GPUI desktop interface on Linux and macOS. It has a
+  collapsible session drawer, streamed agent messages, tool cards, permission
+  prompts, Markdown, and Rhai side panels. Remote Markdown images load only
+  after you select them.
 - **You can now select text in the terminal transcript and copy it.** Hold the
   left mouse button and move the pointer over what you want. The text is shown
   in reverse video while you hold the button, and it goes to the clipboard when
@@ -49,6 +57,10 @@
   instructions N times. They are now mounted once, for the daemon — and a
   script's `session_start` hook, which used to miss the announcement, now
   fires.
+- Plugin commands now update their graphical side panels immediately instead
+  of waiting for the next periodic refresh.
+- The graphical interface can now start an agent reply, a shell command, or a
+  plugin reload. These actions no longer exit with a missing Tokio reactor.
 - `/clear` and `/new` now empty the screen. The transcript was dropped, but the
   lines already drawn stayed where they were, so a new conversation started
   under the old one.
@@ -60,6 +72,15 @@
   the model about the word `/tools`.
 - `/model` and `/think` typed while the model is replying now take effect when
   the reply ends. The change used to be dropped without a word.
+- A colony no longer forgets who joined its channels when it is restarted.
+  Anybody who had joined `#general` was quietly put out of it at the next
+  start, and their next message came back as `restricted: join general before
+  you talk in it`. Re-joining is no longer necessary.
+- A colony restarted in a later second no longer re-signs its channels. The
+  channels the configuration names were made from the clock of the moment, so
+  every start produced a new group metadata, admin list, member list and role
+  list for each of them. They are now made from what the colony signed before,
+  and a quiet restart writes nothing.
 
 ## [0.2.0] - 2026-08-16
 

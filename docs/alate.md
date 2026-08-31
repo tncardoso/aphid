@@ -98,6 +98,62 @@ The home is also the workspace of the agent. Two results follow:
 The `bash` tool is not limited to the home. This is true of the coding agent
 also.
 
+## Sandbox
+
+Alate runs each `bash` command and each plugin `exec` command in a sandbox.
+The sandbox can write only to the workspace. It can read the system files that
+the command needs to run, but it cannot see your other home directories. It
+also has its own process list, temporary files and home directory.
+
+The sandbox uses Bubblewrap on Linux. Bubblewrap must be installed and the
+system must allow user namespaces. Alate refuses to start when it cannot make
+the sandbox. This is deliberate: a warning would make a resident agent run
+with more access than its configuration says.
+
+The policy is outside the agent workspace, so the agent cannot give itself more
+access:
+
+```text
+~/.aphid/alate/.sandbox/<name>.json
+```
+
+An absent file gives the strict default. This example allows a toolchain to be
+read and one directory to be changed:
+
+```json
+{
+  "version": 1,
+  "enabled": true,
+  "network": "host",
+  "read_only": ["/opt/toolchain"],
+  "read_write": ["/var/tmp/alate-output"],
+  "host_environment": ["DEPLOY_TOKEN"]
+}
+```
+
+Paths must be absolute and exist when Alate starts. `network` is `host` by
+default. Set it to `none` to remove the network from commands and plugin HTTP
+calls. It does not remove the model or gateway network of Alate itself.
+
+On a system without Bubblewrap, or on macOS, set `enabled` to `false` in this
+file to run without a sandbox. This is an explicit opt-out.
+
+`alate.json` can set variables for sandboxed commands:
+
+```json
+{
+  "environment": {
+    "MODE": "production",
+    "TOKEN": "${DEPLOY_TOKEN}"
+  }
+}
+```
+
+A complete `${NAME}` value copies the host variable named `NAME`. The name must
+be in `host_environment` in the sandbox policy. `$${NAME}` writes the literal
+text `${NAME}`. Values do not expand inside larger strings and do not expand
+again. A missing allowed host variable stops Alate at start.
+
 A name can hold letters, digits, dot, dash and underscore. It cannot start with
 a dot, and it cannot hold a path separator. These rules keep `--name` inside the
 root directory.
@@ -115,7 +171,8 @@ Each field has a default. An absent file, and an empty file, give the defaults.
   "permissions": "ask",
   "heartbeat": { "every": "15m", "prompt": null },
   "memory": { "recall": 5 },
-  "gateway": { "socket": null, "telegram": null, "colony": null }
+  "gateway": { "socket": null, "telegram": null, "colony": null },
+  "environment": {}
 }
 ```
 
@@ -131,6 +188,7 @@ Each field has a default. An absent file, and an empty file, give the defaults.
 | `gateway.socket` | The socket file. `gateway.sock` in the home when absent. |
 | `gateway.telegram` | A Telegram bot on the gateway. No bot when absent. See [Telegram](alate/gateway/telegram.md). |
 | `gateway.colony` | A colony on the gateway. No colony when absent. See [Colony](alate/gateway/colony.md). |
+| `environment` | Literal variables for sandboxed commands. `${NAME}` copies an allowed host variable. See [Sandbox](#sandbox). |
 
 A file with a higher `version` than this build understands is refused by name.
 This prevents a new file from being read as an old one.

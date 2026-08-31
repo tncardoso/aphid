@@ -52,8 +52,8 @@ still work correctly even if two projects share a name. Nothing is written a
 second time. Thus a failure costs the turn that was in flight and no more, and
 `--resume` is a replay of the file.
 
-Headless runs are recorded also, and `--sessions` and `--resume` see them in the
-same manner as the sessions of the terminal.
+Headless runs are recorded also. `--sessions`, `--resume`, and the graphical
+session drawer see them in the same manner as the terminal.
 
 ```console
 $ aphid --sessions                       # print the saved sessions
@@ -78,6 +78,7 @@ and [Composition](aphid/composition.md).
 
 ```
 aphid [OPTIONS] [PROMPT]...    the coding agent
+aphid gui [OPTIONS]                 open the graphical coding agent
 aphid alate <COMMAND>               run a resident agent, or attach to one
 aphid raw   [OPTIONS] <PROMPT>...   stream one completion, and print each protocol event
 aphid agent [OPTIONS] <PROMPT>...   run the agent loop with a demo tool
@@ -93,12 +94,19 @@ user interface.
 
 ```console
 $ aphid                              # opens the terminal user interface
+$ aphid gui                          # opens the graphical user interface
 $ aphid -p "fix the failing test"    # runs one time, and prints the result
 $ aphid "fix the failing test"       # the same, with no -p
 ```
 
 `-p` and the bare words do the same thing. Only an empty prompt opens the
 terminal user interface.
+
+`aphid gui` uses the same model, context, tools, sessions, permission gate,
+slash commands, and Rhai plugins as the terminal. The main area shows streamed
+text, reasoning, tool calls, tool output, and run state. Markdown includes
+tables, nested lists, code highlighting, links, and images. A remote image is
+not fetched until you select its load control.
 
 ## The options
 

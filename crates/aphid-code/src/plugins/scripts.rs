@@ -102,7 +102,18 @@ pub fn load(
     sink: Arc<dyn Sink>,
     processes: &Arc<aphid_agent::exec::Registry>,
 ) -> (Arc<PluginHost>, Vec<Diagnostic>) {
-    let (host, diagnostics) = PluginHost::load(files, &capabilities(workspace), sink, processes);
+    load_with_capabilities(files, capabilities(workspace), sink, processes)
+}
+
+/// Load plugins with capabilities chosen by a specialised front end.
+#[must_use]
+pub fn load_with_capabilities(
+    files: &[PluginFile],
+    caps: Capabilities,
+    sink: Arc<dyn Sink>,
+    processes: &Arc<aphid_agent::exec::Registry>,
+) -> (Arc<PluginHost>, Vec<Diagnostic>) {
+    let (host, diagnostics) = PluginHost::load(files, &caps, sink, processes);
     (Arc::new(host), diagnostics)
 }
 

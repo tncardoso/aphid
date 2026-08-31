@@ -295,7 +295,11 @@ async fn read_refuses_to_leave_the_workspace() {
     let outcome = call(&tool, r#"{"path":"../../etc/passwd"}"#).await;
 
     assert!(outcome.is_error);
-    assert!(outcome.text_content().contains("outside the workspace"));
+    assert!(
+        outcome
+            .text_content()
+            .contains("outside the allowed workspace roots")
+    );
 }
 
 // ---------------------------------------------------------------- write

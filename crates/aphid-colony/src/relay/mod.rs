@@ -190,7 +190,7 @@ impl Relay {
         // for a year does not spend its first query reading five years of chat.
         store.prune(history)?;
 
-        let mut authority = Authority::rebuild(&store, keys)?;
+        let mut authority = Authority::rebuild(&store, keys, &channels)?;
         authority.ensure_channels(&store, &channels)?;
         // Sign what every group is. A group that has not changed signs to the
         // event that is already stored, so a quiet restart writes nothing.

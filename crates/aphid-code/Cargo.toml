@@ -1,6 +1,6 @@
 [package]
 name = "aphid-code"
-description = "A coding harness for the aphid agent: tools, project context, sessions and a terminal UI"
+description = "A coding harness for the aphid agent: tools, project context, sessions and user interfaces"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,6 +12,10 @@ keywords.workspace = true
 categories.workspace = true
 include = ["/src", "/tests", "/Cargo.toml"]
 
+[features]
+default = []
+gui = ["dep:gpui", "dep:pulldown-cmark", "dep:syntect", "dep:unicode-segmentation"]
+
 [dependencies]
 aphid-agent.workspace = true
 aphid-core.workspace = true
@@ -19,11 +23,15 @@ rhai = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }
 chrono.workspace = true
 compact_str.workspace = true
+gpui = { workspace = true, optional = true }
+pulldown-cmark = { workspace = true, optional = true }
 ratatui.workspace = true
 ratatui-textarea.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+syntect = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["fs", "rt-multi-thread", "sync"] }
+unicode-segmentation = { workspace = true, optional = true }
 
 [lints]
 workspace = true

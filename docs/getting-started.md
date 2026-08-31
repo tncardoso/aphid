@@ -5,8 +5,7 @@ it for the first time.
 
 ## What you need
 
-- A Rust toolchain of the 2024 edition or later. Aphid is built with
-  `rustc` 1.94.
+- Rust 1.98 or later.
 - An API key for a model. The coding agent has no models until you add one
   with `aphid models add <provider/model>`. The command records which
   environment variable holds the key. Refer to [Add a model](#add-a-model).
@@ -81,6 +80,16 @@ $ aphid
 
 Type a question and press `Enter`. Type `/help` to see the
 [commands](aphid/commands.md).
+
+To open the graphical user interface, run:
+
+```console
+$ aphid gui
+```
+
+The left drawer lists the sessions of the current workspace. Use its button
+to reduce the drawer to an icon rail. Select a saved session to continue it.
+You cannot change the session while the agent is working.
 
 To run one prompt and print the result, give the prompt on the command line:
 

@@ -2,6 +2,7 @@
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use aphid_alate::config::{
@@ -100,6 +101,7 @@ fn it_round_trips() {
             prompt: Some("Look around.".to_owned()),
         },
         memory: MemoryConfig { recall: 9 },
+        environment: BTreeMap::from([("MODE".to_owned(), "production".to_owned())]),
         ..Config::default()
     };
     config.save(&path).expect("save");

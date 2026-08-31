@@ -1,4 +1,4 @@
-//! The `aphid` binary: five front ends over one harness.
+//! The `aphid` binary: command-line and graphical front ends over one harness.
 //!
 //! `aphid` is the coding agent, and the default — everything else is a
 //! subcommand. `alate` runs a resident agent, and attaches a terminal to one
@@ -51,6 +51,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Open the graphical coding-agent interface
+    Gui(code::GuiArgs),
     /// Run or attach to a resident agent
     #[command(subcommand)]
     Alate(alate::Command),
@@ -139,14 +141,20 @@ impl Think {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let Cli { code, command } = Cli::parse();
+
+    // GPUI owns the process main thread and runs its own event loop. Its agent
+    // work still uses a Tokio runtime, which the graphical front end owns.
+    if let Some(Command::Gui(args)) = command {
+        return code::gui(args);
+    }
 
     // The coding agent needs more than one worker: a permission prompt blocks
     // the agent's task until the UI answers on another one. So does an alate,
     // for the same reason and also because its memory runs on a blocking task.
     // So does a colony, whose store runs on blocking tasks while its relay goes
     // on carrying messages. Nothing else does.
-    let runtime = match cli.command {
+    let runtime = match command {
         None | Some(Command::Alate(_) | Command::Colony(_)) => {
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -164,13 +172,14 @@ fn main() -> ExitCode {
         }
     };
 
-    match cli.command {
-        None => runtime.block_on(code::run(cli.code)),
+    match command {
+        None => runtime.block_on(code::run(code)),
         Some(Command::Alate(command)) => runtime.block_on(alate::run(command)),
         Some(Command::Colony(command)) => runtime.block_on(colony::run(command)),
         Some(Command::Raw(args)) => runtime.block_on(run(args)),
         Some(Command::Agent(args)) => runtime.block_on(agent::run(args)),
         Some(Command::Model(command)) => runtime.block_on(model::run(command)),
+        Some(Command::Gui(_)) => unreachable!("the GUI returned before Tokio startup"),
     }
 }
 
@@ -311,6 +320,22 @@ mod tests {
         let cli = Cli::parse_from(["aphid"]);
         assert!(cli.command.is_none());
         assert!(cli.code.prompt().is_none());
+    }
+
+    #[test]
+    fn gui_is_a_subcommand_with_interactive_options() {
+        let cli = Cli::parse_from([
+            "aphid",
+            "gui",
+            "--resume",
+            "20260810T012035-0000",
+            "--confirm",
+        ]);
+        let Some(Command::Gui(args)) = cli.command else {
+            panic!("expected gui");
+        };
+        assert_eq!(args.resume, Some(Some("20260810T012035-0000".to_owned())));
+        assert!(args.confirm);
     }
 
     #[test]
