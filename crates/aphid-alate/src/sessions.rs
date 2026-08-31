@@ -31,7 +31,6 @@ use std::sync::Arc;
 use aphid_agent::{Agent, AgentHandle, RunOutcome, StreamFn};
 use aphid_code::harness::{self, HarnessOptions};
 use aphid_code::plugins::permissions::{AllowAll, Confirmer, DenyAll, PermissionGate, Permissions};
-use aphid_code::scripting::PluginHost;
 use aphid_code::session::{self, SessionComponent};
 use aphid_code::tools::Workspace;
 use chrono::{DateTime, Local};
@@ -39,7 +38,7 @@ use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 
 use crate::config::{Config, Permissions as Wanted};
-use crate::cron::{self, CronComponent};
+use crate::cron;
 use crate::gateway::{GatewayComponent, Publisher};
 use crate::home::Home;
 use crate::memory::{self, MemoryComponent};
@@ -330,7 +329,6 @@ pub struct Blueprint {
     pub publisher: Publisher,
     pub memory: memory::Shared,
     pub crontab: cron::Shared,
-    pub host: Option<Arc<PluginHost>>,
     /// One composition for the whole alate, not one per session.
     ///
     /// The plugin host is shared, the memory is shared, and a tick is a
@@ -453,25 +451,6 @@ impl Blueprint {
             )),
             serde_json::Value::Null,
         )?;
-        options.composition.mount(
-            Arc::new(CronComponent::new(
-                self.crontab.clone(),
-                &options.composition,
-            )),
-            serde_json::Value::Null,
-        )?;
-        // Beside the crontab, so a scheduled job can post to the colony as
-        // readily as a conversation can — which is most of the point of a hub.
-        #[cfg(feature = "colony")]
-        if let Some(colony) = &self.colony {
-            options.composition.mount(
-                Arc::new(crate::colony::ColonyComponent::new(
-                    colony.clone(),
-                    &options.composition,
-                )),
-                serde_json::Value::Null,
-            )?;
-        }
         // One `Permissions` for the whole alate, so "allow always" answered in
         // one session is remembered in the next. The gate around it is
         // per-session, because that is what a composition is.
@@ -483,20 +462,6 @@ impl Blueprint {
             )),
             serde_json::Value::Null,
         )?;
-
-        // The host is registered in every session. Its hooks are per-run, so
-        // that is right; its own *session* is the daemon's lifetime, which is
-        // why `session_start` is not called again here.
-        if let Some(host) = &self.host {
-            options.composition.mount(
-                Arc::new(aphid_code::scripting::ScriptHost::new(
-                    host.clone(),
-                    &options.composition,
-                )),
-                serde_json::Value::Null,
-            )?;
-            options.host = Some(host.clone());
-        }
 
         options
             .composition

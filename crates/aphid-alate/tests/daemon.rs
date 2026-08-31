@@ -703,6 +703,104 @@ async fn each_transcript_contains_only_its_own_session() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_script_hook_fires_once_per_event_whatever_session_runs() {
+    // Scripts are daemon-wide: a hook must fire once per event, wherever the
+    // run happens, and never once per mounted session. Mounting the script
+    // host in every session made each event hit every hook N times — two
+    // conversations meant two notifications per turn. This test plants a
+    // plugin that announces every turn start, then runs the resident session
+    // (a heartbeat) and an attached one, and counts the notices.
+    let temp = Temp::new("daemon");
+    let mut config = quiet();
+    config.heartbeat.every = "3s".to_owned();
+    config.heartbeat.prompt = Some("Look at your notes.".to_owned());
+    let home = home(&temp, &config);
+    let socket = home.socket();
+
+    // Discovered from the workspace, which is the home unless configured
+    // otherwise.
+    temp.write(
+        "test/.aphid/plugins/counter.rhai",
+        "fn apply(ctx) { on(\"agent/turn-start\", |cx| { notify(\"turn-start\") }); }\n",
+    );
+
+    let (stream_fn, _script) = scripted([Turn::text("Nothing is due."), Turn::text("A reply.")]);
+    let daemon = tokio::spawn(daemon::run(Options {
+        home,
+        config,
+        model: Some(dummy_model()),
+        stream_fn: Some(stream_fn),
+        sessions_dir: temp.path("sessions"),
+    }));
+
+    let mut client = attach(&socket).await;
+    let mine = greeting(&mut client).await;
+
+    // The resident wakes on the heartbeat. Its one turn must fire the hook
+    // exactly once; anything a second mount would have added is queued in the
+    // same instant, so a short silence after the first notice settles it.
+    let mut seen: Vec<Envelope> = Vec::new();
+    let resident = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let envelope = client
+                .recv()
+                .await
+                .expect("read")
+                .expect("the daemon hung up");
+            if matches!(&envelope.frame, Frame::Notice { text } if text.contains("turn-start")) {
+                return envelope;
+            }
+            seen.push(envelope);
+        }
+    })
+    .await
+    .expect("the hook never fired for the resident's heartbeat");
+
+    match tokio::time::timeout(Duration::from_millis(500), client.recv()).await {
+        Ok(Ok(Some(envelope))) => {
+            panic!("the resident's one turn fired the hook more than once: {envelope:?}")
+        }
+        Ok(Ok(None)) => panic!("the daemon hung up"),
+        Ok(Err(error)) => panic!("read error: {error}"),
+        // Silence: one firing per turn, as daemon-wide scripts should be.
+        Err(_) => {}
+    }
+
+    // The attached conversation's turn must fire it once more, and only once:
+    // the hook still hears every session, but each event exactly one time.
+    client
+        .send(&Request::Prompt {
+            text: "say something".to_owned(),
+        })
+        .await
+        .expect("send");
+    loop {
+        let envelope = client
+            .recv()
+            .await
+            .expect("read")
+            .expect("the daemon hung up");
+        if matches!(envelope.frame, Frame::RunEnded { .. }) {
+            break;
+        }
+        seen.push(envelope);
+    }
+
+    // The notice was published during the run, before its end, and a heartbeat
+    // is at least 3s away — so whatever the run produced is already in hand.
+    assert_eq!(
+        seen.iter()
+            .filter(|envelope| matches!(&envelope.frame, Frame::Notice { text } if text.contains("turn-start")))
+            .count(),
+        1,
+        "the attached session's one turn must add exactly one more notice"
+    );
+    let _ = (resident, mine);
+
+    daemon.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_session_can_be_watched_after_it_ended() {
     let temp = Temp::new("daemon");
     let config = quiet();

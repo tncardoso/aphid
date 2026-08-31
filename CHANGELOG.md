@@ -43,6 +43,12 @@
   session's transcript file held every conversation. Announcements now carry
   the session that made them, and the per-session components listen only to
   their own.
+- **A plugin's hooks no longer run once per conversation.** The scripts, the
+  crontab tool and the colony tools were mounted in every session, so a hook
+  fired N times for one event and the system prompt carried each plugin's
+  instructions N times. They are now mounted once, for the daemon — and a
+  script's `session_start` hook, which used to miss the announcement, now
+  fires.
 - `/clear` and `/new` now empty the screen. The transcript was dropped, but the
   lines already drawn stayed where they were, so a new conversation started
   under the old one.
