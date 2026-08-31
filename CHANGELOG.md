@@ -44,6 +44,19 @@
 
 ### Fixed
 
+- **An alate's sessions no longer see one another's runs.** Each session
+  mounted its components on the one composition the daemon shares, and a
+  bus announcement reached every listener whatever session made it — so the
+  resident session's heartbeat replies arrived in the Telegram chat, and each
+  session's transcript file held every conversation. Announcements now carry
+  the session that made them, and the per-session components listen only to
+  their own.
+- **A plugin's hooks no longer run once per conversation.** The scripts, the
+  crontab tool and the colony tools were mounted in every session, so a hook
+  fired N times for one event and the system prompt carried each plugin's
+  instructions N times. They are now mounted once, for the daemon — and a
+  script's `session_start` hook, which used to miss the announcement, now
+  fires.
 - Plugin commands now update their graphical side panels immediately instead
   of waiting for the next periodic refresh.
 - The graphical interface can now start an agent reply, a shell command, or a

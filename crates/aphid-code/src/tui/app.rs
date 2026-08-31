@@ -1213,7 +1213,7 @@ pub async fn run(
         options
             .composition
             .mount(
-                Arc::new(PermissionGate::new(permissions, &options.composition)),
+                Arc::new(PermissionGate::new(None, permissions, &options.composition)),
                 serde_json::Value::Null,
             )
             .map_err(std::io::Error::other)?;

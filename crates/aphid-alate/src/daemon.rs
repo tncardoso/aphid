@@ -25,13 +25,13 @@ use std::time::Duration;
 use aphid_agent::StreamFn;
 use aphid_code::model::Catalog;
 use aphid_code::plugins::scripts;
-use aphid_code::scripting::PluginHost;
+use aphid_code::scripting::{PluginHost, ScriptHost};
 use aphid_code::tools::Workspace;
 use chrono::Local;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::config::Config;
-use crate::cron::{self, Crontab};
+use crate::cron::{self, CronComponent, Crontab};
 use crate::gateway::wire::{Envelope, Frame, Request};
 use crate::gateway::{Event, GatewaySink, Server};
 use crate::heartbeat::Schedule;
@@ -192,9 +192,47 @@ pub async fn run(options: Options) -> Result<(), String> {
     );
     problems.extend(discovery);
 
+    // The tools' half of the colony, made here because the composition mounts
+    // it below. The bridge's half is started after the socket is bound, later.
+    #[cfg(feature = "colony")]
+    let (colony, colony_outbound) = colony_handle(&config);
+
     // One composition for the whole alate: the plugin host is shared, and a
     // tick belongs to the daemon rather than to whichever conversation is open.
     let composition = aphid_agent::rt::Composition::new();
+
+    // Mounted once for the whole daemon, not once per session: the scripts,
+    // the crontab tool and the colony tools belong to the alate, and mounting
+    // them N times made every hook and every plugin instruction repeat once
+    // per conversation. They go in before `SessionStart`, so a script's
+    // `session_start` hook hears the start it was written for.
+    if !host.is_empty() {
+        composition
+            .mount(
+                Arc::new(ScriptHost::new(host.clone(), &composition)),
+                serde_json::Value::Null,
+            )
+            .map_err(|error| format!("could not mount the scripts: {error}"))?;
+    }
+    composition
+        .mount(
+            Arc::new(CronComponent::new(crontab.clone(), &composition)),
+            serde_json::Value::Null,
+        )
+        .map_err(|error| format!("could not mount the crontab: {error}"))?;
+    #[cfg(feature = "colony")]
+    if let Some(colony) = &colony {
+        composition
+            .mount(
+                Arc::new(crate::colony::ColonyComponent::new(
+                    colony.clone(),
+                    &composition,
+                )),
+                serde_json::Value::Null,
+            )
+            .map_err(|error| format!("could not mount the colony: {error}"))?;
+    }
+
     composition.bus.emit(&mut aphid_code::events::SessionStart(
         aphid_code::events::Session {
             id: None,
@@ -203,12 +241,6 @@ pub async fn run(options: Options) -> Result<(), String> {
             restored: 0,
         },
     ));
-
-    // The tools' half of the colony, made before the blueprint because every
-    // session registers them. The bridge's half is started after the socket is
-    // bound, below.
-    #[cfg(feature = "colony")]
-    let (colony, colony_outbound) = colony_handle(&config);
 
     let blueprint = Blueprint {
         composition: composition.clone(),
@@ -221,7 +253,6 @@ pub async fn run(options: Options) -> Result<(), String> {
         publisher: server.publisher(),
         memory,
         crontab: crontab.clone(),
-        host: (!host.is_empty()).then(|| host.clone()),
         stream_fn,
         processes,
         permissions: Blueprint::permissions(&config, server.confirmer()),

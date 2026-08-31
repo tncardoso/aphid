@@ -36,6 +36,15 @@ use std::sync::{Arc, RwLock};
 use super::uid::Uid;
 use crate::tool::BoxFuture;
 
+/// A listener's reach, and the tag a run stamps its announcements with.
+///
+/// `None` hears everything — the daemon's own announcements and every
+/// session's — which is what a component that is daemon-wide by design wants.
+/// `Some(s)` hears only the announcements a run stamped with the same `s`,
+/// which is what a per-session component wants: an alate hosts several agents,
+/// and one conversation must not see another's.
+pub type Scope = Option<Arc<str>>;
+
 /// What happens when a listener raises.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Failure {
@@ -141,8 +150,9 @@ where
 
 struct Slot<L> {
     /// The uid is what makes unsubscribing on unload a retain rather than
-    /// bookkeeping the listener has to do itself.
-    listeners: Vec<(Uid, L)>,
+    /// bookkeeping the listener has to do itself. The scope is the session the
+    /// listener belongs to, or `None` for a listener that wants everything.
+    listeners: Vec<(Uid, Scope, L)>,
     /// Set while this event is being dispatched, for the events that cannot
     /// stand being announced from inside their own announcement.
     ///
@@ -221,7 +231,7 @@ impl Bus {
             .unwrap_or(false)
     }
 
-    fn insert<E: Event, L: Send + Sync + 'static>(&self, owner: Uid, listener: L) {
+    fn insert<E: Event, L: Send + Sync + 'static>(&self, owner: Uid, scope: Scope, listener: L) {
         if let Ok(mut slots) = self.slots.write() {
             slots
                 .entry(TypeId::of::<E>())
@@ -229,7 +239,7 @@ impl Bus {
                 .downcast_mut::<Slot<L>>()
                 .expect("one listener shape per event, fixed by its mode")
                 .listeners
-                .push((owner, listener));
+                .push((owner, scope, listener));
         }
     }
 
@@ -239,11 +249,13 @@ impl Bus {
                 .get_mut(&TypeId::of::<E>())
                 .and_then(|slot| slot.downcast_mut::<Slot<L>>())
         {
-            slot.listeners.retain(|(uid, _)| *uid != owner);
+            slot.listeners.retain(|(uid, _, _)| *uid != owner);
         }
     }
 
-    fn snapshot<E: Event, L: Clone + Send + Sync + 'static>(&self) -> Vec<L> {
+    /// The listeners an announcement reaches: the global ones, and the ones
+    /// whose scope matches the announcement's.
+    fn snapshot<E: Event, L: Clone + Send + Sync + 'static>(&self, scope: &Scope) -> Vec<L> {
         self.slots
             .read()
             .ok()
@@ -254,7 +266,11 @@ impl Bus {
                     .map(|slot| {
                         slot.listeners
                             .iter()
-                            .map(|(_, listener)| listener.clone())
+                            .filter(|(_, listener_scope, _)| {
+                                listener_scope.is_none()
+                                    || listener_scope.as_deref() == scope.as_deref()
+                            })
+                            .map(|(_, _, listener)| listener.clone())
                             .collect()
                     })
             })
@@ -263,8 +279,19 @@ impl Bus {
 
     // ------------------------------------------------------------- subscribing
 
+    /// Listen to every announcement, whatever session made it.
     pub fn on<E: Emitted>(&self, owner: Uid, listener: impl Fn(&mut E) + Send + Sync + 'static) {
-        self.insert::<E, EmitFn<E>>(owner, Arc::new(listener));
+        self.on_scoped(None, owner, listener);
+    }
+
+    /// Listen to one session's announcements only. See [`Scope`].
+    pub fn on_scoped<E: Emitted>(
+        &self,
+        scope: Scope,
+        owner: Uid,
+        listener: impl Fn(&mut E) + Send + Sync + 'static,
+    ) {
+        self.insert::<E, EmitFn<E>>(owner, scope, Arc::new(listener));
     }
 
     pub fn on_parallel<E, F, Fut>(&self, owner: Uid, listener: F)
@@ -274,7 +301,7 @@ impl Bus {
         Fut: Future<Output = ()> + Send + 'static,
     {
         let listener: ParallelFn<E> = Arc::new(move |event| Box::pin(listener(event)));
-        self.insert::<E, ParallelFn<E>>(owner, listener);
+        self.insert::<E, ParallelFn<E>>(owner, None, listener);
     }
 
     pub fn on_serial<E, F, Fut>(&self, owner: Uid, listener: F)
@@ -284,7 +311,7 @@ impl Bus {
         Fut: Future<Output = Option<E::Out>> + Send + 'static,
     {
         let listener: SerialFn<E> = Arc::new(move |event| Box::pin(listener(event)));
-        self.insert::<E, SerialFn<E>>(owner, listener);
+        self.insert::<E, SerialFn<E>>(owner, None, listener);
     }
 
     pub fn on_bail<E: Bailed>(
@@ -292,7 +319,7 @@ impl Bus {
         owner: Uid,
         listener: impl Fn(&E) -> Option<E::Out> + Send + Sync + 'static,
     ) {
-        self.insert::<E, BailFn<E>>(owner, Arc::new(listener));
+        self.insert::<E, BailFn<E>>(owner, None, Arc::new(listener));
     }
 
     pub fn on_waterfall<E: Waterfalled>(
@@ -300,7 +327,7 @@ impl Bus {
         owner: Uid,
         listener: impl WaterfallFn<E> + 'static,
     ) {
-        self.insert::<E, Arc<dyn WaterfallFn<E>>>(owner, Arc::new(listener));
+        self.insert::<E, Arc<dyn WaterfallFn<E>>>(owner, None, Arc::new(listener));
     }
 
     /// Drop every listener a fiber registered, whatever their modes.
@@ -329,12 +356,17 @@ impl Bus {
 
     // -------------------------------------------------------------- dispatch
 
-    /// Broadcast. Every listener runs, and each sees the previous one's edits.
+    /// Broadcast to every listener, whatever session made the announcement.
     pub fn emit<E: Emitted>(&self, event: &mut E) {
+        self.emit_scoped(&None, event);
+    }
+
+    /// Broadcast to a scope. See [`Scope`].
+    pub fn emit_scoped<E: Emitted>(&self, scope: &Scope, event: &mut E) {
         if !E::REENTRANT && !self.enter::<E, EmitFn<E>>() {
             return;
         }
-        for listener in self.snapshot::<E, EmitFn<E>>() {
+        for listener in self.snapshot::<E, EmitFn<E>>(scope) {
             listener(event);
         }
         if !E::REENTRANT {
@@ -369,7 +401,7 @@ impl Bus {
     /// Every listener at once, all awaited.
     pub async fn parallel<E: Paralleled>(&self, event: E) {
         let event = Arc::new(event);
-        let listeners = self.snapshot::<E, ParallelFn<E>>();
+        let listeners = self.snapshot::<E, ParallelFn<E>>(&None);
         // Started together rather than one after another: that is the whole
         // difference between this and `serial`.
         let running: Vec<_> = listeners
@@ -384,7 +416,7 @@ impl Bus {
     /// In order, awaited, first answer wins.
     pub async fn serial<E: Serialed>(&self, event: E) -> Option<E::Out> {
         let event = Arc::new(event);
-        for listener in self.snapshot::<E, SerialFn<E>>() {
+        for listener in self.snapshot::<E, SerialFn<E>>(&None) {
             if let Some(answer) = listener(Arc::clone(&event)).await {
                 return Some(answer);
             }
@@ -395,7 +427,7 @@ impl Bus {
     /// The synchronous form of [`Bus::serial`].
     #[must_use]
     pub fn bail<E: Bailed>(&self, event: &E) -> Option<E::Out> {
-        for listener in self.snapshot::<E, BailFn<E>>() {
+        for listener in self.snapshot::<E, BailFn<E>>(&None) {
             if let Some(answer) = listener(event) {
                 return Some(answer);
             }
@@ -409,7 +441,7 @@ impl Bus {
         input: E::In,
         tail: &(dyn Fn(E::In) -> E::Out + Sync),
     ) -> E::Out {
-        let listeners = self.snapshot::<E, Arc<dyn WaterfallFn<E>>>();
+        let listeners = self.snapshot::<E, Arc<dyn WaterfallFn<E>>>(&None);
         Next::<E> {
             rest: &listeners,
             tail,

@@ -26,7 +26,7 @@ use tokio::task::JoinSet;
 use crate::agent::{Agent, RunOutcome};
 use crate::events::{self, Blocked, Edit, Moment, Run};
 use crate::plugin::{StreamCx, TurnSummary};
-use crate::rt::Bus;
+use crate::rt::{Bus, Scope};
 use crate::tool::{Execution, ToolCall, ToolContent, ToolCx, ToolHandler, ToolOutcome};
 
 impl Agent {
@@ -80,7 +80,7 @@ impl Agent {
         }
 
         let mut prompt = events::Prompt::new(text.to_owned());
-        self.bus.emit(&mut prompt);
+        self.bus.emit_scoped(&self.scope, &mut prompt);
 
         match prompt.rejection() {
             Some(reason) => Err(reason.to_owned()),
@@ -142,10 +142,14 @@ impl Agent {
 
         {
             let mut start = events::RunStart(self.run_payload(0, outcome.usage));
-            self.bus.emit(&mut start);
+            self.bus.emit_scoped(&self.scope, &mut start);
             apply_edits(&mut self.transcript, &start.0);
-            self.transcript_listeners
-                .announce(Moment::RunStart, &self.transcript, &start.0);
+            self.transcript_listeners.announce(
+                &self.scope,
+                Moment::RunStart,
+                &self.transcript,
+                &start.0,
+            );
         }
 
         let mut turn: u32 = 0;
@@ -157,7 +161,7 @@ impl Agent {
             }
             {
                 let mut start = events::TurnStart(self.run_payload(turn, outcome.usage));
-                self.bus.emit(&mut start);
+                self.bus.emit_scoped(&self.scope, &mut start);
                 apply_edits(&mut self.transcript, &start.0);
             }
 
@@ -173,7 +177,9 @@ impl Agent {
 
             // Taken once per stream, not once per token: the list cannot
             // change under a response, and the read costs nothing thereafter.
-            let listeners = self.stream_listeners.snapshot();
+            // Scoped, so a turn streams only to the listeners that belong to
+            // its session.
+            let listeners = self.stream_listeners.snapshot(&self.scope);
             let observed = !listeners.is_empty();
             while let Some(event) = next(&mut stream).await {
                 if observed {
@@ -208,10 +214,14 @@ impl Agent {
                     run: self.run_payload(turn - 1, outcome.usage),
                     message,
                 };
-                self.bus.emit(&mut event);
+                self.bus.emit_scoped(&self.scope, &mut event);
                 apply_edits(&mut self.transcript, &event.run);
-                self.transcript_listeners
-                    .announce(Moment::Message, &self.transcript, &event.run);
+                self.transcript_listeners.announce(
+                    &self.scope,
+                    Moment::Message,
+                    &self.transcript,
+                    &event.run,
+                );
             }
 
             // Read the requested calls out of the arena. `calls` borrows the
@@ -258,7 +268,7 @@ impl Agent {
                         known: call.handler.is_some(),
                         blocked: None,
                     };
-                    self.bus.emit(&mut request);
+                    self.bus.emit_scoped(&self.scope, &mut request);
                     if request.arguments != *call.arguments {
                         call.arguments = Cow::Owned(request.arguments);
                     }
@@ -267,7 +277,8 @@ impl Agent {
                     }
                 }
 
-                let (batch, all_terminate) = execute(&self.bus, &calls, &tool_cx, turn - 1).await;
+                let (batch, all_terminate) =
+                    execute(&self.bus, &self.scope, &calls, &tool_cx, turn - 1).await;
                 results = batch;
                 done = all_terminate;
             }
@@ -294,10 +305,14 @@ impl Agent {
                     summary,
                     stop: false,
                 };
-                self.bus.emit(&mut event);
+                self.bus.emit_scoped(&self.scope, &mut event);
                 apply_edits(&mut self.transcript, &event.run);
-                self.transcript_listeners
-                    .announce(Moment::TurnEnd, &self.transcript, &event.run);
+                self.transcript_listeners.announce(
+                    &self.scope,
+                    Moment::TurnEnd,
+                    &self.transcript,
+                    &event.run,
+                );
                 event.stop
             };
 
@@ -314,7 +329,7 @@ impl Agent {
 
         {
             let mut event = events::RunEnd::new(self.run_payload(turn, outcome.usage), &outcome);
-            self.bus.emit(&mut event);
+            self.bus.emit_scoped(&self.scope, &mut event);
             apply_edits(&mut self.transcript, &event.run);
         }
 
@@ -381,6 +396,7 @@ fn join_text(parts: &[ContentInput<'_>]) -> String {
 
 async fn execute(
     bus: &Bus,
+    scope: &Scope,
     calls: &[PendingCall<'_>],
     tool_cx: &ToolCx,
     turn: u32,
@@ -488,7 +504,7 @@ async fn execute(
                 is_error: outcome.is_error,
                 details: outcome.details.clone(),
             };
-            bus.emit(&mut event);
+            bus.emit_scoped(scope, &mut event);
             outcome.content = event.content;
             outcome.is_error = event.is_error;
             outcome.details = event.details;

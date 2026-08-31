@@ -329,7 +329,11 @@ pub async fn run(args: Args) -> ExitCode {
                 let permissions =
                     std::sync::Arc::new(Permissions::new(std::sync::Arc::new(DenyAll)));
                 if let Err(error) = options.composition.mount(
-                    std::sync::Arc::new(PermissionGate::new(permissions, &options.composition)),
+                    std::sync::Arc::new(PermissionGate::new(
+                        None,
+                        permissions,
+                        &options.composition,
+                    )),
                     serde_json::Value::Null,
                 ) {
                     eprintln!("aphid: could not install the permission gate: {error}");

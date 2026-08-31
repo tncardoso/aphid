@@ -464,6 +464,353 @@ async fn a_heartbeat_wakes_the_resident_session() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_run_in_one_session_is_not_published_as_another_sessions() {
+    // A terminal must see only the conversation it is having. This is the
+    // cross-talk behind the "every heartbeat update" bug: every session mounts
+    // its own `GatewayComponent` onto the one composition bus the daemon
+    // shares, and a bus event is broadcast to every listener whatever session's
+    // run produced it. So a run in one session is published once per mounted
+    // session — tagged with the others' ids as well as its own — and a terminal
+    // that never said anything sees a run under its own session id.
+    let temp = Temp::new("daemon");
+    let config = quiet();
+    let home = home(&temp, &config);
+    let socket = home.socket();
+
+    let (stream_fn, _script) = scripted([Turn::text("Said in the first session.")]);
+    let daemon = tokio::spawn(daemon::run(Options {
+        home,
+        config,
+        model: Some(dummy_model()),
+        stream_fn: Some(stream_fn),
+        sessions_dir: temp.path("sessions"),
+    }));
+
+    let mut first = attach(&socket).await;
+    let mine = greeting(&mut first).await;
+
+    // A second terminal, keeping its own conversation.
+    let mut second = attach(&socket).await;
+    let theirs = greeting(&mut second).await;
+
+    // Only the first terminal speaks. Its prompt echoes into its own session…
+    first
+        .send(&Request::Prompt {
+            text: "say something".to_owned(),
+        })
+        .await
+        .expect("send");
+    until(
+        &mut first,
+        |envelope| matches!(&envelope.frame, Frame::Prompt { text } if text == "say something"),
+    )
+    .await;
+
+    // … and its run ends in its own session. Waiting for this means the run is
+    // over before the second terminal's silence is judged: with the bug, the
+    // leaked frames were published under both ids at the same moment, so
+    // anything that was going to leak is already in the second terminal's
+    // channel.
+    let ended = until(&mut first, |envelope| {
+        matches!(envelope.frame, Frame::RunEnded { .. })
+    })
+    .await;
+    assert_eq!(ended.session.as_deref(), Some(mine.as_str()));
+
+    // The second terminal never said anything, so nothing under its own
+    // session id may arrive — that run belongs to the first's conversation.
+    // Daemon-level frames (no session) are this terminal's business too, which
+    // is why the scan skips them rather than complaining about the first
+    // envelope that arrives.
+    let leaked = tokio::time::timeout(Duration::from_millis(500), async {
+        loop {
+            let envelope = second
+                .recv()
+                .await
+                .expect("read")
+                .expect("the daemon hung up");
+            if envelope.session.as_deref() == Some(theirs.as_str()) {
+                return Some(envelope);
+            }
+        }
+    })
+    .await;
+    if let Ok(Some(envelope)) = leaked {
+        panic!("the first session's run leaked into the second's own session: {envelope:?}");
+    }
+
+    daemon.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_heartbeat_run_does_not_leak_into_an_attached_sessions_chat() {
+    // The user-visible face of the cross-talk: the resident session wakes on a
+    // heartbeat, and the reply must not arrive in a conversation that never
+    // asked for anything. With the bug, the resident's turn frames were
+    // published under the attached terminal's session id, so the terminal
+    // received a run that was never its own.
+    let temp = Temp::new("daemon");
+    let mut config = quiet();
+    config.heartbeat.every = "3s".to_owned();
+    config.heartbeat.prompt = Some("Look at your notes.".to_owned());
+    let home = home(&temp, &config);
+    let socket = home.socket();
+
+    let (stream_fn, _script) = scripted([Turn::text("Nothing is due.")]);
+    let daemon = tokio::spawn(daemon::run(Options {
+        home,
+        config,
+        model: Some(dummy_model()),
+        stream_fn: Some(stream_fn),
+        sessions_dir: temp.path("sessions"),
+    }));
+
+    let mut client = attach(&socket).await;
+    let mine = greeting(&mut client).await;
+
+    // The daemon announces the wake to every terminal; that is its own frame
+    // and every terminal's business. It also names the resident, whose run we
+    // wait for by watching the run flag through `/sessions` — the resident
+    // goes running, then idle, and only then is its run over.
+    let Frame::Heartbeat { .. } = until(&mut client, |envelope| {
+        matches!(envelope.frame, Frame::Heartbeat { .. })
+    })
+    .await
+    .frame
+    else {
+        unreachable!("matched above")
+    };
+
+    tokio::time::timeout(Duration::from_secs(30), async {
+        // A run that has not started yet also reads as idle, so first wait for
+        // it to start, then for it to end.
+        let mut saw_running = false;
+        loop {
+            client.send(&Request::Sessions).await.expect("send");
+            let Frame::Sessions { live, .. } = until(&mut client, |envelope| {
+                matches!(envelope.frame, Frame::Sessions { .. })
+            })
+            .await
+            .frame
+            else {
+                unreachable!("matched above")
+            };
+            let resident = live
+                .iter()
+                .find(|info| info.kind == "resident")
+                .expect("the resident session");
+            if resident.running {
+                saw_running = true;
+            } else if saw_running {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the resident's heartbeat run never finished");
+
+    // The resident's run is over, so anything that was going to leak is already
+    // in this terminal's channel. It must not see a single frame under its own
+    // session id — it never said anything.
+    let leaked = tokio::time::timeout(Duration::from_millis(500), async {
+        loop {
+            let envelope = client
+                .recv()
+                .await
+                .expect("read")
+                .expect("the daemon hung up");
+            if envelope.session.as_deref() == Some(mine.as_str()) {
+                return Some(envelope);
+            }
+        }
+    })
+    .await;
+    if let Ok(Some(envelope)) = leaked {
+        panic!("the resident's heartbeat run leaked into this conversation: {envelope:?}");
+    }
+
+    daemon.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn each_transcript_contains_only_its_own_session() {
+    // The same shared-subscription flaw, one channel further out: every
+    // session's transcript component heard every session's announcements, so
+    // each session file ended up holding every conversation. Each file must
+    // hold exactly the conversation it is named after.
+    let temp = Temp::new("daemon");
+    let config = quiet();
+    let home = home(&temp, &config);
+    let socket = home.socket();
+    let sessions = temp.path("sessions");
+
+    let (stream_fn, _script) = scripted([Turn::text("Reply one."), Turn::text("Reply two.")]);
+    let daemon = tokio::spawn(daemon::run(Options {
+        home,
+        config,
+        model: Some(dummy_model()),
+        stream_fn: Some(stream_fn),
+        sessions_dir: temp.path("sessions"),
+    }));
+
+    let mut first = attach(&socket).await;
+    let a = greeting(&mut first).await;
+    let mut second = attach(&socket).await;
+    let b = greeting(&mut second).await;
+
+    first
+        .send(&Request::Prompt {
+            text: "first conversation".to_owned(),
+        })
+        .await
+        .expect("send");
+    until(&mut first, |envelope| {
+        matches!(envelope.frame, Frame::RunEnded { .. })
+    })
+    .await;
+
+    second
+        .send(&Request::Prompt {
+            text: "second conversation".to_owned(),
+        })
+        .await
+        .expect("send");
+    until(&mut second, |envelope| {
+        matches!(envelope.frame, Frame::RunEnded { .. })
+    })
+    .await;
+
+    daemon.abort();
+
+    // The transcripts are already on disk — the session component appends as
+    // messages are committed — and each is named after its session.
+    let path = |id: &str| sessions.join(format!("test-{id}.jsonl"));
+    let first_text = std::fs::read_to_string(&path(&a)).expect("the first transcript");
+    let second_text = std::fs::read_to_string(&path(&b)).expect("the second transcript");
+
+    assert!(first_text.contains("first conversation"), "{first_text}");
+    assert!(first_text.contains("Reply one."), "{first_text}");
+    assert!(
+        !first_text.contains("second conversation"),
+        "the second conversation leaked into the first's transcript: {first_text}"
+    );
+    assert!(
+        !first_text.contains("Reply two."),
+        "the second conversation leaked into the first's transcript: {first_text}"
+    );
+
+    assert!(second_text.contains("second conversation"), "{second_text}");
+    assert!(second_text.contains("Reply two."), "{second_text}");
+    assert!(
+        !second_text.contains("first conversation"),
+        "the first conversation leaked into the second's transcript: {second_text}"
+    );
+    assert!(
+        !second_text.contains("Reply one."),
+        "the first conversation leaked into the second's transcript: {second_text}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_script_hook_fires_once_per_event_whatever_session_runs() {
+    // Scripts are daemon-wide: a hook must fire once per event, wherever the
+    // run happens, and never once per mounted session. Mounting the script
+    // host in every session made each event hit every hook N times — two
+    // conversations meant two notifications per turn. This test plants a
+    // plugin that announces every turn start, then runs the resident session
+    // (a heartbeat) and an attached one, and counts the notices.
+    let temp = Temp::new("daemon");
+    let mut config = quiet();
+    config.heartbeat.every = "3s".to_owned();
+    config.heartbeat.prompt = Some("Look at your notes.".to_owned());
+    let home = home(&temp, &config);
+    let socket = home.socket();
+
+    // Discovered from the workspace, which is the home unless configured
+    // otherwise.
+    temp.write(
+        "test/.aphid/plugins/counter.rhai",
+        "fn apply(ctx) { on(\"agent/turn-start\", |cx| { notify(\"turn-start\") }); }\n",
+    );
+
+    let (stream_fn, _script) = scripted([Turn::text("Nothing is due."), Turn::text("A reply.")]);
+    let daemon = tokio::spawn(daemon::run(Options {
+        home,
+        config,
+        model: Some(dummy_model()),
+        stream_fn: Some(stream_fn),
+        sessions_dir: temp.path("sessions"),
+    }));
+
+    let mut client = attach(&socket).await;
+    let mine = greeting(&mut client).await;
+
+    // The resident wakes on the heartbeat. Its one turn must fire the hook
+    // exactly once; anything a second mount would have added is queued in the
+    // same instant, so a short silence after the first notice settles it.
+    let mut seen: Vec<Envelope> = Vec::new();
+    let resident = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let envelope = client
+                .recv()
+                .await
+                .expect("read")
+                .expect("the daemon hung up");
+            if matches!(&envelope.frame, Frame::Notice { text } if text.contains("turn-start")) {
+                return envelope;
+            }
+            seen.push(envelope);
+        }
+    })
+    .await
+    .expect("the hook never fired for the resident's heartbeat");
+
+    match tokio::time::timeout(Duration::from_millis(500), client.recv()).await {
+        Ok(Ok(Some(envelope))) => {
+            panic!("the resident's one turn fired the hook more than once: {envelope:?}")
+        }
+        Ok(Ok(None)) => panic!("the daemon hung up"),
+        Ok(Err(error)) => panic!("read error: {error}"),
+        // Silence: one firing per turn, as daemon-wide scripts should be.
+        Err(_) => {}
+    }
+
+    // The attached conversation's turn must fire it once more, and only once:
+    // the hook still hears every session, but each event exactly one time.
+    client
+        .send(&Request::Prompt {
+            text: "say something".to_owned(),
+        })
+        .await
+        .expect("send");
+    loop {
+        let envelope = client
+            .recv()
+            .await
+            .expect("read")
+            .expect("the daemon hung up");
+        if matches!(envelope.frame, Frame::RunEnded { .. }) {
+            break;
+        }
+        seen.push(envelope);
+    }
+
+    // The notice was published during the run, before its end, and a heartbeat
+    // is at least 3s away — so whatever the run produced is already in hand.
+    assert_eq!(
+        seen.iter()
+            .filter(|envelope| matches!(&envelope.frame, Frame::Notice { text } if text.contains("turn-start")))
+            .count(),
+        1,
+        "the attached session's one turn must add exactly one more notice"
+    );
+    let _ = (resident, mine);
+
+    daemon.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_session_can_be_watched_after_it_ended() {
     let temp = Temp::new("daemon");
     let config = quiet();

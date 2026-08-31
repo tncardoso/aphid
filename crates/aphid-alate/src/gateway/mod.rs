@@ -28,7 +28,7 @@ pub use wire::{Answer, Envelope, Frame, Request};
 
 use std::sync::Arc;
 
-use aphid_agent::rt::{Component, Composition, Context, Disposer};
+use aphid_agent::rt::{Component, Composition, Context, Disposer, Scope};
 use aphid_agent::{
     RunEnd, StreamCx, ToolContent, ToolProgress, ToolRequest, ToolResult, TurnEnd, TurnStart,
 };
@@ -72,14 +72,19 @@ impl aphid_agent::Sink for GatewaySink {
 pub struct GatewayComponent {
     publisher: Publisher,
     composition: Composition,
+    /// The session this component turns into frames, or `None` for a standalone
+    /// agent. Frames are only published for announcements stamped with it, so
+    /// one conversation never shows up as another's.
+    scope: Scope,
 }
 
 impl GatewayComponent {
     #[must_use]
-    pub fn new(publisher: Publisher, composition: &Composition) -> Self {
+    pub fn new(scope: Scope, publisher: Publisher, composition: &Composition) -> Self {
         Self {
             publisher,
             composition: composition.clone(),
+            scope,
         }
     }
 }
@@ -94,10 +99,12 @@ impl Component for GatewayComponent {
         let bus = Arc::clone(&self.composition.bus);
 
         let publisher = self.publisher.clone();
-        bus.on::<TurnStart>(owner, move |_| publisher.send(Frame::TurnStarted));
+        let scope = self.scope.clone();
+        bus.on_scoped::<TurnStart>(scope, owner, move |_| publisher.send(Frame::TurnStarted));
 
         let publisher = self.publisher.clone();
-        bus.on::<ToolRequest>(owner, move |request| {
+        let scope = self.scope.clone();
+        bus.on_scoped::<ToolRequest>(scope, owner, move |request| {
             publisher.send(Frame::ToolCall {
                 id: request.id.clone(),
                 name: request.name.clone(),
@@ -106,7 +113,8 @@ impl Component for GatewayComponent {
         });
 
         let publisher = self.publisher.clone();
-        bus.on::<ToolProgress>(owner, move |progress| {
+        let scope = self.scope.clone();
+        bus.on_scoped::<ToolProgress>(scope, owner, move |progress| {
             publisher.send(Frame::ToolProgress {
                 id: progress.call_id.clone(),
                 chunk: progress.chunk.clone(),
@@ -114,7 +122,8 @@ impl Component for GatewayComponent {
         });
 
         let publisher = self.publisher.clone();
-        bus.on::<ToolResult>(owner, move |result| {
+        let scope = self.scope.clone();
+        bus.on_scoped::<ToolResult>(scope, owner, move |result| {
             publisher.send(Frame::ToolResult {
                 id: result.id.clone(),
                 name: result.name.clone(),
@@ -125,7 +134,8 @@ impl Component for GatewayComponent {
         });
 
         let publisher = self.publisher.clone();
-        bus.on::<TurnEnd>(owner, move |end| {
+        let scope = self.scope.clone();
+        bus.on_scoped::<TurnEnd>(scope, owner, move |end| {
             publisher.send(Frame::TurnEnded {
                 usage: end.summary.usage,
                 stop: end.summary.stop_reason,
@@ -134,7 +144,8 @@ impl Component for GatewayComponent {
         });
 
         let publisher = self.publisher.clone();
-        bus.on::<RunEnd>(owner, move |end| {
+        let scope = self.scope.clone();
+        bus.on_scoped::<RunEnd>(scope, owner, move |end| {
             publisher.send(Frame::RunEnded {
                 stop: end.stop,
                 turns: end.turns,
@@ -143,9 +154,10 @@ impl Component for GatewayComponent {
         });
 
         let publisher = self.publisher.clone();
+        let scope = self.scope.clone();
         self.composition
             .stream
-            .subscribe(owner, move |event, cx| match *event {
+            .subscribe_scoped(scope, owner, move |event, cx| match *event {
                 Protocol::BlockStart {
                     index,
                     kind: BlockKind::ToolCall,
