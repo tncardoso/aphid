@@ -454,6 +454,88 @@ async fn a_heartbeat_wakes_the_resident_session() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_run_in_one_session_is_not_published_as_another_sessions() {
+    // A terminal must see only the conversation it is having. This is the
+    // cross-talk behind the "every heartbeat update" bug: every session mounts
+    // its own `GatewayComponent` onto the one composition bus the daemon
+    // shares, and a bus event is broadcast to every listener whatever session's
+    // run produced it. So a run in one session is published once per mounted
+    // session — tagged with the others' ids as well as its own — and a terminal
+    // that never said anything sees a run under its own session id.
+    let temp = Temp::new("daemon");
+    let config = quiet();
+    let home = home(&temp, &config);
+    let socket = home.socket();
+
+    let (stream_fn, _script) = scripted([Turn::text("Said in the first session.")]);
+    let daemon = tokio::spawn(daemon::run(Options {
+        home,
+        config,
+        model: Some(dummy_model()),
+        stream_fn: Some(stream_fn),
+        sessions_dir: temp.path("sessions"),
+    }));
+
+    let mut first = attach(&socket).await;
+    let mine = greeting(&mut first).await;
+
+    // A second terminal, keeping its own conversation.
+    let mut second = attach(&socket).await;
+    let theirs = greeting(&mut second).await;
+
+    // Only the first terminal speaks. Its prompt echoes into its own session…
+    first
+        .send(&Request::Prompt {
+            text: "say something".to_owned(),
+        })
+        .await
+        .expect("send");
+    until(
+        &mut first,
+        |envelope| matches!(&envelope.frame, Frame::Prompt { text } if text == "say something"),
+    )
+    .await;
+
+    // … and its run ends in its own session. Waiting for this means the run is
+    // over before the second terminal's silence is judged: with the bug, the
+    // leaked frames were published under both ids at the same moment, so
+    // anything that was going to leak is already in the second terminal's
+    // channel.
+    let ended = until(
+        &mut first,
+        |envelope| matches!(envelope.frame, Frame::RunEnded { .. }),
+    )
+    .await;
+    assert_eq!(ended.session.as_deref(), Some(mine.as_str()));
+
+    // The second terminal never said anything, so nothing under its own
+    // session id may arrive — that run belongs to the first's conversation.
+    // Daemon-level frames (no session) are this terminal's business too, which
+    // is why the scan skips them rather than complaining about the first
+    // envelope that arrives.
+    let leaked = tokio::time::timeout(Duration::from_millis(500), async {
+        loop {
+            let envelope = second
+                .recv()
+                .await
+                .expect("read")
+                .expect("the daemon hung up");
+            if envelope.session.as_deref() == Some(theirs.as_str()) {
+                return Some(envelope);
+            }
+        }
+    })
+    .await;
+    if let Ok(Some(envelope)) = leaked {
+        panic!(
+            "the first session's run leaked into the second's own session: {envelope:?}"
+        );
+    }
+
+    daemon.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_session_can_be_watched_after_it_ended() {
     let temp = Temp::new("daemon");
     let config = quiet();
