@@ -686,8 +686,8 @@ async fn each_transcript_contains_only_its_own_session() {
     // The transcripts are already on disk — the session component appends as
     // messages are committed — and each is named after its session.
     let path = |id: &str| sessions.join(format!("test-{id}.jsonl"));
-    let first_text = std::fs::read_to_string(&path(&a)).expect("the first transcript");
-    let second_text = std::fs::read_to_string(&path(&b)).expect("the second transcript");
+    let first_text = std::fs::read_to_string(path(&a)).expect("the first transcript");
+    let second_text = std::fs::read_to_string(path(&b)).expect("the second transcript");
 
     assert!(first_text.contains("first conversation"), "{first_text}");
     assert!(first_text.contains("Reply one."), "{first_text}");

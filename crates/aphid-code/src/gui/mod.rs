@@ -89,6 +89,7 @@ impl GuiConfig {
             system: self.system.clone(),
             append_system: self.append_system.clone(),
             load_context: self.load_context,
+            scope: None,
             max_turns: self.max_turns,
             api_key: self.api_key.clone(),
             composition: aphid_agent::rt::Composition::new(),
@@ -176,7 +177,7 @@ async fn bootstrap(
             answers.clone(),
         ))));
         options.composition.mount(
-            Arc::new(PermissionGate::new(permissions, &options.composition)),
+            Arc::new(PermissionGate::new(None, permissions, &options.composition)),
             serde_json::Value::Null,
         )?;
     }
