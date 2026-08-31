@@ -8,7 +8,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use aphid_agent::rt::{Bus, Component, Composition, Context, Disposer};
+use aphid_agent::rt::{Bus, Component, Composition, Context, Disposer, Scope};
 use aphid_agent::{Prompt, RunStart, ToolHandler, ToolOutcome, Toolbox, tool_fn};
 use aphid_core::Json;
 use serde::Deserialize;
@@ -179,17 +179,27 @@ pub struct MemoryComponent {
     pending: Arc<Mutex<Option<String>>>,
     bus: Arc<Bus>,
     tools: Arc<Toolbox>,
+    /// The conversation this component recalls for, or `None` for a standalone
+    /// agent. The `pending` slot belongs to one session: a prompt recalled by
+    /// another session must not feed this one's next run.
+    scope: Scope,
 }
 
 impl MemoryComponent {
     #[must_use]
-    pub fn new(memory: Shared, config: &MemoryConfig, composition: &Composition) -> Self {
+    pub fn new(
+        scope: Scope,
+        memory: Shared,
+        config: &MemoryConfig,
+        composition: &Composition,
+    ) -> Self {
         Self {
             memory,
             limit: config.recall,
             pending: Arc::default(),
             bus: Arc::clone(&composition.bus),
             tools: Arc::clone(&composition.tools),
+            scope,
         }
     }
 }
@@ -240,7 +250,8 @@ impl Component for MemoryComponent {
         let memory = self.memory.clone();
         let limit = self.limit;
         let pending = Arc::clone(&self.pending);
-        self.bus.on::<Prompt>(owner, move |prompt| {
+        let scope = self.scope.clone();
+        self.bus.on_scoped::<Prompt>(scope, owner, move |prompt| {
             let note = recalled(&memory, limit, &prompt.text);
             if let Ok(mut slot) = pending.lock() {
                 *slot = note;
@@ -248,7 +259,8 @@ impl Component for MemoryComponent {
         });
 
         let pending = Arc::clone(&self.pending);
-        self.bus.on::<RunStart>(owner, move |start| {
+        let scope = self.scope.clone();
+        self.bus.on_scoped::<RunStart>(scope, owner, move |start| {
             let note = match pending.lock() {
                 Ok(mut slot) => slot.take(),
                 Err(poisoned) => poisoned.into_inner().take(),

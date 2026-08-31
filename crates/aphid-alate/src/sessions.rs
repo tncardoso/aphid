@@ -406,6 +406,14 @@ impl Blueprint {
         })?;
         let id = plugin.id().ok_or("the new session has no id")?;
 
+        // The scope every announcement from this session is stamped with, so
+        // its gateway, its transcript and its memory notes reach its own
+        // clients and nobody else's. The id exists only now, which is why the
+        // session component is told after it was built rather than in its
+        // constructor.
+        plugin.set_scope(Some(id.clone().into()));
+        options.scope = Some(id.clone());
+
         // The map of the memory and the list of the jobs, never their contents:
         // the agent sees what exists and calls `recall` for the rest.
         let mut appended = String::new();
@@ -430,6 +438,7 @@ impl Blueprint {
 
         options.composition.mount(
             Arc::new(GatewayComponent::new(
+                Some(id.clone().into()),
                 self.publisher.for_session(&id),
                 &options.composition,
             )),
@@ -437,6 +446,7 @@ impl Blueprint {
         )?;
         options.composition.mount(
             Arc::new(MemoryComponent::new(
+                Some(id.clone().into()),
                 self.memory.clone(),
                 &self.config.memory,
                 &options.composition,
@@ -467,6 +477,7 @@ impl Blueprint {
         // per-session, because that is what a composition is.
         options.composition.mount(
             Arc::new(PermissionGate::new(
+                Some(id.clone().into()),
                 self.permissions.clone(),
                 &options.composition,
             )),

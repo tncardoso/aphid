@@ -53,7 +53,8 @@ mod service;
 mod uid;
 
 pub use bus::{
-    Bailed, Bus, Emitted, Event, Failure, Next, Paralleled, Serialed, WaterfallFn, Waterfalled,
+    Bailed, Bus, Emitted, Event, Failure, Next, Paralleled, Scope, Serialed, WaterfallFn,
+    Waterfalled,
 };
 pub use component::Component;
 pub use composition::Composition;

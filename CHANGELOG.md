@@ -36,6 +36,13 @@
 
 ### Fixed
 
+- **An alate's sessions no longer see one another's runs.** Each session
+  mounted its components on the one composition the daemon shares, and a
+  bus announcement reached every listener whatever session made it — so the
+  resident session's heartbeat replies arrived in the Telegram chat, and each
+  session's transcript file held every conversation. Announcements now carry
+  the session that made them, and the per-session components listen only to
+  their own.
 - `/clear` and `/new` now empty the screen. The transcript was dropped, but the
   lines already drawn stayed where they were, so a new conversation started
   under the old one.

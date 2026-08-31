@@ -35,6 +35,11 @@ pub struct HarnessOptions {
     pub append_system: Option<String>,
     /// Load `AGENTS.md` files and skills. Off makes startup fully predictable.
     pub load_context: bool,
+    /// The session this agent speaks for, when the caller hosts several in one
+    /// composition (an alate). Every announcement the loop makes is stamped
+    /// with it, so a per-session component hears its own conversation and
+    /// nothing else. `None` for a standalone agent.
+    pub scope: Option<String>,
     pub max_turns: u32,
     pub api_key: Option<CompactString>,
     /// The system being assembled: the fiber graph, the bus, and the two
@@ -71,6 +76,7 @@ impl HarnessOptions {
             system: None,
             append_system: None,
             load_context: true,
+            scope: None,
             max_turns: aphid_agent::DEFAULT_MAX_TURNS,
             api_key: None,
             composition: aphid_agent::rt::Composition::new(),
@@ -108,6 +114,7 @@ pub fn build(options: HarnessOptions) -> Harness {
         system,
         append_system,
         load_context,
+        scope,
         max_turns,
         api_key,
         // Taken by the front end before it calls this, so anything left here
@@ -166,6 +173,7 @@ pub fn build(options: HarnessOptions) -> Harness {
         // composition subscribed when they loaded, and the loop has to announce
         // to the same bus they are on.
         .compose(&composition)
+        .scope(scope.map(Into::into))
         .tools(tools::all(
             &workspace,
             Some(Arc::clone(&composition.bus)),

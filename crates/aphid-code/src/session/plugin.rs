@@ -3,11 +3,11 @@
 use std::sync::{Arc, Mutex};
 
 use aphid_agent::TranscriptListeners;
-use aphid_agent::rt::{Component, Context, Disposer};
+use aphid_agent::rt::{Component, Context, Disposer, Scope};
 
 use super::store::SessionStore;
 
-/// Appends new messages to a session file at every point the transcript grows.
+/// Appends new messages to a session file at every moment the transcript grows.
 ///
 /// A component rather than something the app drives, because the moments it
 /// listens for are exactly the moments the transcript changes — after the
@@ -16,6 +16,10 @@ use super::store::SessionStore;
 pub struct SessionComponent {
     store: Arc<Mutex<SessionStore>>,
     listeners: Arc<TranscriptListeners>,
+    /// The conversation this component writes for. Set by an alate after the
+    /// session file has been opened (the file *is* the id); left `None` by a
+    /// standalone agent, which has one conversation and hears everything.
+    scope: Mutex<Scope>,
 }
 
 impl SessionComponent {
@@ -24,6 +28,7 @@ impl SessionComponent {
         Self {
             store: Arc::new(Mutex::new(store)),
             listeners,
+            scope: Mutex::new(None),
         }
     }
 
@@ -40,6 +45,15 @@ impl SessionComponent {
     pub fn id(&self) -> Option<String> {
         self.store.lock().ok().map(|store| store.id().to_owned())
     }
+
+    /// Which session this component writes for, so an alate that hosts several
+    /// keeps each transcript to its own conversation. Must be called before the
+    /// component is mounted; `None` (the default) hears every transcript.
+    pub fn set_scope(&self, scope: Scope) {
+        if let Ok(mut slot) = self.scope.lock() {
+            *slot = scope;
+        }
+    }
 }
 
 impl Component for SessionComponent {
@@ -51,8 +65,9 @@ impl Component for SessionComponent {
         let store = Arc::clone(&self.store);
         let listeners = Arc::clone(&self.listeners);
         let owner = ctx.uid();
+        let scope = self.scope.lock().ok().and_then(|scope| scope.clone());
 
-        listeners.subscribe(owner, move |moment, transcript, _run| {
+        listeners.subscribe_scoped(scope, owner, move |moment, transcript, _run| {
             // Every moment this hears about is one where the transcript grew,
             // so there is nothing to filter on.
             let _ = moment;

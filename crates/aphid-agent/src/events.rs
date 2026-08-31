@@ -24,7 +24,7 @@ use aphid_core::{MessageId, Model, StopReason, Usage};
 
 use crate::RunOutcome;
 use crate::plugin::TurnSummary;
-use crate::rt::{Emitted, Event, Failure, Waterfalled};
+use crate::rt::{Emitted, Event, Failure, Scope, Waterfalled};
 use crate::tool::ToolContent;
 
 /// Something a listener asked the loop to do once dispatch returns.
@@ -382,8 +382,8 @@ type TranscriptListener =
 /// call. See the note on arena borrows above.
 #[derive(Default)]
 pub struct TranscriptListeners {
-    listeners: RwLock<Vec<(Uid, TranscriptListener)>>,
-    current: RwLock<Arc<Vec<TranscriptListener>>>,
+    listeners: RwLock<Vec<(Uid, Scope, TranscriptListener)>>,
+    current: RwLock<Arc<Vec<(Scope, TranscriptListener)>>>,
 }
 
 impl TranscriptListeners {
@@ -392,29 +392,45 @@ impl TranscriptListeners {
         TranscriptListeners::default()
     }
 
+    /// Read every transcript that grows, whatever session it belongs to.
     pub fn subscribe(
         &self,
         owner: Uid,
         listener: impl for<'t> Fn(Moment, &'t aphid_core::Transcript, &Run) + Send + Sync + 'static,
     ) {
+        self.subscribe_scoped(None, owner, listener);
+    }
+
+    /// Read one session's transcript only. See [`Scope`].
+    pub fn subscribe_scoped(
+        &self,
+        scope: Scope,
+        owner: Uid,
+        listener: impl for<'t> Fn(Moment, &'t aphid_core::Transcript, &Run) + Send + Sync + 'static,
+    ) {
         if let Ok(mut listeners) = self.listeners.write() {
-            listeners.push((owner, Arc::new(listener)));
+            listeners.push((owner, scope, Arc::new(listener)));
         }
         self.republish();
     }
 
     pub fn unsubscribe(&self, owner: Uid) {
         if let Ok(mut listeners) = self.listeners.write() {
-            listeners.retain(|(uid, _)| *uid != owner);
+            listeners.retain(|(uid, _, _)| *uid != owner);
         }
         self.republish();
     }
 
     fn republish(&self) {
-        let next: Vec<TranscriptListener> = self
+        let next: Vec<(Scope, TranscriptListener)> = self
             .listeners
             .read()
-            .map(|listeners| listeners.iter().map(|(_, l)| Arc::clone(l)).collect())
+            .map(|listeners| {
+                listeners
+                    .iter()
+                    .map(|(_, s, l)| (s.clone(), Arc::clone(l)))
+                    .collect()
+            })
             .unwrap_or_default();
         if let Ok(mut current) = self.current.write() {
             *current = Arc::new(next);
@@ -425,7 +441,7 @@ impl TranscriptListeners {
     pub fn snapshot(&self) -> Arc<Vec<TranscriptListener>> {
         self.current
             .read()
-            .map(|current| Arc::clone(&current))
+            .map(|current| Arc::new(current.iter().map(|(_, l)| Arc::clone(l)).collect()))
             .unwrap_or_default()
     }
 
@@ -437,17 +453,37 @@ impl TranscriptListeners {
             .unwrap_or(false)
     }
 
-    pub(crate) fn announce(&self, moment: Moment, transcript: &aphid_core::Transcript, run: &Run) {
-        for listener in self.snapshot().iter() {
-            listener(moment, transcript, run);
+    pub(crate) fn announce(
+        &self,
+        scope: &Scope,
+        moment: Moment,
+        transcript: &aphid_core::Transcript,
+        run: &Run,
+    ) {
+        for (listener_scope, listener) in self.snapshot_pairs().iter() {
+            if listener_scope.is_none() || listener_scope.as_deref() == scope.as_deref() {
+                listener(moment, transcript, run);
+            }
         }
+    }
+
+    fn snapshot_pairs(&self) -> Arc<Vec<(Scope, TranscriptListener)>> {
+        self.current
+            .read()
+            .map(|current| Arc::clone(&current))
+            .unwrap_or_default()
     }
 }
 
 impl std::fmt::Debug for TranscriptListeners {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let count = self
+            .current
+            .read()
+            .map(|current| current.len())
+            .unwrap_or(0);
         f.debug_struct("TranscriptListeners")
-            .field("count", &self.snapshot().len())
+            .field("count", &count)
             .finish()
     }
 }
@@ -455,10 +491,11 @@ impl std::fmt::Debug for TranscriptListeners {
 /// The subscribers to the token stream, and the snapshot the loop holds.
 #[derive(Default)]
 pub struct StreamListeners {
-    listeners: RwLock<Vec<(Uid, StreamListener)>>,
+    listeners: RwLock<Vec<(Uid, Scope, StreamListener)>>,
     /// Republished on every change, so the read path never takes a lock it
-    /// might contend on.
-    current: RwLock<Arc<Vec<StreamListener>>>,
+    /// might contend on. Each entry carries its scope, so a turn can take the
+    /// listeners that are its own without holding a lock.
+    current: RwLock<Arc<Vec<(Scope, StreamListener)>>>,
 }
 
 impl StreamListeners {
@@ -467,29 +504,45 @@ impl StreamListeners {
         StreamListeners::default()
     }
 
+    /// Watch every stream, whatever session it belongs to.
     pub fn subscribe(
         &self,
         owner: Uid,
         listener: impl for<'a> Fn(&aphid_core::Event, &StreamCx<'a>) + Send + Sync + 'static,
     ) {
+        self.subscribe_scoped(None, owner, listener);
+    }
+
+    /// Watch one session's streams only. See [`Scope`].
+    pub fn subscribe_scoped(
+        &self,
+        scope: Scope,
+        owner: Uid,
+        listener: impl for<'a> Fn(&aphid_core::Event, &StreamCx<'a>) + Send + Sync + 'static,
+    ) {
         if let Ok(mut listeners) = self.listeners.write() {
-            listeners.push((owner, Arc::new(listener)));
+            listeners.push((owner, scope, Arc::new(listener)));
         }
         self.republish();
     }
 
     pub fn unsubscribe(&self, owner: Uid) {
         if let Ok(mut listeners) = self.listeners.write() {
-            listeners.retain(|(uid, _)| *uid != owner);
+            listeners.retain(|(uid, _, _)| *uid != owner);
         }
         self.republish();
     }
 
     fn republish(&self) {
-        let next: Vec<StreamListener> = self
+        let next: Vec<(Scope, StreamListener)> = self
             .listeners
             .read()
-            .map(|listeners| listeners.iter().map(|(_, l)| Arc::clone(l)).collect())
+            .map(|listeners| {
+                listeners
+                    .iter()
+                    .map(|(_, s, l)| (s.clone(), Arc::clone(l)))
+                    .collect()
+            })
             .unwrap_or_default();
         if let Ok(mut current) = self.current.write() {
             *current = Arc::new(next);
@@ -497,12 +550,24 @@ impl StreamListeners {
     }
 
     /// Take the subscriber list for one stream. Called once per turn, not once
-    /// per token.
+    /// per token, and filtered to the turn's scope so one session never sees
+    /// another's tokens.
     #[must_use]
-    pub fn snapshot(&self) -> Arc<Vec<StreamListener>> {
+    pub fn snapshot(&self, scope: &Scope) -> Arc<Vec<StreamListener>> {
         self.current
             .read()
-            .map(|current| Arc::clone(&current))
+            .map(|current| {
+                Arc::new(
+                    current
+                        .iter()
+                        .filter(|(listener_scope, _)| {
+                            listener_scope.is_none()
+                                || listener_scope.as_deref() == scope.as_deref()
+                        })
+                        .map(|(_, l)| Arc::clone(l))
+                        .collect(),
+                )
+            })
             .unwrap_or_default()
     }
 
@@ -519,8 +584,13 @@ impl StreamListeners {
 
 impl std::fmt::Debug for StreamListeners {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let count = self
+            .current
+            .read()
+            .map(|current| current.len())
+            .unwrap_or(0);
         f.debug_struct("StreamListeners")
-            .field("count", &self.snapshot().len())
+            .field("count", &count)
             .finish()
     }
 }

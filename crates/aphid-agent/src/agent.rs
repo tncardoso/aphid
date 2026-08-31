@@ -12,7 +12,7 @@ use aphid_core::{
 use crate::events::{StreamListeners, ToolProgress, TranscriptListeners};
 
 use crate::registry::Tools;
-use crate::rt::{Bus, Composition, Runtime};
+use crate::rt::{Bus, Composition, Runtime, Scope};
 use crate::stream::{StreamFn, live_stream_fn};
 use crate::tool::{ProgressSink, ToolCx, ToolHandler};
 use crate::toolbox::Toolbox;
@@ -92,6 +92,11 @@ pub struct Agent {
     /// running tools holds it too, and because every payload a listener may
     /// answer from another task carries a handle.
     pub(crate) bus: Arc<Bus>,
+    /// Which session this agent speaks for, when an alate hosts several. Every
+    /// announcement the loop makes is stamped with it, so a per-session
+    /// component hears its own conversation and nothing else. `None` for a
+    /// standalone agent, which announces globally.
+    pub(crate) scope: Scope,
     /// The per-token subscribers. Not on the bus, and the type says why.
     pub(crate) stream_listeners: Arc<StreamListeners>,
     /// Subscribers that read the transcript where it grew. Also not on the bus,
@@ -118,6 +123,7 @@ impl Agent {
             system: None,
             tools: Tools::new(),
             bus: Arc::new(Bus::new()),
+            scope: None,
             stream_listeners: Arc::new(StreamListeners::new()),
             transcript_listeners: Arc::new(TranscriptListeners::new()),
             composition: None,
@@ -213,6 +219,7 @@ impl Agent {
             Arc::clone(&self.cancel),
             Arc::new(BusProgress {
                 bus: Arc::clone(&self.bus),
+                scope: self.scope.clone(),
             }),
         )
     }
@@ -267,16 +274,20 @@ impl std::fmt::Debug for Agent {
 /// Routes partial tool output to whoever subscribed to it.
 struct BusProgress {
     bus: Arc<Bus>,
+    scope: Scope,
 }
 
 impl ProgressSink for BusProgress {
     fn progress(&self, call_id: &str, tool: &str, chunk: &str) {
         if self.bus.has_listeners::<ToolProgress>() {
-            self.bus.emit(&mut ToolProgress {
-                call_id: call_id.to_owned(),
-                tool: tool.to_owned(),
-                chunk: chunk.to_owned(),
-            });
+            self.bus.emit_scoped(
+                &self.scope,
+                &mut ToolProgress {
+                    call_id: call_id.to_owned(),
+                    tool: tool.to_owned(),
+                    chunk: chunk.to_owned(),
+                },
+            );
         }
     }
 
@@ -308,6 +319,7 @@ pub struct AgentBuilder<M> {
     system: Option<String>,
     tools: Tools,
     bus: Arc<Bus>,
+    scope: Scope,
     stream_listeners: Arc<StreamListeners>,
     transcript_listeners: Arc<TranscriptListeners>,
     composition: Option<Runtime>,
@@ -326,6 +338,7 @@ impl AgentBuilder<NoModel> {
             system: self.system,
             tools: self.tools,
             bus: self.bus,
+            scope: self.scope,
             stream_listeners: self.stream_listeners,
             transcript_listeners: self.transcript_listeners,
             composition: self.composition,
@@ -424,6 +437,17 @@ impl<M> AgentBuilder<M> {
         self
     }
 
+    /// The session this agent speaks for, if it is one of several in an alate.
+    ///
+    /// Every announcement the loop makes is stamped with it (see [`Scope`]),
+    /// which is what keeps one conversation out of another's frames and
+    /// transcripts. Leave `None` for a standalone agent.
+    #[must_use]
+    pub fn scope(mut self, scope: Option<Arc<str>>) -> Self {
+        self.scope = scope;
+        self
+    }
+
     /// Use a bus the caller already owns.
     ///
     /// The point of supplying one is composition order: components subscribe
@@ -474,6 +498,7 @@ impl AgentBuilder<Model> {
             model: self.model,
             tools,
             bus: self.bus,
+            scope: self.scope,
             stream_listeners: self.stream_listeners,
             transcript_listeners: self.transcript_listeners,
             composition: self.composition,

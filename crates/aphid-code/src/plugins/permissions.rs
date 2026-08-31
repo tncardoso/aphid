@@ -14,7 +14,7 @@ use std::sync::Mutex;
 
 use aphid_agent::Blocked;
 use aphid_agent::ToolRequest;
-use aphid_agent::rt::{Bus, Component, Composition, Context, Disposer};
+use aphid_agent::rt::{Bus, Component, Composition, Context, Disposer, Scope};
 use tokio::runtime::RuntimeFlavor;
 
 /// How much damage a command could do.
@@ -150,14 +150,20 @@ impl Permissions {
 pub struct PermissionGate {
     permissions: Arc<Permissions>,
     bus: Arc<Bus>,
+    /// The conversation this gate answers for, or `None` for a standalone
+    /// agent. Scoped so one session's tool calls are not answered by another
+    /// session's gate — the shared `Permissions` still remembers "allow always"
+    /// wherever it was decided.
+    scope: Scope,
 }
 
 impl PermissionGate {
     #[must_use]
-    pub fn new(permissions: Arc<Permissions>, composition: &Composition) -> Self {
+    pub fn new(scope: Scope, permissions: Arc<Permissions>, composition: &Composition) -> Self {
         Self {
             permissions,
             bus: Arc::clone(&composition.bus),
+            scope,
         }
     }
 }
@@ -171,17 +177,18 @@ impl Component for PermissionGate {
         let owner = ctx.uid();
         let permissions = Arc::clone(&self.permissions);
 
-        self.bus.on::<ToolRequest>(owner, move |request| {
-            // Somebody already refused, so there is nothing left to ask about
-            // — and asking anyway would put a question in front of the user
-            // for a call that is not going to run either way.
-            if request.is_blocked() {
-                return;
-            }
-            if let Some(blocked) = permissions.verdict(&request.name, &request.arguments) {
-                request.refuse(blocked);
-            }
-        });
+        self.bus
+            .on_scoped::<ToolRequest>(self.scope.clone(), owner, move |request| {
+                // Somebody already refused, so there is nothing left to ask about
+                // — and asking anyway would put a question in front of the user
+                // for a call that is not going to run either way.
+                if request.is_blocked() {
+                    return;
+                }
+                if let Some(blocked) = permissions.verdict(&request.name, &request.arguments) {
+                    request.refuse(blocked);
+                }
+            });
 
         let bus = Arc::clone(&self.bus);
         ctx.effect(move || Disposer::sync(move || bus.unsubscribe::<ToolRequest>(owner)));
