@@ -673,6 +673,7 @@ impl App {
                 row,
                 column,
                 target,
+                host: crate::scripting::Host::Terminal,
             },
         })
     }
@@ -763,7 +764,11 @@ impl App {
     ///
     /// Everything a reader sees happens here; the agent is told by the effect,
     /// which also fetches the credentials the new provider needs.
-    fn switch_model(&mut self, model: Model) -> Cmd<Effect> {
+    /// Point the agent at another model, and say so in the transcript.
+    ///
+    /// Reachable from the graphical front end, which chooses a model by naming
+    /// it rather than by sending the key the terminal would have sent.
+    pub(crate) fn switch_model(&mut self, model: Model) -> Cmd<Effect> {
         let (thinking, note) = clamp_thinking(&model, self.thinking);
         self.thinking = thinking;
         self.status.thinking = thinking.map(|level| level.as_str().to_owned());

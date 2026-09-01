@@ -4,6 +4,21 @@
 
 ### Changed
 
+- **The graphical interfaces are rebuilt on a component library.** The text
+  box now composes: a dead key makes `á` where it used to type `´a`, and so do
+  the input methods of the system. Markdown, code highlighting and the
+  transcript are drawn by that library as well, and the transcript now measures
+  and draws only the messages on screen instead of the whole conversation on
+  every frame.
+- **Remote images in the graphical interface load straight away.** They used to
+  wait for you to select them. The Markdown view that replaces the old one has
+  no way to hold them back.
+- A plugin surface's `mouse` message now carries `host`, which is `"terminal"`
+  or `"gui"`. A row and a column are cells of a terminal, so a window sends
+  zero for them; a panel that lines a table up by counting characters can read
+  `host` and draw the other way.
+- Selecting a model in the graphical interface no longer goes through a key
+  that nobody pressed. It names the model.
 - **Plugin surfaces are now written as three parts.** A surface declares
   `init` for what its model starts as, `update(state, msg)` for how a message
   changes it, and `view(state)` for what it looks like. The old `render` and

@@ -59,7 +59,6 @@ libc = "0.2"
 nostr = { version = "0.45", features = ["os-rng"] }
 ratatui = "0.30"
 ratatui-textarea = "0.9"
-pulldown-cmark = "0.13"
 # `bundled` builds SQLite from source rather than hunting for a system one on
 # every new machine. It is behind the colony's `relay` feature, so a plain
 # `cargo build` of aphid never pays for it.
@@ -72,14 +71,12 @@ serde_json = "1"
 # The runtime depends on it directly, so it says so.
 tokio = { version = "1", default-features = false, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 thiserror = "2"
-syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 # Default features are `connect` and `handshake` and no TLS at all, which is
 # what a loopback relay wants: `ws://` needs none, and refusing to pull one is
 # the same instinct that made the alate gateway a Unix socket.
 tokio-tungstenite = "0.30"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-unicode-segmentation = "1"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

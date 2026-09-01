@@ -1,6 +1,5 @@
 //! The GPUI desktop front end.
 
-mod markdown;
 pub mod theme;
 
 use std::collections::HashSet;
@@ -9,21 +8,20 @@ use std::sync::Arc;
 
 use aphid_agent::rt::Component;
 use gpui::{
-    App, Application, Bounds, Context, FocusHandle, Focusable, FontWeight, HighlightStyle,
-    IntoElement, Render, ScrollHandle, SharedString, StyledText, Window, WindowBounds,
-    WindowOptions, div, img, prelude::*, px, rgb, rgba, size,
+    App, Application, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
+    ListAlignment, ListState, Render, SharedString, Window, WindowBounds, WindowOptions, div, list,
+    prelude::*, px, rgb, rgba, size,
 };
-use syntect::easy::HighlightLines;
-use syntect::highlighting::ThemeSet;
-use syntect::parsing::SyntaxSet;
-use syntect::util::LinesWithEndings;
+use gpui_component::Root;
+use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::text::TextView;
 
 use crate::events::{Session, SessionEnd, SessionStart};
 use crate::harness::{self, HarnessOptions};
 use crate::plugins::permissions::{Decision, PermissionGate, Permissions};
 use crate::plugins::scripts;
 use crate::scripting::{
-    Action as PluginAction, Job as PluginJob, Open, PluginHub, Report as PluginReport,
+    Action as PluginAction, Host, Job as PluginJob, Open, PluginHub, Report as PluginReport,
     SurfaceEvent, Widget,
 };
 use crate::session::{self, Summary, sessions_dir};
@@ -33,6 +31,23 @@ use crate::tui::runtime::{Answers, Hub, channel};
 use crate::tui::scrollback::{Entry, ToolState};
 use crate::tui::{App as CodeApp, Effect, Msg, UiComponent, UiConfirmer, UiSink};
 use crate::{HarnessOptions as Options, Workspace};
+
+gpui::actions!(
+    aphid,
+    [
+        /// Stop the run in flight.
+        CancelRun,
+        /// Put a line break in the text box instead of sending it.
+        NewLine
+    ]
+);
+
+/// The key context of the window.
+///
+/// The text box has a deeper one of its own, so its bindings are tried first
+/// and these are what is left: `Escape` reaches here because the box lets it
+/// through, and `Shift-Enter` because the box does not bind it at all.
+const CONTEXT: &str = "Aphid";
 use theme::{ACCENT, BACKGROUND, BORDER, DANGER, MUTED, PANEL, PANEL_RAISED, TEXT, USER};
 
 #[derive(Clone)]
@@ -360,12 +375,21 @@ struct DesktopView {
     workspace: Workspace,
     sessions: Vec<Summary>,
     drawer_open: bool,
-    composer: String,
+    /// The text box. It owns its own cursor, selection and marked text, which
+    /// is what makes a dead key compose: `Keystroke.key_char` gives the key and
+    /// not the character, so nothing built on key events alone can type `á`.
+    composer: Entity<InputState>,
     focus: FocusHandle,
-    scroll: ScrollHandle,
+    /// The transcript, measured item by item and anchored at the newest.
+    ///
+    /// It holds the heights it measured, so the pane draws the entries that are
+    /// on screen and not the whole conversation on every frame.
+    entries: ListState,
+    /// What each entry looked like when it was last measured. An entry whose
+    /// fingerprint moved is spliced, which is what throws its height away.
+    fingerprints: Vec<u64>,
     expanded_tools: HashSet<usize>,
     expanded_thinking: HashSet<usize>,
-    loaded_images: HashSet<String>,
     switching_session: bool,
     session_generation: u64,
 }
@@ -377,9 +401,19 @@ impl DesktopView {
         runtime: tokio::runtime::Handle,
         confirm: bool,
         workspace: Workspace,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let sessions = session::list_for(&sessions_dir(), workspace.root());
+        let composer = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .auto_grow(1, 5)
+                .soft_wrap(true)
+                .placeholder("Ask aphid, or type /help…")
+        });
+        cx.subscribe_in(&composer, window, Self::on_composer)
+            .detach();
         Self {
             backend,
             config,
@@ -388,12 +422,15 @@ impl DesktopView {
             workspace,
             sessions,
             drawer_open: true,
-            composer: String::new(),
+            composer,
             focus: cx.focus_handle(),
-            scroll: ScrollHandle::new(),
+            // Overdraw of a screen and a half: enough that a scroll of one page
+            // has nothing to measure, and not so much that opening a long
+            // conversation measures all of it.
+            entries: ListState::new(0, ListAlignment::Bottom, px(900.)),
+            fingerprints: Vec::new(),
             expanded_tools: HashSet::new(),
             expanded_thinking: HashSet::new(),
-            loaded_images: HashSet::new(),
             switching_session: false,
             session_generation: 0,
         }
@@ -428,6 +465,48 @@ impl DesktopView {
         .detach();
     }
 
+    /// Tell the list what changed since the last frame.
+    ///
+    /// A transcript grows at the end, but it does not only grow: a tool result
+    /// lands in a card that was drawn several entries ago, and opening a card
+    /// changes its height. So each entry carries a fingerprint of the things
+    /// that can change its size, and the ones that moved are spliced — which is
+    /// what makes the list measure them again and keeps every other height.
+    fn sync_entries(&mut self) {
+        let entries = self.backend.app.scrollback.entries();
+        let fresh: Vec<u64> = entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                fingerprint(
+                    entry,
+                    self.expanded_tools.contains(&index),
+                    self.expanded_thinking.contains(&index),
+                )
+            })
+            .collect();
+
+        // A transcript that shrank is a different conversation: a session was
+        // opened, or the pane was cleared. Nothing measured before is worth
+        // keeping.
+        if fresh.len() < self.fingerprints.len() {
+            self.entries.reset(fresh.len());
+            self.fingerprints = fresh;
+            return;
+        }
+
+        let old = self.fingerprints.len();
+        for (index, (new, was)) in fresh.iter().zip(&self.fingerprints).enumerate() {
+            if new != was {
+                self.entries.splice(index..index + 1, 1);
+            }
+        }
+        if fresh.len() > old {
+            self.entries.splice(old..old, fresh.len() - old);
+        }
+        self.fingerprints = fresh;
+    }
+
     fn open_session(&mut self, resume: Option<PathBuf>, cx: &mut Context<Self>) {
         if self.backend.app.status.running || self.switching_session {
             return;
@@ -449,10 +528,10 @@ impl DesktopView {
                         view.session_generation = view.session_generation.wrapping_add(1);
                         view.attach_receiver(receiver, cx);
                         view.sessions = session::list_for(&sessions_dir(), view.workspace.root());
-                        view.scroll.scroll_to_bottom();
                     }
                     Err(error) => view.backend.app.scrollback.push_notice(error),
                 }
+                view.sync_entries();
                 cx.notify();
             });
         })
@@ -469,7 +548,7 @@ impl DesktopView {
         if refresh_sessions {
             self.sessions = session::list_for(&sessions_dir(), self.workspace.root());
         }
-        self.scroll.scroll_to_bottom();
+        self.sync_entries();
         if self.backend.app.quitting() {
             cx.quit();
             return;
@@ -501,59 +580,81 @@ impl DesktopView {
         self.open_session(None, cx);
     }
 
-    fn on_key(&mut self, event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let key = event.keystroke.key.as_str();
-        let modifiers = event.keystroke.modifiers;
-        if key == "enter" && !modifiers.shift {
-            self.send(cx);
-            cx.stop_propagation();
-            return;
+    /// What the text box says happened.
+    ///
+    /// `Enter` in a multi-line box inserts the newline before it reports the
+    /// press, so the line is taken with that newline trimmed off. A newline on
+    /// purpose is `Shift-Enter`, which the box does not bind and this view does.
+    fn on_composer(
+        &mut self,
+        _: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::PressEnter { secondary: false } => self.send(window, cx),
+            InputEvent::Change => cx.notify(),
+            _ => {}
         }
-        if key == "enter" {
-            self.composer.push('\n');
-        } else if key == "backspace" {
-            self.composer.pop();
-        } else if key == "escape" {
-            if self.backend.app.status.running {
-                self.backend.perform(Effect::Cancel);
-            } else {
-                self.composer.clear();
-            }
-        } else if modifiers.platform && key == "v" {
-            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                self.composer.push_str(&text);
-            }
-        } else if let Some(text) = &event.keystroke.key_char
-            && !modifiers.platform
-            && !modifiers.control
-        {
-            self.composer.push_str(text);
-        } else {
-            return;
-        }
-        window.focus(&self.focus);
-        cx.notify();
-        cx.stop_propagation();
     }
 
-    fn send(&mut self, cx: &mut Context<Self>) {
-        let line = self.composer.trim().to_owned();
+    /// Stop the run, or empty the box when nothing is running.
+    fn on_cancel(&mut self, _: &CancelRun, window: &mut Window, cx: &mut Context<Self>) {
+        if self.backend.app.status.running {
+            self.backend.perform(Effect::Cancel);
+        } else {
+            self.clear_composer(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Break the line rather than send it.
+    fn on_new_line(&mut self, _: &NewLine, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer.update(cx, |state, cx| {
+            state.insert("\n", window, cx);
+        });
+        cx.notify();
+    }
+
+    /// The line in the text box, without the newline `Enter` just put there.
+    fn composed(&self, cx: &App) -> String {
+        self.composer
+            .read(cx)
+            .value()
+            .trim_end_matches('\n')
+            .trim()
+            .to_owned()
+    }
+
+    fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let line = self.composed(cx);
+        self.clear_composer(window, cx);
         if line.is_empty() {
             return;
         }
-        self.composer.clear();
         if let Some(command) = line.strip_prefix('!') {
             self.backend
                 .perform(Effect::Bang(command.trim().to_owned()));
         } else {
             self.backend.submit(line);
         }
+        self.sync_entries();
         if self.backend.app.quitting() {
             cx.quit();
             return;
         }
-        self.scroll.scroll_to_bottom();
         cx.notify();
+    }
+
+    /// Empty the text box.
+    ///
+    /// Its value is owned by the box, so this asks it rather than assigning to
+    /// a string of our own.
+    fn clear_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+        });
     }
 
     fn answer(&mut self, decision: Decision, cx: &mut Context<Self>) {
@@ -567,20 +668,24 @@ impl DesktopView {
         cx.notify();
     }
 
+    /// Take the model the pointer landed on.
+    ///
+    /// The terminal commits a choice with `Enter`, and this used to reach that
+    /// path by making a key event that nobody pressed. It names the model
+    /// instead, which is what a pointer knows and a keyboard does not.
     fn choose_model(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(Modal::Models { selected, .. }) = &mut self.backend.app.modal {
-            *selected = index;
-        }
-        let cmd = self
-            .backend
-            .app
-            .update(Msg::Key(ratatui::crossterm::event::KeyEvent::new(
-                ratatui::crossterm::event::KeyCode::Enter,
-                ratatui::crossterm::event::KeyModifiers::NONE,
-            )));
+        let Some(Modal::Models { models, .. }) = &self.backend.app.modal else {
+            return;
+        };
+        let Some(model) = models.get(index).cloned() else {
+            return;
+        };
+        self.backend.app.modal = None;
+        let cmd = self.backend.app.switch_model(model);
         for effect in cmd.into_effects() {
             self.backend.perform(effect);
         }
+        self.sync_entries();
         cx.notify();
     }
 
@@ -606,9 +711,13 @@ impl DesktopView {
             name,
             event: SurfaceEvent::Mouse {
                 button: "left".to_owned(),
+                // A window has no rows and no columns. Zero is what a graphical
+                // host can say honestly; `host` is how a plugin knows to read
+                // `target` and not these.
                 row: 0,
                 column: 0,
                 target,
+                host: Host::Gui,
             },
         });
         cx.notify();
@@ -700,14 +809,19 @@ impl DesktopView {
     }
 
     fn render_entry(
-        &self,
+        &mut self,
         index: usize,
-        entry: &Entry,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let Some(entry) = self.backend.app.scrollback.entries().get(index) else {
+            return div().into_any_element();
+        };
+        // The list draws one entry at a time, so each one carries the padding
+        // the transcript used to put around the column as a whole.
+        let row = div().w_full().max_w(px(980.)).mx_auto().px_6().py_2();
         match entry {
-            Entry::User(text) => div()
-                .w_full()
+            Entry::User(text) => row
                 .flex()
                 .justify_end()
                 .child(
@@ -722,7 +836,18 @@ impl DesktopView {
                         .child(text.clone()),
                 )
                 .into_any_element(),
-            Entry::Assistant(text) => self.render_markdown(text, cx),
+            Entry::Assistant(text) => row
+                .text_color(rgb(TEXT))
+                .child(
+                    TextView::markdown(
+                        SharedString::from(format!("assistant-{index}")),
+                        text.clone(),
+                        window,
+                        cx,
+                    )
+                    .selectable(true),
+                )
+                .into_any_element(),
             Entry::Thinking(text) => {
                 let expanded = self.expanded_thinking.contains(&index);
                 let preview = if expanded {
@@ -730,28 +855,31 @@ impl DesktopView {
                 } else {
                     text.lines().next().unwrap_or("thinking…").to_owned()
                 };
-                div()
-                    .id(SharedString::from(format!("thinking-{index}")))
-                    .w_full()
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .bg(rgb(PANEL))
-                    .text_color(rgb(MUTED))
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.expanded_thinking.remove(&index) {
-                            this.expanded_thinking.insert(index);
-                        }
-                        cx.notify();
-                    }))
-                    .child(if expanded {
-                        "▾ Thinking"
-                    } else {
-                        "▸ Thinking"
-                    })
-                    .child(div().mt_1().whitespace_normal().child(preview))
-                    .into_any_element()
+                row.child(
+                    div()
+                        .id(SharedString::from(format!("thinking-{index}")))
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(PANEL))
+                        .text_color(rgb(MUTED))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !this.expanded_thinking.remove(&index) {
+                                this.expanded_thinking.insert(index);
+                            }
+                            this.sync_entries();
+                            cx.notify();
+                        }))
+                        .child(if expanded {
+                            "▾ Thinking"
+                        } else {
+                            "▸ Thinking"
+                        })
+                        .child(div().mt_1().whitespace_normal().child(preview)),
+                )
+                .into_any_element()
             }
             Entry::Tool {
                 name,
@@ -768,22 +896,22 @@ impl DesktopView {
                     ToolState::Done => "done".to_owned(),
                     ToolState::Failed => "failed".to_owned(),
                 };
+                let failed = *state == ToolState::Failed;
+                let arguments = arguments.clone();
+                let output = output.clone();
                 let mut card = div()
                     .id(SharedString::from(format!("tool-{index}")))
                     .w_full()
                     .rounded_md()
                     .border_1()
-                    .border_color(if *state == ToolState::Failed {
-                        rgb(DANGER)
-                    } else {
-                        rgb(BORDER)
-                    })
+                    .border_color(if failed { rgb(DANGER) } else { rgb(BORDER) })
                     .bg(rgb(PANEL))
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !this.expanded_tools.remove(&index) {
                             this.expanded_tools.insert(index);
                         }
+                        this.sync_entries();
                         cx.notify();
                     }))
                     .child(
@@ -804,131 +932,36 @@ impl DesktopView {
                             .font_family("monospace")
                             .text_sm()
                             .whitespace_normal()
-                            .child(arguments.clone())
-                            .child(div().mt_2().text_color(rgb(MUTED)).child(output.clone())),
+                            .child(arguments)
+                            .child(div().mt_2().text_color(rgb(MUTED)).child(output)),
                     );
                 }
-                card.into_any_element()
+                row.child(card).into_any_element()
             }
-            Entry::Notice(text) => div()
-                .w_full()
+            Entry::Notice(text) => row
                 .text_sm()
                 .text_color(rgb(MUTED))
                 .child(text.clone())
                 .into_any_element(),
-            Entry::Shell { command, output } => div()
-                .w_full()
-                .rounded_md()
-                .bg(rgb(PANEL))
-                .p_3()
-                .font_family("monospace")
-                .text_sm()
-                .child(format!("$ {command}\n{output}"))
+            Entry::Shell { command, output } => row
+                .child(
+                    div()
+                        .w_full()
+                        .rounded_md()
+                        .bg(rgb(PANEL))
+                        .p_3()
+                        .font_family("monospace")
+                        .text_sm()
+                        .child(format!("$ {command}\n{output}")),
+                )
                 .into_any_element(),
-            Entry::Logo => div()
+            Entry::Logo => row
                 .text_2xl()
                 .font_weight(FontWeight::BOLD)
                 .text_color(rgb(ACCENT))
                 .child("aphid")
                 .into_any_element(),
         }
-    }
-
-    fn render_markdown(&self, source: &str, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let mut root = div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .text_color(rgb(TEXT));
-        for (index, block) in markdown::parse(source).into_iter().enumerate() {
-            let element = match block {
-                markdown::Block::Text(text) => div()
-                    .w_full()
-                    .whitespace_normal()
-                    .child(text)
-                    .into_any_element(),
-                markdown::Block::Heading { level, text } => div()
-                    .mt_2()
-                    .text_size(px(25. - f32::from(level) * 1.8))
-                    .font_weight(FontWeight::BOLD)
-                    .child(text)
-                    .into_any_element(),
-                markdown::Block::Code { language, text } => div()
-                    .id(SharedString::from(format!("code-{index}")))
-                    .w_full()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(0x0c1014))
-                    .p_3()
-                    .font_family("monospace")
-                    .text_sm()
-                    .overflow_scroll()
-                    .child(highlight_code(&language, &text))
-                    .into_any_element(),
-                markdown::Block::Quote(text) => div()
-                    .border_l_2()
-                    .border_color(rgb(ACCENT))
-                    .pl_3()
-                    .text_color(rgb(MUTED))
-                    .child(text)
-                    .into_any_element(),
-                markdown::Block::ListItem { depth, text } => div()
-                    .pl(px(12. * depth as f32))
-                    .child(format!("• {text}"))
-                    .into_any_element(),
-                markdown::Block::Rule => {
-                    div().h(px(1.)).w_full().bg(rgb(BORDER)).into_any_element()
-                }
-                markdown::Block::Table(text) => div()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .p_3()
-                    .font_family("monospace")
-                    .child(text)
-                    .into_any_element(),
-                markdown::Block::Image { url, alt } => {
-                    if self.loaded_images.contains(&url) {
-                        div()
-                            .id(SharedString::from(format!("image-{index}-{url}")))
-                            .max_w_full()
-                            .child(img(url).max_w_full().max_h(px(420.)))
-                            .into_any_element()
-                    } else {
-                        let load = url.clone();
-                        div()
-                            .id(SharedString::from(format!("image-gate-{index}-{url}")))
-                            .rounded_md()
-                            .border_1()
-                            .border_color(rgb(BORDER))
-                            .p_3()
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(PANEL_RAISED)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.loaded_images.insert(load.clone());
-                                cx.notify();
-                            }))
-                            .child(format!("Load remote image: {alt}"))
-                            .child(div().text_xs().text_color(rgb(MUTED)).child(url))
-                            .into_any_element()
-                    }
-                }
-                markdown::Block::Link { url, text } => {
-                    let target = url.clone();
-                    div()
-                        .id(SharedString::from(format!("link-{index}-{url}")))
-                        .text_color(rgb(0x75a7e8))
-                        .cursor_pointer()
-                        .on_click(move |_, _, cx| cx.open_url(&target))
-                        .child(text)
-                        .into_any_element()
-                }
-            };
-            root = root.child(element);
-        }
-        root.into_any_element()
     }
 
     fn render_surface_widget(
@@ -1259,15 +1292,12 @@ impl Render for DesktopView {
             status.context_window,
             status.total.cost.total
         );
-        let entries = self
-            .backend
-            .app
-            .scrollback
-            .entries()
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| self.render_entry(index, entry, cx))
-            .collect::<Vec<_>>();
+        let transcript = list(
+            self.entries.clone(),
+            cx.processor(|this, index: usize, window, cx| this.render_entry(index, window, cx)),
+        )
+        .flex_1()
+        .min_h_0();
 
         let mut content = div()
             .relative()
@@ -1276,23 +1306,15 @@ impl Render for DesktopView {
             .bg(rgb(BACKGROUND))
             .text_color(rgb(TEXT))
             .font_family("system-ui")
+            .key_context(CONTEXT)
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(Self::on_key))
+            .on_action(cx.listener(Self::on_cancel))
+            .on_action(cx.listener(Self::on_new_line))
             .child(self.render_drawer(cx));
         if let Some(left) = self.render_plugin_side(true, cx) {
             content = content.child(left);
         }
 
-        let composer_text = if self.composer.is_empty() {
-            "Ask aphid, or type /help…".to_owned()
-        } else {
-            self.composer.clone()
-        };
-        let composer_color = if self.composer.is_empty() {
-            rgb(MUTED)
-        } else {
-            rgb(TEXT)
-        };
         let running = status.running;
         let main = div()
             .flex_1()
@@ -1317,26 +1339,7 @@ impl Render for DesktopView {
                     )
                     .child(div().text_sm().text_color(rgb(MUTED)).child(status_text)),
             )
-            .child(
-                div()
-                    .id("transcript")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_scroll()
-                    .track_scroll(&self.scroll)
-                    .child(
-                        div()
-                            .w_full()
-                            .max_w(px(980.))
-                            .mx_auto()
-                            .px_6()
-                            .py_5()
-                            .flex()
-                            .flex_col()
-                            .gap_4()
-                            .children(entries),
-                    ),
-            )
+            .child(transcript)
             .child(
                 div().flex_none().px_6().pb_5().child(
                     div()
@@ -1353,14 +1356,9 @@ impl Render for DesktopView {
                         .items_end()
                         .child(
                             div()
-                                .id("composer")
                                 .flex_1()
-                                .min_h(px(44.))
-                                .max_h(px(120.))
-                                .overflow_scroll()
-                                .whitespace_normal()
-                                .text_color(composer_color)
-                                .child(composer_text),
+                                .min_w_0()
+                                .child(Input::new(&self.composer).appearance(false)),
                         )
                         .child(
                             div()
@@ -1373,12 +1371,12 @@ impl Render for DesktopView {
                                 .bg(if running { rgb(DANGER) } else { rgb(ACCENT) })
                                 .text_color(rgb(0x0d150d))
                                 .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, cx| {
+                                .on_click(cx.listener(|this, _, window, cx| {
                                     if this.backend.app.status.running {
                                         this.backend.perform(Effect::Cancel);
                                         cx.notify();
                                     } else {
-                                        this.send(cx);
+                                        this.send(window, cx);
                                     }
                                 }))
                                 .child(if running { "■" } else { "↑" }),
@@ -1413,32 +1411,49 @@ fn action_button(
         .child(label)
 }
 
-fn highlight_code(language: &str, code: &str) -> StyledText {
-    static SYNTAXES: std::sync::OnceLock<SyntaxSet> = std::sync::OnceLock::new();
-    static THEMES: std::sync::OnceLock<ThemeSet> = std::sync::OnceLock::new();
-    let syntaxes = SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines);
-    let themes = THEMES.get_or_init(ThemeSet::load_defaults);
-    let syntax = syntaxes
-        .find_syntax_by_token(language)
-        .unwrap_or_else(|| syntaxes.find_syntax_plain_text());
-    let mut highlighter = HighlightLines::new(syntax, &themes.themes["base16-ocean.dark"]);
-    let mut offset = 0usize;
-    let mut highlights = Vec::new();
-    for line in LinesWithEndings::from(code) {
-        if let Ok(ranges) = highlighter.highlight_line(line, syntaxes) {
-            for (style, text) in ranges {
-                let end = offset + text.len();
-                let color = style.foreground;
-                let packed = (u32::from(color.r) << 24)
-                    | (u32::from(color.g) << 16)
-                    | (u32::from(color.b) << 8)
-                    | u32::from(color.a);
-                highlights.push((offset..end, HighlightStyle::color(rgba(packed).into())));
-                offset = end;
-            }
+/// What an entry looks like to the list that measures it.
+///
+/// Only the things that can change an entry's height go in: the kind, the
+/// length of each text it draws, and whether it is open. Lengths and not the
+/// text itself, because this runs for every entry on every message, and hashing
+/// a whole conversation on each streamed chunk would cost more than the
+/// measuring it saves.
+fn fingerprint(entry: &Entry, tool_open: bool, thinking_open: bool) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::mem::discriminant(entry).hash(&mut hasher);
+    match entry {
+        Entry::User(text) | Entry::Assistant(text) | Entry::Notice(text) => {
+            text.len().hash(&mut hasher);
         }
+        Entry::Thinking(text) => {
+            text.len().hash(&mut hasher);
+            thinking_open.hash(&mut hasher);
+        }
+        Entry::Tool {
+            name,
+            arguments,
+            output,
+            state,
+            streamed,
+            details,
+        } => {
+            name.len().hash(&mut hasher);
+            arguments.len().hash(&mut hasher);
+            output.len().hash(&mut hasher);
+            std::mem::discriminant(state).hash(&mut hasher);
+            streamed.hash(&mut hasher);
+            details.is_some().hash(&mut hasher);
+            tool_open.hash(&mut hasher);
+        }
+        Entry::Shell { command, output } => {
+            command.len().hash(&mut hasher);
+            output.len().hash(&mut hasher);
+        }
+        Entry::Logo => {}
     }
-    StyledText::new(code.to_owned()).with_highlights(highlights)
+    hasher.finish()
 }
 
 /// Start the desktop interface.
@@ -1463,6 +1478,10 @@ pub fn run(options: Options, resume: Option<PathBuf>, confirm: bool) -> Result<(
         // Before any window: the components read one theme out of a global, so
         // nothing draws in the colors of aphid until this has run.
         theme::init(cx);
+        cx.bind_keys([
+            gpui::KeyBinding::new("escape", CancelRun, Some(CONTEXT)),
+            gpui::KeyBinding::new("shift-enter", NewLine, Some(CONTEXT)),
+        ]);
         let bounds = Bounds::centered(None, size(px(1240.), px(820.)), cx);
         match cx.open_window(
             WindowOptions {
@@ -1475,12 +1494,23 @@ pub fn run(options: Options, resume: Option<PathBuf>, confirm: bool) -> Result<(
             },
             move |window, cx| {
                 let view = cx.new(|cx| {
-                    DesktopView::new(backend, config, runtime_handle, confirm, workspace, cx)
+                    DesktopView::new(
+                        backend,
+                        config,
+                        runtime_handle,
+                        confirm,
+                        workspace,
+                        window,
+                        cx,
+                    )
                 });
                 let focus = view.read(cx).focus.clone();
                 window.focus(&focus);
                 view.update(cx, |view, cx| view.attach_receiver(receiver, cx));
-                view
+                // The first layer of the window has to be a `Root`. It is not
+                // decoration: the text box reaches for it when it takes focus,
+                // and `Root::read` panics when the layer is anything else.
+                cx.new(|cx| Root::new(view, window, cx))
             },
         ) {
             Ok(_) => cx.activate(true),

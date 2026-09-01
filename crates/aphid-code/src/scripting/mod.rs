@@ -95,8 +95,8 @@ pub use hub::{Job, Open, PluginHub, Report};
 pub use script::{Declares, ScriptPlugin};
 pub use store::Store;
 pub use surface::{
-    Placement, RegisteredSurface, Side, SurfaceAction, SurfaceEvent, SurfaceRender, SurfaceSpec,
-    registered as registered_surfaces, ticking as ticking_surfaces,
+    Host, Placement, RegisteredSurface, Side, SurfaceAction, SurfaceEvent, SurfaceRender,
+    SurfaceSpec, registered as registered_surfaces, ticking as ticking_surfaces,
 };
 pub use tool::{ScriptTool, ToolSpec};
 pub use widget::Widget;

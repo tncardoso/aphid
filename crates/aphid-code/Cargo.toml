@@ -14,7 +14,7 @@ include = ["/src", "/tests", "/Cargo.toml"]
 
 [features]
 default = []
-gui = ["dep:gpui", "dep:gpui-component", "dep:pulldown-cmark", "dep:syntect", "dep:unicode-segmentation"]
+gui = ["dep:gpui", "dep:gpui-component"]
 
 [dependencies]
 aphid-agent.workspace = true
@@ -25,14 +25,11 @@ chrono.workspace = true
 compact_str.workspace = true
 gpui = { workspace = true, optional = true }
 gpui-component = { workspace = true, optional = true }
-pulldown-cmark = { workspace = true, optional = true }
 ratatui.workspace = true
 ratatui-textarea.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-syntect = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["fs", "rt-multi-thread", "sync"] }
-unicode-segmentation = { workspace = true, optional = true }
 
 [lints]
 workspace = true

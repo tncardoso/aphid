@@ -129,10 +129,37 @@ pub enum SurfaceEvent {
         row: u16,
         column: u16,
         target: Option<String>,
+        /// Which interface the pointer was in.
+        ///
+        /// A panel that lines a table up by counting characters needs to know
+        /// that it is not in a terminal. The row and column are the terminal's
+        /// own units, so a graphical host has no honest value for them and
+        /// sends zeroes; `target` is what it does know.
+        host: Host,
     },
     Paste {
         text: String,
     },
+}
+
+/// Which interface a surface is being shown in.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Host {
+    /// The terminal, where a row and a column are cells.
+    Terminal,
+    /// The desktop window, where they are neither.
+    Gui,
+}
+
+impl Host {
+    /// The word a plugin reads.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Terminal => "terminal",
+            Self::Gui => "gui",
+        }
+    }
 }
 
 impl SurfaceEvent {
@@ -157,6 +184,7 @@ impl SurfaceEvent {
                 row,
                 column,
                 target,
+                host,
             } => {
                 let mut map = Map::new();
                 map.insert("kind".into(), "mouse".into());
@@ -164,6 +192,7 @@ impl SurfaceEvent {
                 map.insert("row".into(), i64::from(row).into());
                 map.insert("column".into(), i64::from(column).into());
                 map.insert("target".into(), target.map_or(Dynamic::UNIT, Dynamic::from));
+                map.insert("host".into(), host.as_str().into());
                 map
             }
             Self::Paste { text } => {

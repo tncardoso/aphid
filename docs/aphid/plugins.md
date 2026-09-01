@@ -407,7 +407,7 @@ A message is a map with a `kind`:
 | `kind` | Fields |
 | --- | --- |
 | `key` | `code`, `modifiers` |
-| `mouse` | `button`, `row`, `column`, `target` |
+| `mouse` | `button`, `row`, `column`, `target`, `host` |
 | `paste` | `text` |
 | `tick` | none, and only with `tick: true` |
 | `msg` | `name`, `payload` |
@@ -449,6 +449,12 @@ to open it. It changes nothing. The first cut knows these widgets:
 
 `id` is for the widgets a click can hit. A mouse message carries `target` with
 that id.
+
+A mouse message also carries `host`, which is `"terminal"` or `"gui"`. A row and
+a column are cells of a terminal, so the graphical interface has no true value
+for them and sends zero; `target` is what it knows. Read `host` before you read
+`row` and `column`, and keep it in your model if your `view` must draw
+differently in each — a `view` gets no message and cannot ask.
 
 In the terminal UI, `F6` gives focus to an open panel. `Esc` returns focus to
 the input box. Clicking a panel also focuses it. While a panel has focus, its
