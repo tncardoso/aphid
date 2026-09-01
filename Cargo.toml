@@ -45,6 +45,11 @@ futures-core = "0.3"
 # It is already in the tree under tokio-tungstenite.
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 gpui = "=0.2.2"
+# The component library that both graphical interfaces are built on. It pins
+# `gpui` at the same 0.2.2, so the exact version above is what it gets. It is
+# what brings a text box with input-method support: `Keystroke.key_char` gives
+# the key and not the composed character, so a dead key would type `´a` for `á`.
+gpui-component = "0.5.1"
 # The syscall behind `exec::kill`, called directly rather than by spawning the
 # `kill` binary.
 libc = "0.2"

@@ -1,6 +1,7 @@
 //! The GPUI desktop front end.
 
 mod markdown;
+pub mod theme;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -32,16 +33,7 @@ use crate::tui::runtime::{Answers, Hub, channel};
 use crate::tui::scrollback::{Entry, ToolState};
 use crate::tui::{App as CodeApp, Effect, Msg, UiComponent, UiConfirmer, UiSink};
 use crate::{HarnessOptions as Options, Workspace};
-
-const BACKGROUND: u32 = 0x101419;
-const PANEL: u32 = 0x171c22;
-const PANEL_RAISED: u32 = 0x1e252d;
-const BORDER: u32 = 0x303943;
-const TEXT: u32 = 0xd9e2ec;
-const MUTED: u32 = 0x84919e;
-const ACCENT: u32 = 0x80c96b;
-const USER: u32 = 0x243525;
-const DANGER: u32 = 0xe06c75;
+use theme::{ACCENT, BACKGROUND, BORDER, DANGER, MUTED, PANEL, PANEL_RAISED, TEXT, USER};
 
 #[derive(Clone)]
 struct GuiConfig {
@@ -1468,6 +1460,9 @@ pub fn run(options: Options, resume: Option<PathBuf>, confirm: bool) -> Result<(
     let reported = Arc::clone(&open_error);
 
     Application::new().run(move |cx: &mut App| {
+        // Before any window: the components read one theme out of a global, so
+        // nothing draws in the colors of aphid until this has run.
+        theme::init(cx);
         let bounds = Bounds::centered(None, size(px(1240.), px(820.)), cx);
         match cx.open_window(
             WindowOptions {
