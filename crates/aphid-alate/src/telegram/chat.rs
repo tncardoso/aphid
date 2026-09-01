@@ -8,8 +8,9 @@
 //!
 //! The task here is therefore only translation: frames in, messages out. It is
 //! the Telegram counterpart of [`crate::tui::App::update`], and it drops far more
-//! than it shows. A phone is not a terminal: thinking, tool arguments and tool
-//! results belong in `aphid alate attach`, not in a chat.
+//! than it shows. A phone is not a terminal: thinking and tool results belong in
+//! `aphid alate attach`, not in a chat. A tool call gets one short announcement
+//! per turn, edited as further calls of the same turn arrive.
 
 use std::collections::VecDeque;
 
@@ -40,6 +41,7 @@ pub(super) async fn open(chat: i64, shared: Shared) -> std::io::Result<Unbounded
             reply: String::new(),
             running: false,
             told: None,
+            tool: None,
         },
         client,
         requests,
@@ -71,6 +73,22 @@ struct Chat {
     /// A turn that fails ends the run as well, and both frames carry the same
     /// sentence. Held so the chat is told one time.
     told: Option<String>,
+    /// The tool-call announcement being edited, when one is open.
+    tool: Option<ToolNote>,
+}
+
+/// The one announcement a turn's tool calls share.
+///
+/// The first call of a turn sends it; each call after that edits it in place,
+/// so a turn of five calls reads as one message that ends with the fifth.
+struct ToolNote {
+    /// The message being edited, as Telegram numbered it.
+    message_id: i64,
+    /// How many calls this announcement has covered.
+    total: u32,
+    /// The last call's name and arguments, which are what the message shows.
+    name: String,
+    arguments: String,
 }
 
 /// One chat, until the daemon hangs up or the bridge stops.
@@ -154,6 +172,7 @@ impl Chat {
                 self.session = None;
                 self.reply.clear();
                 self.running = false;
+                self.tool = None;
             }
             // The replay itself is dropped — a chat has the old messages
             // already — and its end is where the new session gets its name.
@@ -165,6 +184,7 @@ impl Chat {
             Frame::TurnStarted if mine => {
                 self.running = true;
                 self.told = None;
+                self.tool = None;
                 self.typing().await;
             }
             // Held, not sent. Telegram takes about one message a second for a
@@ -178,15 +198,17 @@ impl Chat {
                 // Before the line, so what the agent said stays ahead of what
                 // it then did.
                 self.flush().await;
-                self.say(&tool_line(&name, &arguments)).await;
+                self.tool_call(&name, &arguments).await;
             }
 
             Frame::TurnEnded { error, .. } if mine => {
+                self.tool = None;
                 self.flush().await;
                 self.failed(error).await;
             }
             Frame::RunEnded { error, .. } if mine => {
                 self.running = false;
+                self.tool = None;
                 self.flush().await;
                 self.failed(error).await;
             }
@@ -239,9 +261,70 @@ impl Chat {
         }
     }
 
+    /// Announce a tool call: send the first, edit the rest.
+    ///
+    /// One message a turn, whatever the count: the second call edits the first
+    /// message to say `(x2)` and show the second call, and so on. A message
+    /// full past [`LIMIT`] stops being edited and a fresh one takes over.
+    async fn tool_call(&mut self, name: &str, arguments: &str) {
+        let Some(note) = self.tool.take() else {
+            self.open_tool(name, arguments).await;
+            return;
+        };
+
+        // Another call: count it and put the new call in place of the old.
+        let next = ToolNote {
+            message_id: note.message_id,
+            total: note.total + 1,
+            name: name.to_owned(),
+            arguments: arguments.to_owned(),
+        };
+        let text = tool_block(&next.name, &next.arguments, next.total);
+        if text.len() <= LIMIT {
+            self.call(
+                "editMessageText",
+                json!({
+                    "chat_id": self.id,
+                    "message_id": next.message_id,
+                    "text": text,
+                }),
+            )
+            .await;
+            self.tool = Some(next);
+        } else {
+            // Full: close it, and let a fresh message take over.
+            self.open_tool(name, arguments).await;
+        }
+    }
+
+    /// Open the turn's tool announcement with its first call.
+    async fn open_tool(&mut self, name: &str, arguments: &str) {
+        let text = tool_block(name, arguments, 1);
+        let message_id = self.send_message(&text).await;
+        if let Some(message_id) = message_id {
+            self.tool = Some(ToolNote {
+                message_id,
+                total: 1,
+                name: name.to_owned(),
+                arguments: arguments.to_owned(),
+            });
+        }
+    }
+
     /// One message, as plain text.
     async fn say(&self, text: &str) {
         self.send(json!({ "chat_id": self.id, "text": text })).await;
+    }
+
+    /// Send one message, and say what Telegram numbered it.
+    async fn send_message(&self, text: &str) -> Option<i64> {
+        let sent = self
+            .shared
+            .api
+            .call("sendMessage", json!({ "chat_id": self.id, "text": text }))
+            .await
+            .ok()?;
+        sent.get("message_id").and_then(Value::as_i64)
     }
 
     /// The `typing…` a chat shows while it waits.
@@ -299,16 +382,33 @@ fn word(risk: Risk) -> &'static str {
     }
 }
 
-/// The one line a tool call gets when `tools` is on.
+/// The two lines a tool call gets when `tools` is on.
 ///
-/// The arguments as they came, on one line and cut short. Reading them properly
-/// is what `aphid alate attach` is for; this only has to say what is happening.
-fn tool_line(name: &str, arguments: &str) -> String {
-    const ROOM: usize = 160;
+/// The count is only there from the second call on: the first reads as a plain
+/// announcement, and each edit makes it say how many calls the turn has made
+/// so far and show the latest one. The arguments are flattened onto one line
+/// but never cut short — reading them is what `aphid alate attach` is for, but
+/// the chat still gets to see them whole.
+fn tool_block(name: &str, arguments: &str, total: u32) -> String {
+    let count = if total > 1 {
+        format!(" (x{total})")
+    } else {
+        String::new()
+    };
+    let flat = flatten(arguments);
+    let second = if flat.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{name} {flat}")
+    };
+    format!("🛠️ (t) Tool Call: {name}{count}\n{second}")
+}
 
-    let mut flat = String::with_capacity(arguments.len().min(ROOM + 1));
+/// One line, whitespace run together, nothing cut.
+fn flatten(text: &str) -> String {
+    let mut flat = String::with_capacity(text.len());
     let mut spaced = false;
-    for character in arguments.chars() {
+    for character in text.chars() {
         if character.is_whitespace() {
             spaced = true;
             continue;
@@ -317,16 +417,7 @@ fn tool_line(name: &str, arguments: &str) -> String {
             flat.push(' ');
         }
         spaced = false;
-        if flat.chars().count() >= ROOM {
-            flat.push('…');
-            break;
-        }
         flat.push(character);
     }
-
-    if flat.is_empty() {
-        format!("· {name}")
-    } else {
-        format!("· {name} {flat}")
-    }
+    flat
 }
