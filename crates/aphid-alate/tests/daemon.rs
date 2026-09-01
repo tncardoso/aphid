@@ -37,8 +37,19 @@ async fn attach(socket: &Path) -> Client {
 
 /// Envelopes until one matches, so a test says what it is waiting for and not
 /// how many others it expects to pass first.
-async fn until(client: &mut Client, mut matches: impl FnMut(&Envelope) -> bool) -> Envelope {
-    tokio::time::timeout(Duration::from_secs(10), async {
+async fn until(client: &mut Client, matches: impl FnMut(&Envelope) -> bool) -> Envelope {
+    within(client, Duration::from_secs(10), matches).await
+}
+
+/// The same, with the patience said out loud: waiting on a clock the daemon
+/// keeps — a heartbeat, a job — takes longer than waiting on an answer to
+/// something this test just asked for.
+async fn within(
+    client: &mut Client,
+    patience: Duration,
+    mut matches: impl FnMut(&Envelope) -> bool,
+) -> Envelope {
+    tokio::time::timeout(patience, async {
         loop {
             let envelope = client
                 .recv()
@@ -52,6 +63,20 @@ async fn until(client: &mut Client, mut matches: impl FnMut(&Envelope) -> bool) 
     })
     .await
     .expect("the envelope never arrived")
+}
+
+/// The open sessions, as the daemon lists them to this connection.
+async fn sessions(client: &mut Client) -> Vec<aphid_alate::sessions::Info> {
+    client.send(&Request::Sessions).await.expect("send");
+    let Frame::Sessions { live, .. } = until(client, |envelope| {
+        matches!(envelope.frame, Frame::Sessions { .. })
+    })
+    .await
+    .frame
+    else {
+        unreachable!("matched above")
+    };
+    live
 }
 
 /// The session this terminal was given, from its greeting.
@@ -568,11 +593,29 @@ async fn a_heartbeat_run_does_not_leak_into_an_attached_sessions_chat() {
     let mut client = attach(&socket).await;
     let mine = greeting(&mut client).await;
 
+    // A second terminal, pointed at the resident's conversation rather than at
+    // its own. It is how this test knows the resident's run is over: the run
+    // says so itself, on the resident's channel. Polling the run flag through
+    // `/sessions` would not — a scripted run can start and finish between two
+    // polls, and then the wait never ends.
+    let mut watcher = attach(&socket).await;
+    let _ = greeting(&mut watcher).await;
+    let resident = sessions(&mut watcher)
+        .await
+        .into_iter()
+        .find(|info| info.kind == "resident")
+        .expect("the resident session")
+        .id;
+    watcher
+        .send(&Request::Watch {
+            id: resident.clone(),
+        })
+        .await
+        .expect("send");
+
     // The daemon announces the wake to every terminal; that is its own frame
-    // and every terminal's business. It also names the resident, whose run we
-    // wait for by watching the run flag through `/sessions` — the resident
-    // goes running, then idle, and only then is its run over.
-    let Frame::Heartbeat { .. } = until(&mut client, |envelope| {
+    // and every terminal's business.
+    let Frame::Heartbeat { .. } = within(&mut client, Duration::from_secs(30), |envelope| {
         matches!(envelope.frame, Frame::Heartbeat { .. })
     })
     .await
@@ -581,34 +624,12 @@ async fn a_heartbeat_run_does_not_leak_into_an_attached_sessions_chat() {
         unreachable!("matched above")
     };
 
-    tokio::time::timeout(Duration::from_secs(30), async {
-        // A run that has not started yet also reads as idle, so first wait for
-        // it to start, then for it to end.
-        let mut saw_running = false;
-        loop {
-            client.send(&Request::Sessions).await.expect("send");
-            let Frame::Sessions { live, .. } = until(&mut client, |envelope| {
-                matches!(envelope.frame, Frame::Sessions { .. })
-            })
-            .await
-            .frame
-            else {
-                unreachable!("matched above")
-            };
-            let resident = live
-                .iter()
-                .find(|info| info.kind == "resident")
-                .expect("the resident session");
-            if resident.running {
-                saw_running = true;
-            } else if saw_running {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+    // And the run the wake started ends in the resident's own conversation.
+    let ended = within(&mut watcher, Duration::from_secs(30), |envelope| {
+        matches!(envelope.frame, Frame::RunEnded { .. })
     })
-    .await
-    .expect("the resident's heartbeat run never finished");
+    .await;
+    assert_eq!(ended.session.as_deref(), Some(resident.as_str()));
 
     // The resident's run is over, so anything that was going to leak is already
     // in this terminal's channel. It must not see a single frame under its own
