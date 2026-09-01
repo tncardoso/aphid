@@ -401,7 +401,7 @@ fn tool_block(name: &str, arguments: &str, total: u32) -> String {
     } else {
         format!("{name} {flat}")
     };
-    format!("🛠️ (t) Tool Call: {name}{count}\n{second}")
+    format!("🛠️ Tool Call: {name}{count}\n{second}")
 }
 
 /// One line, whitespace run together, nothing cut.
