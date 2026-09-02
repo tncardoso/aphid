@@ -17,8 +17,10 @@
 
 pub mod config;
 pub mod control;
+pub mod emote;
 pub mod model;
 pub mod place;
+pub mod render;
 pub mod window;
 
 use std::collections::HashSet;
@@ -26,7 +28,8 @@ use std::path::PathBuf;
 
 use gpui::{
     App, Application, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
-    ListAlignment, ListState, Render, SharedString, Window, div, list, prelude::*, px, rgb, rgba,
+    ListAlignment, ListState, Render, SharedString, Window, div, img, list, prelude::*, px, rgb,
+    rgba,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -45,6 +48,7 @@ use crate::home::{DEFAULT_NAME, Home};
 
 use config::{Config, Familiar, Mode};
 use control::{Command, Control, Reply};
+use emote::Mood;
 use model::{Entry, Link, Model, ToolState};
 
 gpui::actions!(
@@ -134,6 +138,13 @@ struct AlateView {
     /// A mode asked for by the control socket, which has no window to work
     /// with. Taken on the next frame, which has.
     mode_wanted: Option<Mode>,
+    /// What the creature is feeling, and what it was feeling before that.
+    mood: Mood,
+    /// The thread that draws it, and the image it last drew.
+    body: render::Body,
+    /// When the window opened. Everything the shaders animate against is
+    /// measured from here rather than from the wall clock.
+    opened: std::time::Instant,
 }
 
 impl AlateView {
@@ -156,6 +167,8 @@ impl AlateView {
         cx.subscribe_in(&composer, window, Self::on_composer)
             .detach();
         let expanded = config.mode == Mode::Companion;
+        let (width, height) = render::size_of(config.familiar);
+        let body = render::Body::start(config.familiar, width, height);
         Self {
             model: Model::new(&instance),
             composer,
@@ -178,6 +191,9 @@ impl AlateView {
             placing: PLACE_FRAMES,
             sized: None,
             mode_wanted: None,
+            mood: Mood::default(),
+            body,
+            opened: std::time::Instant::now(),
         }
     }
 
@@ -238,12 +254,17 @@ impl AlateView {
                     self.model.note("reconnected — this is a new session");
                 }
                 self.connected_once = true;
+                self.mood.awake();
             }
-            Msg::Wire(envelope) => self.model.arrived(*envelope),
+            Msg::Wire(envelope) => {
+                self.mood.arrived(&envelope.frame, self.age());
+                self.model.arrived(*envelope);
+            }
             Msg::Down(reason) => {
                 self.outbox = None;
                 self.model.link = Link::Asleep;
                 self.down = Some(reason);
+                self.mood.asleep();
             }
             Msg::Control(command) => return self.controlled(command, cx),
         }
@@ -446,6 +467,43 @@ impl AlateView {
         cx.notify();
     }
 
+    /// Seconds since the window opened.
+    ///
+    /// The creature is animated against this and not against a wall clock, so
+    /// that nothing it does jumps when the system clock is set.
+    fn age(&self) -> f64 {
+        self.opened.elapsed().as_secs_f64()
+    }
+
+    /// How long until the next frame of the creature is worth drawing.
+    ///
+    /// Thirty a second while something is happening, ten while nothing is.
+    fn beat(&self) -> std::time::Duration {
+        if self.model.status.running || self.model.filling() {
+            render::FAST
+        } else {
+            render::SLOW
+        }
+    }
+
+    /// Repaint on the creature's rhythm, for as long as the window is open.
+    fn animate(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |weak, cx| {
+            loop {
+                let beat = match weak.update(cx, |view, cx| {
+                    cx.notify();
+                    view.beat()
+                }) {
+                    Ok(beat) => beat,
+                    // The window is gone.
+                    Err(_) => return,
+                };
+                gpui::Timer::after(beat).await;
+            }
+        })
+        .detach();
+    }
+
     /// Put the caret back in the text box, which a clicked button takes.
     fn focus_composer(&self, window: &mut Window, cx: &mut App) {
         self.composer.focus_handle(cx).focus(window);
@@ -589,34 +647,41 @@ impl AlateView {
             .into_any_element()
     }
 
-    /// Where the creature will be drawn.
+    /// The creature.
     ///
-    /// A rectangle with the familiar's name in it, until there is a renderer
-    /// behind it. The window is a gateway client first and a companion second:
-    /// everything below works with nothing here.
+    /// With no device to draw on there is a still glyph in its place and, when
+    /// the window is open far enough to read one, the reason why. The panel is
+    /// an ornament and the gateway client is the function: refusing to open a
+    /// window because a shader would not compile has the two the wrong way
+    /// round.
     fn render_familiar(&self) -> gpui::AnyElement {
-        let size = if self.expanded { 40. } else { 32. };
-        div()
-            .w(px(size))
-            .h(px(size))
-            .flex_none()
-            .rounded_md()
-            .bg(rgb(PANEL_RAISED))
-            .border_1()
-            .border_color(rgb(BORDER))
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_xs()
-            .text_color(rgb(if self.model.link == Link::Connected {
-                ACCENT
-            } else {
-                MUTED
-            }))
-            .child(match self.config.familiar {
-                Familiar::Sap => "sap",
-                Familiar::Drift => "drf",
-            })
+        let size = if self.expanded { 44. } else { 34. };
+        let panel = div().w(px(size)).h(px(size)).flex_none().rounded_md();
+        if let Some(image) = self.body.image() {
+            return panel
+                .child(img(image).w(px(size)).h(px(size)))
+                .into_any_element();
+        }
+        let mark = match self.config.familiar {
+            Familiar::Sap => "sap",
+            Familiar::Drift => "drf",
+        };
+        // A button so that the reason can be hung on it: the still glyph on its
+        // own says the creature is missing and not why.
+        panel
+            .child(
+                Button::new("familiar")
+                    .ghost()
+                    .w(px(size))
+                    .h(px(size))
+                    .label(mark)
+                    .tooltip(SharedString::from(
+                        self.body
+                            .trouble()
+                            .unwrap_or("the alate, as it is drawn")
+                            .to_owned(),
+                    )),
+            )
             .into_any_element()
     }
 
@@ -979,6 +1044,20 @@ impl Render for AlateView {
             let bounds = window::bounds(self.config.mode, self.expanded, window::screen(cx));
             place::place(window, bounds);
         }
+        // Take whatever the drawing thread finished, then ask for the next one.
+        // Collecting first is what makes the pair one frame behind at worst,
+        // rather than a queue that grows when the GPU is slower than the beat.
+        self.body.collect(window, cx);
+        let now = self.age();
+        let listening =
+            !self.model.status.running && self.composer.focus_handle(cx).is_focused(window);
+        let showing = self.mood.settled(now, listening);
+        self.body.ask(
+            now as f32,
+            showing,
+            self.mood.previous(),
+            self.mood.blend(now),
+        );
 
         let mut content = div()
             .relative()
@@ -1244,6 +1323,7 @@ pub fn run(name: Option<String>) -> Result<(), String> {
                     view.connect(cx);
                     let generation = view.generation;
                     view.drain(generation, orders, cx);
+                    view.animate(cx);
                 });
                 // The first layer has to be a `Root`: the text box reaches for
                 // it when it takes focus, and `Root::read` panics when the

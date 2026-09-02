@@ -27,8 +27,12 @@ colony = ["dep:aphid-colony", "dep:aphid-nostr"]
 # The window owns a runtime of its own — the main thread belongs to GPUI — so
 # it is the one part of an alate that needs more than one worker.
 gui = [
+    "dep:blade-graphics",
+    "dep:blade-macros",
+    "dep:bytemuck",
     "dep:gpui",
     "dep:gpui-component",
+    "dep:image",
     "dep:objc2-app-kit",
     "dep:raw-window-handle",
     "dep:x11rb",
@@ -49,8 +53,12 @@ aphid-nostr = { workspace = true, optional = true }
 chrono.workspace = true
 compact_str.workspace = true
 croner.workspace = true
+blade-graphics = { workspace = true, optional = true }
+blade-macros = { workspace = true, optional = true }
+bytemuck = { workspace = true, optional = true }
 gpui = { workspace = true, optional = true }
 gpui-component = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
 ratatui.workspace = true
 ratatui-textarea.workspace = true
 reqwest = { workspace = true, features = ["json"], optional = true }

@@ -54,6 +54,15 @@ gpui-component = "0.5.1"
 # desktops answer. Both are already in the tree — gpui's `x11` feature is built
 # on x11rb, and its macOS backend on objc2 — so neither adds a build.
 x11rb = "0.13"
+# The creature is drawn in a context of its own and read back as pixels, since
+# gpui exposes no seam onto its GPU. Blade is already in the tree: it is what
+# gpui itself renders with on Linux.
+blade-graphics = "0.7"
+blade-macros = "0.3"
+bytemuck = { version = "1", features = ["derive"] }
+# Not re-exported by gpui, so it is named here. Cargo unifies it with the
+# 0.25 already in the lock, and `image::Frame` is what `RenderImage` holds.
+image = { version = "0.25", default-features = false }
 objc2-app-kit = { version = "0.3", features = ["NSResponder", "NSView", "NSWindow"] }
 # How the window's `NSView` is reached. Pinned to the 0.6 gpui itself uses: a
 # handle from one version does not match the types of another.
