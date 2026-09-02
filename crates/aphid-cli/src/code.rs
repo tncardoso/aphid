@@ -78,6 +78,7 @@ pub struct Args {
 }
 
 /// Options for the graphical coding agent.
+#[cfg(feature = "gui")]
 #[derive(Debug, clap::Args)]
 pub struct GuiArgs {
     /// Model id, or a unique part of one (default: the first known)
@@ -116,6 +117,7 @@ pub struct GuiArgs {
 }
 
 /// Prepare and open the graphical front end.
+#[cfg(feature = "gui")]
 pub fn gui(args: GuiArgs) -> ExitCode {
     let catalog = Catalog::new();
     for diagnostic in catalog.diagnostics() {

@@ -19,14 +19,16 @@ name = "aphid"
 path = "src/main.rs"
 
 [features]
+default = ["gui"]
 # Passed through so `cargo run --features telegram` works from the binary.
+gui = ["aphid-code/gui"]
 telegram = ["aphid-alate/telegram"]
 colony = ["aphid-alate/colony"]
 
 [dependencies]
 aphid-agent.workspace = true
 aphid-alate.workspace = true
-aphid-code = { workspace = true, features = ["gui"] }
+aphid-code = { workspace = true }
 aphid-colony.workspace = true
 aphid-core.workspace = true
 clap.workspace = true

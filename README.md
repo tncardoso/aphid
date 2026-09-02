@@ -115,6 +115,14 @@ cargo test -p aphid-alate --features colony
 `aphid colony` itself is always built. The feature is only about putting an
 alate in one.
 
+A third feature, `gui`, is on by default and carries `aphid gui` and the
+window library under it. Turning it off leaves the terminal agent whole and
+takes GPUI out of the build, which is most of what there is to compile.
+
+```sh
+cargo build --no-default-features
+```
+
 ## License
 
 Licensed under the MIT License — see [`LICENSE`](LICENSE) for the full text.
