@@ -21,7 +21,7 @@ install-path = "~/.local/bin"
 install-updater = true
 # The binary then holds the list of its dependencies, for an audit.
 cargo-auditable = true
-# Ship the optional features (telegram, colony) in the release binary too,
+# Ship the optional features (gui, telegram, colony) in the release binary too,
 # not just the defaults.
 all-features = true
 # A pull request plans the release and builds nothing.

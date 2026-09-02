@@ -52,7 +52,6 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Open the graphical coding-agent interface
-    #[cfg(feature = "gui")]
     Gui(code::GuiArgs),
     /// Run or attach to a resident agent
     #[command(subcommand)]
@@ -145,8 +144,8 @@ fn main() -> ExitCode {
     let Cli { code, command } = Cli::parse();
 
     // GPUI owns the process main thread and runs its own event loop. Its agent
-    // work still uses a Tokio runtime, which the graphical front end owns.
-    #[cfg(feature = "gui")]
+    // work still uses a Tokio runtime, which the graphical front end owns. A
+    // build without the feature reaches the same call and says so.
     if let Some(Command::Gui(args)) = command {
         return code::gui(args);
     }
@@ -181,7 +180,6 @@ fn main() -> ExitCode {
         Some(Command::Raw(args)) => runtime.block_on(run(args)),
         Some(Command::Agent(args)) => runtime.block_on(agent::run(args)),
         Some(Command::Model(command)) => runtime.block_on(model::run(command)),
-        #[cfg(feature = "gui")]
         Some(Command::Gui(_)) => unreachable!("the GUI returned before Tokio startup"),
     }
 }
@@ -325,7 +323,6 @@ mod tests {
         assert!(cli.code.prompt().is_none());
     }
 
-    #[cfg(feature = "gui")]
     #[test]
     fn gui_is_a_subcommand_with_interactive_options() {
         let cli = Cli::parse_from([

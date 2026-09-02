@@ -6,7 +6,9 @@
 
 - The graphical interface is now a build feature, `gui`, on by default. A
   build that turns it off keeps the whole terminal agent and stops compiling
-  the window library, which is most of the build.
+  the window library, which is most of the build. `aphid gui` stays in
+  `--help` either way: without the feature it says which build has a window
+  instead of answering that the command does not exist.
 - **The graphical interfaces are rebuilt on a component library.** The text
   box now composes: a dead key makes `á` where it used to type `´a`, and so do
   the input methods of the system. Markdown, code highlighting and the

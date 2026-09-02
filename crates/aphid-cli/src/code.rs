@@ -78,7 +78,10 @@ pub struct Args {
 }
 
 /// Options for the graphical coding agent.
-#[cfg(feature = "gui")]
+///
+/// Clap and nothing else, so the subcommand and its `--help` are the same in
+/// every build. What the feature decides is whether a window opens or the run
+/// says how to get one.
 #[derive(Debug, clap::Args)]
 pub struct GuiArgs {
     /// Model id, or a unique part of one (default: the first known)
@@ -184,6 +187,21 @@ pub fn gui(args: GuiArgs) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Say that this build has no window, and how to get one.
+///
+/// The subcommand stays in `--help` without the feature so that a person who
+/// read the documentation is told what to do, rather than being answered with
+/// clap's "unrecognized subcommand". It is the same instinct as `alate attach`,
+/// which fails saying which command starts the alate.
+#[cfg(not(feature = "gui"))]
+pub fn gui(_args: GuiArgs) -> ExitCode {
+    eprintln!(
+        "aphid: this build has no graphical interface. \
+         Reinstall with `cargo install aphid-ai --features gui`"
+    );
+    ExitCode::FAILURE
 }
 
 impl Args {
