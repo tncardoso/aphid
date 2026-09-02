@@ -21,10 +21,12 @@ agent](aphid.md).
 ```console
 $ aphid alate run --name work        # one terminal
 $ aphid alate attach --name work     # another, whenever you want it
+$ aphid alate gui --name work        # or a window, on the desktop
 ```
 
 [CLI](alate/gateway/cli.md) gives the commands that start an alate and the
-terminal that attaches to one. This chapter gives what an alate *is*: its home,
+terminal that attaches to one, and [Window](alate/gateway/gui.md) the one that
+puts it on your desktop. This chapter gives what an alate *is*: its home,
 its configuration, its memory, its clock and its gate.
 
 ## Sessions
@@ -65,6 +67,9 @@ the memory, the crontab, the plugins, the model and the permission gate.
 A session that ended still has its transcript. Ending a session loses the
 context, never the record. `/session <id>` opens any of them, including the ones
 that finished last week.
+
+A client that connects opens a session, so a window that reconnects after the
+daemon was restarted is in a new conversation and says so.
 
 ## The home directory
 
@@ -371,6 +376,8 @@ it.
 | --- | --- |
 | `~/.aphid/alate/<name>/` | One instance. `$APHID_HOME` moves the parent of this. |
 | `~/.aphid/models.json` | The model catalogue, shared with the other front ends. |
+| `~/.aphid/gui.sock` | Where a running [window](alate/gateway/gui.md) is told to show itself. One for the machine, because there is one window. |
+| `~/.aphid/gui.json` | What that window remembers: its mode, its familiar, and the alate it was last pointed at. |
 
 | Variable | Effect |
 | --- | --- |

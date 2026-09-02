@@ -9,6 +9,7 @@ looks at it.
 ```
 aphid alate run    [--name NAME]    run the alate in this terminal
 aphid alate attach [--name NAME]    open a terminal on a running alate
+aphid alate gui    [--name NAME]    open a window on a running alate
 aphid alate list                    show the alates on this machine
 ```
 
@@ -35,11 +36,19 @@ Press `Esc` to stop the run in it. Press `Ctrl-C`, or type `/quit`, to detach.
 The alate continues to run.
 
 Two terminals can attach at the same time. Each gets its own conversation, and
-`/session` moves either of them to a different one.
+`/session` moves either of them to a different one. [The window](gui.md) is a
+third, and works the same way.
+
+`aphid alate list` shows an attached window as `gui`, where a terminal shows as
+`attached`.
 
 `aphid alate run` holds the terminal. To put it in the background, use the tools
 of your system — `nohup`, `systemd`, or a terminal multiplexer. The agent does
 not do this for you.
+
+There is one exception, and it is [the window](gui.md#waking-an-alate-from-the-window):
+opened on an alate that is asleep, it offers to start one. The window is already
+a program with a long life, so adopting a daemon costs it nothing.
 
 Stop an alate with `Ctrl-C` in the terminal that runs it, or send it `SIGTERM`.
 

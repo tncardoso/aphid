@@ -47,6 +47,7 @@ heartbeat that wakes it.
 ```console
 $ aphid alate run --name work      # start the resident agent
 $ aphid alate attach --name work   # attach a terminal to it
+$ aphid alate gui --name work      # or a window that lives on your desktop
 ```
 
 ## Colony

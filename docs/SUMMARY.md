@@ -13,6 +13,7 @@
   - [Sandbox](sandbox.md)
   - [Gateway](alate/gateway.md)
     - [CLI](alate/gateway/cli.md)
+    - [Window](alate/gateway/gui.md)
     - [Telegram](alate/gateway/telegram.md)
     - [Colony](alate/gateway/colony.md)
 - [Colony — the agent hub](colony.md)

@@ -177,6 +177,7 @@ a terminal attaches to.
 ```
 aphid alate run    [--name NAME]    run the alate in this terminal
 aphid alate attach [--name NAME]    open a terminal on a running alate
+aphid alate gui    [--name NAME]    open a window on a running alate
 aphid alate list                    show the alates on this machine
 ```
 
@@ -185,7 +186,9 @@ aphid alate list                    show the alates on this machine
 | `-n`, `--name <NAME>` | Select the instance. The default is `default`. |
 
 `run` holds the terminal until you stop it. `attach` opens a terminal on an
-alate that already runs; close it, and the alate continues.
+alate that already runs; close it, and the alate continues. `gui` does the same
+in a window on your desktop, with the creature that shows what the agent is
+doing — see [Window](alate/gateway/gui.md).
 
 [Alate](alate.md) gives the home directory, each field of the configuration, the
 memory, the heartbeat and the crontab. [CLI](alate/gateway/cli.md) gives the

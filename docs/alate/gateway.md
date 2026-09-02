@@ -117,5 +117,6 @@ home when absent.
 | Client | What it is |
 | --- | --- |
 | [CLI](gateway/cli.md) | `aphid alate attach`. A terminal on the alate. |
+| [Window](gateway/gui.md) | `aphid alate gui`. A window on the alate, on the desktop. |
 | [Telegram](gateway/telegram.md) | A bot. Each chat is a conversation. |
 | [Colony](gateway/colony.md) | Not written yet. |

@@ -63,9 +63,20 @@
   - If the connection breaks it comes back, waiting a little longer each time
     up to half a minute. The daemon opens a session for each connection, so the
     window says the conversation is a new one instead of pretending otherwise.
-  - Where the window sits is best effort. Wayland lets no program place its own
-    windows, so on Wayland it needs a rule in the compositor, matching the
-    `com.embornal.aphid.alate` app id.
+  - Where the window sits is best effort. Under X11 it is moved into place and
+    asked to stay above the others; on macOS it floats and follows you between
+    spaces. Wayland lets no program place its own windows, so there it needs a
+    rule in the compositor, matching the `com.embornal.aphid.alate` app id. The
+    documentation gives one for Hyprland and one for Sway.
+  - **The alate is drawn in the bar, and what it does follows the run.** It
+    thinks while a turn is going, talks while text arrives, is pleased when a
+    run ends well, startled when a tool asks permission, and asleep when the
+    connection is gone. There are two of them to choose between, `sap` and
+    `drift`. On a machine with nothing to draw on, the window opens anyway and
+    says why there is no creature.
+  - An icon in the tray carries the same commands as the socket does: show,
+    expand, switch mode, choose a familiar, point the window at another alate,
+    and quit. A desktop with no tray gets no icon and no complaint.
 - Alate now runs shell commands and plugin commands in a Bubblewrap sandbox.
   By default they can change only the Alate workspace. The user can grant
   extra paths and selected host environment variables in a policy outside the
