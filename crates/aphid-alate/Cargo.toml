@@ -26,7 +26,15 @@ colony = ["dep:aphid-colony", "dep:aphid-nostr"]
 #
 # The window owns a runtime of its own — the main thread belongs to GPUI — so
 # it is the one part of an alate that needs more than one worker.
-gui = ["dep:gpui", "dep:gpui-component", "aphid-code/gui", "tokio/rt-multi-thread"]
+gui = [
+    "dep:gpui",
+    "dep:gpui-component",
+    "dep:objc2-app-kit",
+    "dep:raw-window-handle",
+    "dep:x11rb",
+    "aphid-code/gui",
+    "tokio/rt-multi-thread",
+]
 
 [dependencies]
 aphid-agent.workspace = true
@@ -52,6 +60,16 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "sync", "signal"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+# Placing the window is the one thing that cannot be written once for every
+# desktop, so each of these is the half of it that system understands. Wayland
+# is absent on purpose: no client places its own surface there.
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+x11rb = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { workspace = true, optional = true }
+raw-window-handle = { workspace = true, optional = true }
 
 [lints]
 workspace = true

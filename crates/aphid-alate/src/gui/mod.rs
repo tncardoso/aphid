@@ -18,6 +18,7 @@
 pub mod config;
 pub mod control;
 pub mod model;
+pub mod place;
 pub mod window;
 
 use std::collections::HashSet;
@@ -64,6 +65,13 @@ const CONTEXT: &str = "Alate";
 /// [`BACKOFF_MAX`].
 const BACKOFF_START: u64 = 1;
 const BACKOFF_MAX: u64 = 30;
+
+/// How many frames to ask the desktop to place the window on.
+///
+/// Once is not enough and there is no event to wait for: X11 lists a window
+/// when the window manager takes it over, which can be after the first frame is
+/// drawn. Asking on the first few costs one connection each and settles it.
+const PLACE_FRAMES: u8 = 3;
 
 /// What reaches the window from somewhere that is not the keyboard.
 enum Msg {
@@ -116,6 +124,16 @@ struct AlateView {
     /// Whether a `aphid alate run` was started from here and has not answered
     /// yet, so the button cannot be pressed twice.
     waking: bool,
+    /// How many more frames to ask the desktop to place this window on. Reset
+    /// whenever a new window is opened, which is what a mode change is.
+    placing: u8,
+    /// The expansion the window on screen is currently sized for. `None` until
+    /// the first frame, which is what makes the console take its own size even
+    /// if nothing has been toggled.
+    sized: Option<bool>,
+    /// A mode asked for by the control socket, which has no window to work
+    /// with. Taken on the next frame, which has.
+    mode_wanted: Option<Mode>,
 }
 
 impl AlateView {
@@ -157,6 +175,9 @@ impl AlateView {
             down: None,
             watching,
             waking: false,
+            placing: PLACE_FRAMES,
+            sized: None,
+            mode_wanted: None,
         }
     }
 
@@ -240,7 +261,7 @@ impl AlateView {
                 cx.activate(true);
             }
             Command::Toggle => self.expanded = !self.expanded,
-            Command::Mode => self.set_mode(self.config.mode.toggled(), cx),
+            Command::Mode => self.mode_wanted = Some(self.config.mode.toggled()),
             Command::Instance { name } => self.point_at(name, cx),
             Command::Quit => {
                 cx.quit();
@@ -274,10 +295,38 @@ impl AlateView {
     /// window's origin when it is created, so the one on screen has to close
     /// and another open. Nothing about the connection is touched — it belongs
     /// to this view, which outlives the window that draws it.
-    fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
+    fn set_mode(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
+        if mode == self.config.mode {
+            return;
+        }
         self.config.mode = mode;
         self.expanded = mode == Mode::Companion || self.expanded;
         self.save_config();
+        self.reopen(window, cx);
+    }
+
+    /// Draw this view in a new window, and close the one it was in.
+    ///
+    /// The new window is opened **before** the old one is closed, so there is
+    /// never a moment with none: the view belongs to the application and not to
+    /// the window, and so does the connection it holds — which is the whole
+    /// reason changing mode does not end the session.
+    fn reopen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let bounds = window::bounds(self.config.mode, self.expanded, window::screen(cx));
+        let view = cx.entity();
+        let focus = self.composer.focus_handle(cx);
+        let opened = cx.open_window(
+            window::options(self.config.mode, bounds),
+            move |window, cx| {
+                window.focus(&focus);
+                cx.new(|cx| Root::new(view, window, cx))
+            },
+        );
+        if opened.is_ok() {
+            self.placing = PLACE_FRAMES;
+            self.sized = None;
+            window.remove_window();
+        }
         cx.notify();
     }
 
@@ -523,8 +572,8 @@ impl AlateView {
                     .ghost()
                     .label(self.config.mode.label())
                     .tooltip("Quake or companion")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.set_mode(this.config.mode.toggled(), cx);
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.set_mode(this.config.mode.toggled(), window, cx);
                     })),
             )
             .child(
@@ -908,7 +957,29 @@ impl Focusable for AlateView {
 }
 
 impl Render for AlateView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(mode) = self.mode_wanted.take() {
+            // Opening and closing windows in the middle of a render pass is not
+            // a thing to do, so this runs at the end of the effect cycle.
+            cx.defer_in(window, move |this, window, cx| {
+                this.set_mode(mode, window, cx)
+            });
+        }
+        // The console grows downwards from an origin that never moves, so
+        // showing the transcript is a resize and not a new window. Driven from
+        // what is drawn rather than from the click, so that the button, the
+        // `Escape` key and the control socket all arrive here.
+        if self.sized != Some(self.expanded) {
+            self.sized = Some(self.expanded);
+            let size = window::size_of(self.config.mode, self.expanded, window::screen(cx));
+            window.resize(size);
+        }
+        if self.placing > 0 {
+            self.placing -= 1;
+            let bounds = window::bounds(self.config.mode, self.expanded, window::screen(cx));
+            place::place(window, bounds);
+        }
+
         let mut content = div()
             .relative()
             .size_full()

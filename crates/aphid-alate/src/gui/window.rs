@@ -29,6 +29,32 @@ const COMPANION_WIDTH: f32 = 420.;
 /// does not fight a panel or a dock for the last pixel.
 const COMPANION_MARGIN: f32 = 24.;
 
+/// The screen to place a window on.
+///
+/// The display the person is already looking at when there is one, and the
+/// primary otherwise. The desktop companion this borrows from always took the
+/// display at index zero, which puts the console on the wrong monitor for
+/// anybody with two.
+///
+/// The fallback is a screen that does not exist, for the case where no display
+/// reports at all: a window somewhere beats no window.
+#[must_use]
+pub fn screen(cx: &mut gpui::App) -> Bounds<Pixels> {
+    cx.active_window()
+        .and_then(|window| window.update(cx, |_, window, _| window.bounds()).ok())
+        .or_else(|| cx.primary_display().map(|display| display.bounds()))
+        .unwrap_or(Bounds {
+            origin: Point {
+                x: px(0.),
+                y: px(0.),
+            },
+            size: Size {
+                width: px(1280.),
+                height: px(800.),
+            },
+        })
+}
+
 /// The window this mode wants on this display.
 ///
 /// `expanded` is only asked of the quake console; the companion is one height.

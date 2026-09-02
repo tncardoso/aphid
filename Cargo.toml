@@ -50,6 +50,14 @@ gpui = "=0.2.2"
 # what brings a text box with input-method support: `Keystroke.key_char` gives
 # the key and not the composed character, so a dead key would type `´a` for `á`.
 gpui-component = "0.5.1"
+# What the companion window asks a desktop with, on the two systems whose
+# desktops answer. Both are already in the tree — gpui's `x11` feature is built
+# on x11rb, and its macOS backend on objc2 — so neither adds a build.
+x11rb = "0.13"
+objc2-app-kit = { version = "0.3", features = ["NSResponder", "NSView", "NSWindow"] }
+# How the window's `NSView` is reached. Pinned to the 0.6 gpui itself uses: a
+# handle from one version does not match the types of another.
+raw-window-handle = "0.6"
 # The syscall behind `exec::kill`, called directly rather than by spawning the
 # `kill` binary.
 libc = "0.2"
