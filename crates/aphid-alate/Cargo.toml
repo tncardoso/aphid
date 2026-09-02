@@ -33,8 +33,10 @@ gui = [
     "dep:gpui",
     "dep:gpui-component",
     "dep:image",
+    "dep:ksni",
     "dep:objc2-app-kit",
     "dep:raw-window-handle",
+    "dep:tray-icon",
     "dep:x11rb",
     "aphid-code/gui",
     "tokio/rt-multi-thread",
@@ -73,11 +75,13 @@ tracing-subscriber.workspace = true
 # desktop, so each of these is the half of it that system understands. Wayland
 # is absent on purpose: no client places its own surface there.
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+ksni = { workspace = true, optional = true }
 x11rb = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { workspace = true, optional = true }
 raw-window-handle = { workspace = true, optional = true }
+tray-icon = { workspace = true, optional = true }
 
 [lints]
 workspace = true

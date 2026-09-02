@@ -67,6 +67,13 @@ objc2-app-kit = { version = "0.3", features = ["NSResponder", "NSView", "NSWindo
 # How the window's `NSView` is reached. Pinned to the 0.6 gpui itself uses: a
 # handle from one version does not match the types of another.
 raw-window-handle = "0.6"
+# The tray icon, which is a different mechanism on each system. On Linux it is
+# a StatusNotifierItem over D-Bus, and ksni speaks it without GTK — which the
+# desktop companion this borrows from could not avoid, and had to run its tray
+# in a subprocess for. On macOS it is an `NSStatusItem`; `default-features` is
+# off because tray-icon's defaults are the Linux ones, GTK included.
+ksni = "0.3"
+tray-icon = { version = "0.24", default-features = false }
 # The syscall behind `exec::kill`, called directly rather than by spawning the
 # `kill` binary.
 libc = "0.2"

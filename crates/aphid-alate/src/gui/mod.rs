@@ -21,6 +21,7 @@ pub mod emote;
 pub mod model;
 pub mod place;
 pub mod render;
+pub mod tray;
 pub mod window;
 
 use std::collections::HashSet;
@@ -145,18 +146,41 @@ struct AlateView {
     /// When the window opened. Everything the shaders animate against is
     /// measured from here rather than from the wall clock.
     opened: std::time::Instant,
+    /// The icon in the tray, for as long as there is a window behind it.
+    _tray: Option<tray::Tray>,
+    /// Where the tray's picks are sent, and what the macOS menu bar is drained
+    /// into on each beat.
+    orders: UnboundedSender<Msg>,
+}
+
+/// What the window is opened with.
+///
+/// One value rather than a handful of parameters, because every one of them is
+/// decided in [`run`] and carried straight through to the view.
+struct Start {
+    /// The alate to watch.
+    instance: String,
+    config: Config,
+    config_path: PathBuf,
+    /// The runtime the connection and the tray run on. GPUI owns the thread.
+    runtime: tokio::runtime::Handle,
+    /// The name the control socket answers a `Ping` with, shared because the
+    /// socket is served on another thread.
+    watching: std::sync::Arc<std::sync::Mutex<String>>,
+    /// Where everything that is not the keyboard arrives.
+    orders: UnboundedSender<Msg>,
 }
 
 impl AlateView {
-    fn new(
-        instance: String,
-        config: Config,
-        config_path: PathBuf,
-        runtime: tokio::runtime::Handle,
-        watching: std::sync::Arc<std::sync::Mutex<String>>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    fn new(start: Start, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let Start {
+            instance,
+            config,
+            config_path,
+            runtime,
+            watching,
+            orders,
+        } = start;
         let composer = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line(true)
@@ -169,6 +193,7 @@ impl AlateView {
         let expanded = config.mode == Mode::Companion;
         let (width, height) = render::size_of(config.familiar);
         let body = render::Body::start(config.familiar, width, height);
+        let tray = tray::start(orders.clone(), &runtime);
         Self {
             model: Model::new(&instance),
             composer,
@@ -194,6 +219,8 @@ impl AlateView {
             mood: Mood::default(),
             body,
             opened: std::time::Instant::now(),
+            _tray: tray,
+            orders,
         }
     }
 
@@ -284,6 +311,7 @@ impl AlateView {
             Command::Toggle => self.expanded = !self.expanded,
             Command::Mode => self.mode_wanted = Some(self.config.mode.toggled()),
             Command::Instance { name } => self.point_at(name, cx),
+            Command::Familiar { name } => self.wear(&name, cx),
             Command::Quit => {
                 cx.quit();
                 return false;
@@ -308,6 +336,28 @@ impl AlateView {
         self.config.instance = Some(name);
         self.save_config();
         self.connect(cx);
+    }
+
+    /// Draw the creature as another familiar.
+    ///
+    /// A Blade context belongs to the thread that made it, so this is a new
+    /// thread and a new context rather than a switch inside one.
+    fn wear(&mut self, name: &str, cx: &mut Context<Self>) {
+        let familiar = match name {
+            "sap" => Familiar::Sap,
+            "drift" => Familiar::Drift,
+            // A name from a newer aphid, or a typo on the socket. The creature
+            // on screen is not worth a complaint.
+            _ => return,
+        };
+        if familiar == self.config.familiar {
+            return;
+        }
+        self.config.familiar = familiar;
+        self.save_config();
+        let (width, height) = render::size_of(familiar);
+        self.body = render::Body::start(familiar, width, height);
+        cx.notify();
     }
 
     /// Change which window this is.
@@ -1044,6 +1094,9 @@ impl Render for AlateView {
             let bounds = window::bounds(self.config.mode, self.expanded, window::screen(cx));
             place::place(window, bounds);
         }
+        // What the menu bar reported since the last frame. Nothing on Linux,
+        // where the menu's own callbacks send.
+        tray::drain(&self.orders);
         // Take whatever the drawing thread finished, then ask for the next one.
         // Collecting first is what makes the pair one frame behind at worst,
         // rather than a queue that grows when the GPU is slower than the beat.
@@ -1255,7 +1308,10 @@ pub fn run(name: Option<String>) -> Result<(), String> {
     // shared rather than asked for.
     let watching = std::sync::Arc::new(std::sync::Mutex::new(instance));
     let reporter = std::sync::Arc::clone(&watching);
+    // One channel for everything that is not the keyboard: the control socket,
+    // and the tray, which is another client of the same commands.
     let (commands, orders) = unbounded_channel();
+    let picks = commands.clone();
     runtime.spawn(control.serve(move |command| {
         let answer = match &command {
             Command::Ping => Reply::Pong {
@@ -1305,14 +1361,17 @@ pub fn run(name: Option<String>) -> Result<(), String> {
             move |window, cx| {
                 let view = cx.new(|cx| {
                     AlateView::new(
-                        start
-                            .instance
-                            .clone()
-                            .unwrap_or_else(|| DEFAULT_NAME.to_owned()),
-                        start,
-                        config_path,
-                        handle,
-                        watching,
+                        Start {
+                            instance: start
+                                .instance
+                                .clone()
+                                .unwrap_or_else(|| DEFAULT_NAME.to_owned()),
+                            config: start,
+                            config_path,
+                            runtime: handle,
+                            watching,
+                            orders: picks,
+                        },
                         window,
                         cx,
                     )

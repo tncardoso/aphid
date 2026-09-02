@@ -30,6 +30,9 @@ pub enum Command {
     Mode,
     /// Watch this alate instead.
     Instance { name: String },
+    /// Draw the creature as this familiar: `sap` or `drift`. A name this build
+    /// has never heard of is refused rather than guessed at.
+    Familiar { name: String },
     /// Close the window and stop.
     Quit,
 }
