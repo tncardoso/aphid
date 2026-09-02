@@ -9,6 +9,10 @@
   the window library, which is most of the build. `aphid gui` stays in
   `--help` either way: without the feature it says which build has a window
   instead of answering that the command does not exist.
+- In the graphical interface, the buttons, the session list, the model list
+  and the process list are drawn by the component library. They take the
+  keyboard as well as the pointer, and a session row now refuses the click
+  while a run is going instead of dimming and taking it anyway.
 - **The graphical interfaces are rebuilt on a component library.** The text
   box now composes: a dead key makes `á` where it used to type `´a`, and so do
   the input methods of the system. Markdown, code highlighting and the

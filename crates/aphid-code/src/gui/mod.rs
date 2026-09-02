@@ -13,7 +13,9 @@ use gpui::{
     prelude::*, px, rgb, rgba, size,
 };
 use gpui_component::Root;
+use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::list::ListItem;
 use gpui_component::text::TextView;
 
 use crate::events::{Session, SessionEnd, SessionStart};
@@ -689,6 +691,16 @@ impl DesktopView {
         cx.notify();
     }
 
+    /// Put the caret back in the text box.
+    ///
+    /// A `Button` takes the focus when it is clicked, which the bare `div` it
+    /// replaced never did. So every control that ends an interaction hands the
+    /// focus back, and what is typed next lands in the composer instead of in
+    /// the button that was pressed.
+    fn focus_composer(&self, window: &mut Window, cx: &mut App) {
+        self.composer.focus_handle(cx).focus(window);
+    }
+
     fn close_modal(&mut self, cx: &mut Context<Self>) {
         self.backend.app.modal = None;
         cx.notify();
@@ -738,33 +750,24 @@ impl DesktopView {
             .p_2()
             .gap_2()
             .child(
-                div()
-                    .id("drawer-toggle")
+                Button::new("drawer-toggle")
+                    .ghost()
+                    .w_full()
                     .h(px(36.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(PANEL_RAISED)))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_drawer(cx)))
-                    .child(if open { "‹  APHID" } else { "☰" }),
+                    .label(if open { "‹  APHID" } else { "☰" })
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_drawer(cx))),
             );
         if open {
             drawer = drawer.child(
-                div()
-                    .id("new-chat")
+                Button::new("new-chat")
+                    .primary()
+                    .w_full()
                     .h(px(38.))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .rounded_md()
-                    .bg(rgb(ACCENT))
-                    .text_color(rgb(0x0d150d))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| this.new_chat(cx)))
-                    .child("＋ New chat"),
+                    .label("＋ New chat")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.new_chat(cx);
+                        this.focus_composer(window, cx);
+                    })),
             );
             drawer = drawer.child(
                 div()
@@ -782,25 +785,25 @@ impl DesktopView {
                         let active = current.is_some_and(|path| path == &summary.path);
                         let path = summary.path.clone();
                         let disabled = self.backend.app.status.running || self.switching_session;
-                        div()
-                            .id(SharedString::from(format!("session-{index}")))
+                        ListItem::new(SharedString::from(format!("session-{index}")))
                             .my_1()
-                            .px_3()
                             .py_2()
                             .rounded_md()
-                            .bg(if active { rgb(USER) } else { rgb(PANEL) })
-                            .text_color(if active { rgb(ACCENT) } else { rgb(TEXT) })
-                            .opacity(if disabled { 0.55 } else { 1.0 })
-                            .cursor_pointer()
+                            .selected(active)
+                            // A session cannot be switched mid-run. The row now
+                            // refuses the click as well as looking refused; it
+                            // used to dim and take it anyway.
+                            .disabled(disabled)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.open_session(Some(path.clone()), cx);
                             }))
-                            .child(summary.header.id.clone())
                             .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(MUTED))
-                                    .child(format!("{} messages", summary.messages)),
+                                div().child(summary.header.id.clone()).child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .child(format!("{} messages", summary.messages)),
+                                ),
                             )
                     })),
             );
@@ -1131,77 +1134,80 @@ impl DesktopView {
                             .flex()
                             .justify_end()
                             .gap_2()
-                            .child(action_button(
-                                "Deny",
-                                DANGER,
-                                cx.listener(|this, _, _, cx| {
+                            .child(Button::new("deny").danger().label("Deny").on_click(
+                                cx.listener(|this, _, window, cx| {
                                     this.answer(Decision::Deny, cx);
+                                    this.focus_composer(window, cx);
                                 }),
                             ))
-                            .child(action_button(
-                                "Allow",
-                                ACCENT,
-                                cx.listener(|this, _, _, cx| {
+                            .child(Button::new("allow").primary().label("Allow").on_click(
+                                cx.listener(|this, _, window, cx| {
                                     this.answer(Decision::Allow, cx);
+                                    this.focus_composer(window, cx);
                                 }),
                             ))
-                            .child(action_button(
-                                "Always",
-                                ACCENT,
-                                cx.listener(|this, _, _, cx| {
-                                    this.answer(Decision::AllowAlways, cx);
-                                }),
-                            )),
+                            .child(
+                                // The standing answer is the one that is hardest
+                                // to take back, so it is the quieter button.
+                                Button::new("always")
+                                    .primary()
+                                    .outline()
+                                    .label("Always")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.answer(Decision::AllowAlways, cx);
+                                        this.focus_composer(window, cx);
+                                    })),
+                            ),
                     )
                     .into_any_element(),
-                Modal::Models { models, selected } => div()
-                    .w(px(620.))
-                    .max_h(px(620.))
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(PANEL_RAISED))
-                    .p_4()
-                    .child(
-                        div()
-                            .mb_3()
-                            .text_lg()
-                            .font_weight(FontWeight::BOLD)
-                            .child("Select a model"),
-                    )
-                    .child(div().id("model-list").overflow_scroll().children(
-                        models.iter().enumerate().map(|(index, model)| {
-                            let chosen = index == *selected;
+                Modal::Models { models, selected } => {
+                    div()
+                        .w(px(620.))
+                        .max_h(px(620.))
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(PANEL_RAISED))
+                        .p_4()
+                        .child(
                             div()
-                                .id(SharedString::from(format!("model-{index}")))
-                                .px_3()
-                                .py_2()
-                                .my_1()
-                                .rounded_md()
-                                .bg(if chosen { rgb(USER) } else { rgb(PANEL) })
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.choose_model(index, cx);
-                                }))
-                                .child(model.id.to_string())
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(MUTED))
-                                        .child(format!("{} token context", model.context_window)),
-                                )
-                        }),
-                    ))
-                    .child(
-                        div()
-                            .id("close-models")
-                            .mt_3()
-                            .text_color(rgb(MUTED))
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| this.close_modal(cx)))
-                            .child("Cancel"),
-                    )
-                    .into_any_element(),
+                                .mb_3()
+                                .text_lg()
+                                .font_weight(FontWeight::BOLD)
+                                .child("Select a model"),
+                        )
+                        .child(div().id("model-list").overflow_scroll().children(
+                            models.iter().enumerate().map(|(index, model)| {
+                                let chosen = index == *selected;
+                                ListItem::new(SharedString::from(format!("model-{index}")))
+                                    .py_2()
+                                    .my_1()
+                                    .rounded_md()
+                                    .selected(chosen)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.choose_model(index, cx);
+                                        this.focus_composer(window, cx);
+                                    }))
+                                    .child(div().child(model.id.to_string()).child(
+                                        div().text_xs().text_color(rgb(MUTED)).child(format!(
+                                            "{} token context",
+                                            model.context_window
+                                        )),
+                                    ))
+                            }),
+                        ))
+                        .child(
+                            Button::new("close-models")
+                                .ghost()
+                                .mt_3()
+                                .label("Cancel")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.close_modal(cx);
+                                    this.focus_composer(window, cx);
+                                })),
+                        )
+                        .into_any_element()
+                }
                 Modal::Processes { rows, .. } => {
                     div()
                         .w(px(720.))
@@ -1222,38 +1228,45 @@ impl DesktopView {
                             rows.iter().map(|process| {
                                 let id = process.id;
                                 let running = process.running();
-                                div()
-                                    .id(SharedString::from(format!("process-{id}")))
-                                    .px_3()
+                                ListItem::new(SharedString::from(format!("process-{id}")))
                                     .py_2()
                                     .my_1()
                                     .rounded_md()
-                                    .bg(rgb(PANEL))
-                                    .child(format!(
-                                        "#{} {} · {:?} · {} bytes",
-                                        process.id, process.origin, process.status, process.bytes
-                                    ))
+                                    // Only a running process can be stopped, so
+                                    // only a running row takes a click.
+                                    .disabled(!running)
+                                    .on_click(
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.kill_process(id, cx)
+                                        }),
+                                    )
                                     .child(
                                         div()
-                                            .text_xs()
-                                            .text_color(rgb(MUTED))
-                                            .child(process.command.clone()),
+                                            .child(format!(
+                                                "#{} {} · {:?} · {} bytes",
+                                                process.id,
+                                                process.origin,
+                                                process.status,
+                                                process.bytes
+                                            ))
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(MUTED))
+                                                    .child(process.command.clone()),
+                                            ),
                                     )
-                                    .when(running, |row| {
-                                        row.cursor_pointer().on_click(cx.listener(
-                                            move |this, _, _, cx| this.kill_process(id, cx),
-                                        ))
-                                    })
                             }),
                         ))
                         .child(
-                            div()
-                                .id("close-processes")
+                            Button::new("close-processes")
+                                .ghost()
                                 .mt_3()
-                                .text_color(rgb(MUTED))
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, cx| this.close_modal(cx)))
-                                .child("Close · click a running process to stop it"),
+                                .label("Close · click a running process to stop it")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.close_modal(cx);
+                                    this.focus_composer(window, cx);
+                                })),
                         )
                         .into_any_element()
                 }
@@ -1361,16 +1374,18 @@ impl Render for DesktopView {
                                 .child(Input::new(&self.composer).appearance(false)),
                         )
                         .child(
-                            div()
-                                .id("send")
-                                .size(px(38.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_md()
-                                .bg(if running { rgb(DANGER) } else { rgb(ACCENT) })
-                                .text_color(rgb(0x0d150d))
-                                .cursor_pointer()
+                            Button::new("send")
+                                .map(|button| {
+                                    if running {
+                                        button.danger()
+                                    } else {
+                                        button.primary()
+                                    }
+                                })
+                                .w(px(38.))
+                                .h(px(38.))
+                                .label(if running { "■" } else { "↑" })
+                                .tooltip(if running { "Stop the run" } else { "Send" })
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     if this.backend.app.status.running {
                                         this.backend.perform(Effect::Cancel);
@@ -1378,8 +1393,8 @@ impl Render for DesktopView {
                                     } else {
                                         this.send(window, cx);
                                     }
-                                }))
-                                .child(if running { "■" } else { "↑" }),
+                                    this.focus_composer(window, cx);
+                                })),
                         ),
                 ),
             );
@@ -1392,23 +1407,6 @@ impl Render for DesktopView {
         }
         content
     }
-}
-
-fn action_button(
-    label: &'static str,
-    color: u32,
-    handler: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(label)
-        .px_3()
-        .py_2()
-        .rounded_md()
-        .bg(rgb(color))
-        .text_color(rgb(0x0d150d))
-        .cursor_pointer()
-        .on_click(handler)
-        .child(label)
 }
 
 /// What an entry looks like to the list that measures it.
