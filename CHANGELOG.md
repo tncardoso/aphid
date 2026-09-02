@@ -53,6 +53,11 @@
   drops from the top of the screen, or a column against its right edge, and it
   shows what the agent is doing between prompts. It is a gateway client and
   nothing more: closing the window does not stop the alate.
+  - The two are different windows and not two sizes of one. The **companion**
+    is the log, the alate in a band at its foot, and the text box. The
+    **console** has no log: expanded, it is the alate and a balloon with the
+    last thing it said, which is what you glance at while you are doing
+    something else.
   - `aphid alate gui toggle`, `show`, `mode` and `quit` are a remote control
     for the window that is open, to bind to a key in a window manager. There is
     one window for the machine: a second `aphid alate gui` brings the first
@@ -68,12 +73,13 @@
     spaces. Wayland lets no program place its own windows, so there it needs a
     rule in the compositor, matching the `com.embornal.aphid.alate` app id. The
     documentation gives one for Hyprland and one for Sway.
-  - **The alate is drawn in the bar, and what it does follows the run.** It
+  - **The alate is drawn in the window, and what it does follows the run.** It
     thinks while a turn is going, talks while text arrives, is pleased when a
     run ends well, startled when a tool asks permission, and asleep when the
     connection is gone. There are two of them to choose between, `sap` and
     `drift`. On a machine with nothing to draw on, the window opens anyway and
-    says why there is no creature.
+    says why there is no creature. What it last said stands in a balloon over
+    its head until it says something else; `Escape` puts that away.
   - An icon in the tray carries the same commands as the socket does: show,
     expand, switch mode, choose a familiar, point the window at another alate,
     and quit. A desktop with no tray gets no icon and no complaint.

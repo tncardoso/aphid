@@ -35,10 +35,10 @@ Without `--name`, the window opens on the alate it was last pointed at.
 
 ## The two modes
 
-| Mode | Where it sits |
+| Mode | What it is |
 | --- | --- |
-| `quake` | A bar across the top of the screen that grows downwards when you expand it. |
-| `companion` | A column of full height against the right edge. |
+| `console` | A bar across the top of the screen. Expanded, it grows downwards into the alate and what it is saying. |
+| `companion` | A column of full height against the right edge: the log, the alate at its foot, and the text box. |
 
 `aphid alate gui mode` swaps them, and so does the *Switch mode* item in the
 tray. Swapping closes the window and opens another, because a window's place is
@@ -46,6 +46,12 @@ fixed when it is created. The connection is not touched: it belongs to the
 program and not to the window, so the conversation carries on across the swap.
 
 Expanding and collapsing the console is a resize, and it keeps its place.
+
+**The console has no log.** Expanded, it is the alate and the balloon it speaks
+in — what you glance at while you are doing something else. The log is a mode
+away, and every conversation is still there when you get to it. Collapsed, the
+bar carries the alate as a glyph, which is the whole of it until you open the
+console again.
 
 ## Typing in it
 
@@ -74,8 +80,8 @@ model is a property of the alate. Set `model` in
 
 ## The creature
 
-The alate is drawn in the bar, and what it does follows the frames the gateway
-is already sending. It thinks while a turn runs, talks while text arrives,
+The alate is drawn in the window, and what it does follows the frames the
+gateway is already sending. It thinks while a turn runs, talks while text arrives,
 looks pleased for two seconds after a run that worked, is startled when a tool
 asks permission, and sleeps when the connection is gone.
 
@@ -87,8 +93,19 @@ Two familiars, chosen from the tray:
 | `drift` | The same creature as a body that turns and ripples. |
 
 On a machine with no device to draw on — no Vulkan, an old driver, a remote
-session — the window opens anyway, and a still glyph in the bar says why. The
-creature is an ornament; the client is the function.
+session — the window opens anyway, and a line where the creature would have been
+says why. The creature is an ornament; the client is the function.
+
+### What it says
+
+The last thing the alate said stands in a balloon above it, and stays there
+until it says something else. It is the reply and nothing else: thinking is what
+the face is for, and a tool is a line in the log. `Escape` puts the balloon
+away.
+
+In the companion the balloon is above the alate in its band, under the log that
+holds everything. In the console it is the whole of what is written, since there
+is no log there.
 
 ## The tray
 
@@ -129,9 +146,16 @@ business.
 
 | Desktop | What happens |
 | --- | --- |
-| X11 | The window is moved into place and asked to stay above the others, out of the taskbar and out of the pager. |
+| X11 | The window is moved into place and asked to stay above the others, out of the taskbar and out of the pager. A tiling window manager will refuse all of that and tile it; see below. |
 | macOS | The window is given a floating level and follows you between spaces. It is placed when it is created. |
 | Wayland | Nothing. No program places its own windows there. |
+
+A tiling window manager tiles this window like any other, whatever it asks for,
+so it wants the same kind of rule Wayland needs. In i3, in `config`:
+
+```
+for_window [class="com.embornal.aphid.alate"] floating enable, sticky enable
+```
 
 On Wayland, write a rule in your compositor. The window's app id is
 `com.embornal.aphid.alate`.
@@ -182,7 +206,7 @@ and not inside any one alate's home, because there is one window.
 ```json
 {
   "version": 1,
-  "mode": "quake",
+  "mode": "console",
   "familiar": "sap",
   "instance": "work"
 }
@@ -190,7 +214,7 @@ and not inside any one alate's home, because there is one window.
 
 | Key | Effect |
 | --- | --- |
-| `mode` | `quake` or `companion`. |
+| `mode` | `console` or `companion`. A file that still says `quake` opens the console: that is what this mode was called at first. |
 | `familiar` | `sap` or `drift`. |
 | `instance` | The alate to open on when `--name` is absent. |
 

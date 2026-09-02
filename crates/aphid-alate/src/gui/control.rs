@@ -26,7 +26,7 @@ pub enum Command {
     Show,
     /// Expand if collapsed, collapse if expanded.
     Toggle,
-    /// Quake to companion, or back.
+    /// Console to companion, or back.
     Mode,
     /// Watch this alate instead.
     Instance { name: String },

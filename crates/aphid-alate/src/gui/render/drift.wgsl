@@ -52,6 +52,9 @@ fn look(emote: u32) -> mat2x4<f32> {
     );
 }
 
+// 0x101419, the page both interfaces are drawn on.
+const BACKGROUND: vec3<f32> = vec3<f32>(0.0627, 0.0784, 0.0980);
+
 // Turn a point about Y, which is what makes the body drift past the eye.
 fn spin(p: vec3<f32>, angle: f32) -> vec3<f32> {
     let c = cos(angle);
@@ -93,11 +96,8 @@ fn draw(uv: vec2<f32>, emote: u32) -> vec3<f32> {
     let ray = normalize(vec3<f32>(screen * 0.83, -1.0));
     let bob = sin(t * 1.2) * 0.06;
 
-    var col = mix(
-        vec3<f32>(0.05, 0.06, 0.09),
-        vec3<f32>(0.09, 0.10, 0.15),
-        uv.y
-    );
+    // Flat, and exactly the background of the window: see `sap.wgsl`.
+    var col = BACKGROUND;
 
     var travelled = 0.0;
     var hit = false;

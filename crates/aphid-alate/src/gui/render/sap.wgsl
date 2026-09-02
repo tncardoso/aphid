@@ -33,6 +33,9 @@ fn vs_main(@builtin(vertex_index) index: u32) -> Varying {
     return out;
 }
 
+// 0x101419, the page both interfaces are drawn on.
+const BACKGROUND: vec3<f32> = vec3<f32>(0.0627, 0.0784, 0.0980);
+
 fn sd_circle(p: vec2<f32>, r: f32) -> f32 {
     return length(p) - r;
 }
@@ -66,11 +69,11 @@ fn draw(uv: vec2<f32>, emote: u32) -> vec3<f32> {
     var p = uv * 2.0 - 1.0;
 
     let ink = vec3<f32>(0.16, 0.12, 0.24);
-    var col = mix(
-        vec3<f32>(0.06, 0.08, 0.10),
-        vec3<f32>(0.09, 0.11, 0.14),
-        uv.y
-    );
+    // Flat, and exactly the background of the window this is drawn into. The
+    // creature arrives as a rectangle of pixels, so any other colour behind it
+    // would show that rectangle's edges — it would read as a sticker rather
+    // than as something standing on the page.
+    var col = BACKGROUND;
 
     let speed = speed_of(emote);
     let t = params.time;

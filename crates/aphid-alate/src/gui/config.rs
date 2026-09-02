@@ -39,8 +39,12 @@ pub enum Error {
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
     /// A bar at the top of the screen that grows downwards.
+    ///
+    /// `quake` is taken as well, because that is what this was called when the
+    /// window first shipped and it is what a `gui.json` written then says.
     #[default]
-    Quake,
+    #[serde(alias = "quake")]
+    Console,
     /// A column of full height against the right edge.
     Companion,
 }
@@ -50,8 +54,8 @@ impl Mode {
     #[must_use]
     pub fn toggled(self) -> Self {
         match self {
-            Mode::Quake => Mode::Companion,
-            Mode::Companion => Mode::Quake,
+            Mode::Console => Mode::Companion,
+            Mode::Companion => Mode::Console,
         }
     }
 
@@ -59,7 +63,7 @@ impl Mode {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Mode::Quake => "quake",
+            Mode::Console => "console",
             Mode::Companion => "companion",
         }
     }
@@ -228,8 +232,20 @@ mod tests {
     }
 
     #[test]
+    fn a_file_that_still_says_quake_opens_the_console() {
+        // What this mode was called when the window first shipped. A person who
+        // has one of those files gets the window they left, not the default.
+        let dir = temp();
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("quake.json");
+        std::fs::write(&path, r#"{"mode":"quake"}"#).expect("write");
+        assert_eq!(Config::load(&path).expect("loads").mode, Mode::Console);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn a_mode_toggles_and_comes_back() {
-        assert_eq!(Mode::Quake.toggled(), Mode::Companion);
-        assert_eq!(Mode::Quake.toggled().toggled(), Mode::Quake);
+        assert_eq!(Mode::Console.toggled(), Mode::Companion);
+        assert_eq!(Mode::Console.toggled().toggled(), Mode::Console);
     }
 }

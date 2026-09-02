@@ -4,7 +4,7 @@
 //! one, and `Window::resize` changes the size and never the place. That single
 //! fact shapes both modes.
 //!
-//! The quake console therefore grows **downwards from a fixed origin at the top
+//! The console therefore grows **downwards from a fixed origin at the top
 //! of the screen**, so expanding and collapsing it is a resize and the window
 //! stays where it was. Changing *mode* is the one thing that has to close the
 //! window and open another — which is what the desktop companion this borrows
@@ -17,7 +17,7 @@ use gpui::{
 
 use super::config::Mode;
 
-/// How wide the quake console is.
+/// How wide the console is.
 const QUAKE_WIDTH: f32 = 720.;
 /// How tall it is with the transcript hidden: one bar of status.
 const QUAKE_BAR: f32 = 56.;
@@ -63,11 +63,11 @@ pub fn screen(cx: &mut gpui::App) -> Bounds<Pixels> {
 
 /// The window this mode wants on this display.
 ///
-/// `expanded` is only asked of the quake console; the companion is one height.
+/// `expanded` is only asked of the console; the companion is one height.
 #[must_use]
 pub fn bounds(mode: Mode, expanded: bool, display: Bounds<Pixels>) -> Bounds<Pixels> {
     match mode {
-        Mode::Quake => {
+        Mode::Console => {
             let width = px(QUAKE_WIDTH).min(display.size.width);
             let height = px(if expanded { QUAKE_HEIGHT } else { QUAKE_BAR });
             Bounds {
@@ -100,7 +100,7 @@ pub fn bounds(mode: Mode, expanded: bool, display: Bounds<Pixels>) -> Bounds<Pix
 
 /// The size a resize should ask for, without moving the window.
 ///
-/// Only the quake console has two of them. The companion answers with the size
+/// Only the console has two of them. The companion answers with the size
 /// it already has, so a toggle there is about what is drawn and not about how
 /// much room it takes.
 #[must_use]
@@ -170,8 +170,8 @@ mod tests {
     }
 
     #[test]
-    fn the_quake_console_is_centred_and_flush_with_the_top() {
-        let bounds = bounds(Mode::Quake, false, display());
+    fn the_console_is_centred_and_flush_with_the_top() {
+        let bounds = bounds(Mode::Console, false, display());
         assert_eq!(bounds.size.width, px(QUAKE_WIDTH));
         assert_eq!(bounds.size.height, px(QUAKE_BAR));
         assert_eq!(bounds.origin.y, px(0.));
@@ -179,9 +179,9 @@ mod tests {
     }
 
     #[test]
-    fn expanding_the_quake_console_grows_it_downwards_from_the_same_origin() {
-        let collapsed = bounds(Mode::Quake, false, display());
-        let expanded = bounds(Mode::Quake, true, display());
+    fn expanding_the_console_grows_it_downwards_from_the_same_origin() {
+        let collapsed = bounds(Mode::Console, false, display());
+        let expanded = bounds(Mode::Console, true, display());
         assert_eq!(collapsed.origin, expanded.origin, "the origin never moves");
         assert!(expanded.size.height > collapsed.size.height);
         assert_eq!(expanded.size.height, px(QUAKE_HEIGHT));
@@ -222,9 +222,9 @@ mod tests {
                 height: px(320.),
             },
         };
-        let quake = bounds(Mode::Quake, true, small);
-        assert_eq!(quake.size.width, px(380.));
-        assert!(quake.size.height <= px(320.));
+        let console = bounds(Mode::Console, true, small);
+        assert_eq!(console.size.width, px(380.));
+        assert!(console.size.height <= px(320.));
         let companion = bounds(Mode::Companion, false, small);
         assert_eq!(companion.size.width, px(380.));
         assert_eq!(companion.origin.x, px(0.), "flush with both edges at once");
@@ -234,8 +234,8 @@ mod tests {
     fn a_resize_asks_for_the_size_the_bounds_would_have_had() {
         let display = display();
         assert_eq!(
-            size_of(Mode::Quake, true, display),
-            bounds(Mode::Quake, true, display).size
+            size_of(Mode::Console, true, display),
+            bounds(Mode::Console, true, display).size
         );
     }
 }

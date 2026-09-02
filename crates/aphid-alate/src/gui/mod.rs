@@ -15,6 +15,7 @@
 //! `aphid alate gui` finds the first through `$APHID_HOME/gui.sock` and tells
 //! it to come forward; naming another alate points the same window at it.
 
+pub mod balloon;
 pub mod config;
 pub mod control;
 pub mod emote;
@@ -29,8 +30,8 @@ use std::path::PathBuf;
 
 use gpui::{
     App, Application, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
-    ListAlignment, ListState, Render, SharedString, Window, div, img, list, prelude::*, px, rgb,
-    rgba,
+    ListAlignment, ListState, Render, SharedString, Window, div, img, list, prelude::*, px,
+    relative, rgb, rgba,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -43,10 +44,11 @@ use aphid_code::gui::theme::{
     self, ACCENT, BACKGROUND, BORDER, DANGER, MUTED, PANEL, PANEL_RAISED, TEXT, USER,
 };
 
-use crate::gateway::wire::{Answer, Envelope, Request, Risk};
+use crate::gateway::wire::{Answer, Envelope, Frame as Wire, Request, Risk};
 use crate::gateway::{Client, Reader, Writer};
 use crate::home::{DEFAULT_NAME, Home};
 
+use balloon::Balloon;
 use config::{Config, Familiar, Mode};
 use control::{Command, Control, Reply};
 use emote::Mood;
@@ -70,6 +72,19 @@ const CONTEXT: &str = "Alate";
 /// [`BACKOFF_MAX`].
 const BACKOFF_START: u64 = 1;
 const BACKOFF_MAX: u64 = 30;
+
+/// How tall the creature's band is at the foot of the companion.
+///
+/// The same 300 the desktop companion this follows gave its own pane. It is a
+/// fixed height and not a share of the window, so the log above it grows and
+/// shrinks with the screen while the creature stays the size it was drawn for.
+const PANE_HEIGHT: f32 = 300.;
+/// How much of the companion's band the balloon may take, leaving the rest to
+/// the alate.
+const BAND_BALLOON: f32 = 130.;
+/// How much of the console the balloon may take. More, because there the
+/// creature and what it says are the whole of what is on screen.
+const CONSOLE_BALLOON: f32 = 220.;
 
 /// How many frames to ask the desktop to place the window on.
 ///
@@ -147,6 +162,8 @@ struct AlateView {
     mode_wanted: Option<Mode>,
     /// What the creature is feeling, and what it was feeling before that.
     mood: Mood,
+    /// The last thing it said, over its head.
+    balloon: Balloon,
     /// The thread that draws it, and the image it last drew.
     body: render::Body,
     /// When the window opened. Everything the shaders animate against is
@@ -222,6 +239,7 @@ impl AlateView {
             mode_wanted: None,
             typing: None,
             mood: Mood::default(),
+            balloon: Balloon::default(),
             body,
             opened: std::time::Instant::now(),
             _tray: tray,
@@ -321,6 +339,7 @@ impl AlateView {
             }
             Msg::Wire(envelope) => {
                 self.mood.arrived(&envelope.frame, self.age());
+                self.speak(&envelope.frame);
                 self.model.arrived(*envelope);
             }
             Msg::Down(reason) => {
@@ -344,7 +363,14 @@ impl AlateView {
                 self.expanded = true;
                 cx.activate(true);
             }
-            Command::Toggle => self.expanded = !self.expanded,
+            // The companion has one shape. Collapsing it would leave a
+            // full-height column with a bar at the top of it and nothing
+            // under that, which is not a smaller window but an empty one.
+            Command::Toggle => {
+                if self.config.mode == Mode::Console {
+                    self.expanded = !self.expanded;
+                }
+            }
             Command::Mode => self.mode_wanted = Some(self.config.mode.toggled()),
             Command::Instance { name } => self.point_at(name, cx),
             Command::Familiar { name } => self.wear(&name, cx),
@@ -363,6 +389,7 @@ impl AlateView {
             return;
         }
         self.model = Model::new(&name);
+        self.balloon.clear();
         self.connected_once = false;
         self.fingerprints.clear();
         self.entries.reset(0);
@@ -556,9 +583,11 @@ impl AlateView {
         } else if self.model.confirm.is_some() {
             let requests = self.model.answer(Answer::Deny);
             self.ask(requests);
+        } else if self.balloon.text().is_some() {
+            self.balloon.dismiss();
         } else if self.model.status.running {
             self.ask(vec![Request::Cancel]);
-        } else if self.config.mode == Mode::Quake {
+        } else if self.config.mode == Mode::Console && self.expanded {
             // Nothing to stop: the console gets out of the way instead.
             self.expanded = false;
         }
@@ -570,6 +599,24 @@ impl AlateView {
             state.insert("\n", window, cx);
         });
         cx.notify();
+    }
+
+    /// Move the balloon along with the reply.
+    ///
+    /// The same frames the log is built from, read for the one thing the
+    /// creature is meant to say out loud: the reply itself. Thinking is not in
+    /// it — that is what the face is for — and neither is a tool.
+    fn speak(&mut self, frame: &Wire) {
+        match frame {
+            Wire::TurnStarted => self.balloon.begin(),
+            Wire::Text { text } => self.balloon.append(text),
+            Wire::RunEnded { error: None, .. } => self.balloon.finish(),
+            Wire::RunEnded {
+                error: Some(error), ..
+            } => self.balloon.show(error.clone()),
+            Wire::HistoryStart { .. } => self.balloon.clear(),
+            _ => {}
+        }
     }
 
     /// Seconds since the window opened.
@@ -699,7 +746,13 @@ impl AlateView {
             .gap_2()
             .border_b_1()
             .border_color(rgb(BORDER))
-            .child(self.render_familiar())
+            // Only where there is no pane below. Collapsed, the glyph in the
+            // bar is the whole of the creature, as the pill was in the
+            // companion this follows; expanded, or in the companion's band, it
+            // would be a second smaller copy of what is already on screen.
+            .when(self.config.mode == Mode::Console && !self.expanded, |bar| {
+                bar.child(self.render_familiar())
+            })
             .child(
                 div()
                     .flex_1()
@@ -734,21 +787,23 @@ impl AlateView {
                 Button::new("mode")
                     .ghost()
                     .label(self.config.mode.label())
-                    .tooltip("Quake or companion")
+                    .tooltip("Console or companion")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.set_mode(this.config.mode.toggled(), window, cx);
                     })),
             )
-            .child(
-                Button::new("expand")
-                    .ghost()
-                    .label(if self.expanded { "▴" } else { "▾" })
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.expanded = !this.expanded;
-                        this.focus_composer(window, cx);
-                        cx.notify();
-                    })),
-            )
+            .when(self.config.mode == Mode::Console, |bar| {
+                bar.child(
+                    Button::new("expand")
+                        .ghost()
+                        .label(if self.expanded { "▴" } else { "▾" })
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.expanded = !this.expanded;
+                            this.focus_composer(window, cx);
+                            cx.notify();
+                        })),
+                )
+            })
             .into_any_element()
     }
 
@@ -788,6 +843,76 @@ impl AlateView {
                     )),
             )
             .into_any_element()
+    }
+
+    /// The creature, and what it last said.
+    ///
+    /// Two shapes of the same thing. In the companion it is a band at the foot
+    /// of the window, under the log, with a height of its own. In the console
+    /// it is the whole of what is on screen: there is no log there, so the
+    /// creature and its balloon are what the console is for.
+    ///
+    /// The balloon is above the creature rather than over it. The companion
+    /// this follows drew it into the same GL pass and laid it across the pane;
+    /// here they are two elements in a column, so a long answer takes room from
+    /// the creature instead of covering its face.
+    fn render_pane(&self, band: bool) -> gpui::AnyElement {
+        let mut pane = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .p_2()
+            .bg(rgb(BACKGROUND));
+        pane = if band {
+            pane.h(px(PANE_HEIGHT))
+                .flex_none()
+                .border_t_1()
+                .border_color(rgb(BORDER))
+        } else {
+            pane.flex_1().min_h_0()
+        };
+
+        if let Some(said) = self.balloon.text() {
+            let tail = if self.balloon.streaming() { "▍" } else { "" };
+            pane = pane.child(
+                div()
+                    .id("balloon")
+                    .flex_none()
+                    .max_w(relative(0.9))
+                    .max_h(px(if band { BAND_BALLOON } else { CONSOLE_BALLOON }))
+                    .overflow_y_scroll()
+                    .px_3()
+                    .py_2()
+                    .rounded_lg()
+                    .bg(rgb(PANEL_RAISED))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .text_xs()
+                    .text_color(rgb(TEXT))
+                    .whitespace_normal()
+                    .child(format!("{said}{tail}")),
+            );
+        }
+
+        // `img` fits by containing, so the creature takes the height it is
+        // given and keeps its shape whatever the window does to the pane —
+        // which under a tiling window manager is anything at all.
+        pane = if let Some(image) = self.body.image() {
+            pane.child(div().flex_1().min_h_0().child(img(image).size_full()))
+        } else {
+            pane.child(
+                div().flex_none().text_xs().text_color(rgb(MUTED)).child(
+                    self.body
+                        .trouble()
+                        .unwrap_or("the alate is not being drawn")
+                        .to_owned(),
+                ),
+            )
+        };
+        pane.into_any_element()
     }
 
     fn render_entry(
@@ -1183,19 +1308,30 @@ impl Render for AlateView {
             .child(self.render_bar(cx));
 
         if self.expanded {
-            if self.model.link == Link::Connected {
-                content = content.child(
-                    list(
-                        self.entries.clone(),
-                        cx.processor(|this, index: usize, window, cx| {
-                            this.render_entry(index, window, cx)
-                        }),
-                    )
-                    .flex_1()
-                    .min_h_0(),
-                );
-            } else {
+            let companion = self.config.mode == Mode::Companion;
+            if self.model.link != Link::Connected {
                 content = content.child(self.render_asleep(cx));
+            } else if companion {
+                // The log, then the creature, then what you type — the order
+                // the companion this follows put them in, and the reason the
+                // creature is beside the text box rather than a screen away.
+                content = content
+                    .child(
+                        list(
+                            self.entries.clone(),
+                            cx.processor(|this, index: usize, window, cx| {
+                                this.render_entry(index, window, cx)
+                            }),
+                        )
+                        .flex_1()
+                        .min_h_0(),
+                    )
+                    .child(self.render_pane(true));
+            } else {
+                // The console has no log, as the companion's own topbar had
+                // none: it is the creature and what it is saying, and the log
+                // is a mode away.
+                content = content.child(self.render_pane(false));
             }
             let running = self.model.status.running;
             content = content.child(
