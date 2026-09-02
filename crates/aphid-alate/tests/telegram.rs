@@ -9,6 +9,7 @@
 
 mod common;
 
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -34,6 +35,8 @@ const THEIRS: i64 = 7;
 struct Fake {
     updates: tokio::sync::Mutex<UnboundedReceiver<Value>>,
     calls: Mutex<Vec<(String, Value)>>,
+    /// The next message id to give out, like a real chat would.
+    messages: AtomicI64,
 }
 
 impl Fake {
@@ -43,6 +46,7 @@ impl Fake {
             Arc::new(Self {
                 updates: tokio::sync::Mutex::new(updates),
                 calls: Mutex::new(Vec::new()),
+                messages: AtomicI64::new(1),
             }),
             feed,
         )
@@ -85,7 +89,8 @@ impl Api for Fake {
             .push((method.to_owned(), body));
         Box::pin(async move {
             if method != "getUpdates" {
-                return Ok(json!({ "message_id": 1 }));
+                let message_id = self.messages.fetch_add(1, Ordering::Relaxed);
+                return Ok(json!({ "message_id": message_id }));
             }
             // Nothing until the test says so, which is what a long poll with a
             // quiet chat behind it does.
@@ -522,7 +527,7 @@ async fn a_question_for_nobody_here_is_left_alone() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_tool_call_is_a_line_when_it_is_wanted() {
+async fn a_tool_call_is_an_announcement_when_it_is_wanted() {
     let temp = Temp::new("telegram-tools");
     let (api, feed) = Fake::new();
     let config = Telegram {
@@ -548,13 +553,113 @@ async fn a_tool_call_is_a_line_when_it_is_wanted() {
         },
     ));
 
-    let line = text(&api.nth("sendMessage", 0).await);
-    assert!(line.contains("bash"), "{line}");
-    assert!(line.contains("ls -la"), "{line}");
+    let announcement = text(&api.nth("sendMessage", 0).await);
+    assert!(announcement.contains("Tool Call: bash"), "{announcement}");
+    assert!(announcement.contains("ls -la"), "{announcement}");
     assert!(
-        !line.contains('\n'),
-        "one line, whatever the arguments: {line}"
+        !announcement.contains("(x"),
+        "the first call carries no count: {announcement}"
     );
+    assert_eq!(api.calls("editMessageText").len(), 0);
+
+    bridge.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn more_calls_edit_the_same_announcement() {
+    let temp = Temp::new("telegram-tools-edit");
+    let (api, feed) = Fake::new();
+    let config = Telegram {
+        tools: true,
+        ..allowed()
+    };
+    let (server, mut events, bridge) = bridge(&temp, config, api.clone());
+    feed.send(json!([message(1, MINE, "hello")])).expect("feed");
+
+    let Event::Opened { connection } = event(&mut events).await else {
+        panic!("attached");
+    };
+    greet(&server, connection);
+    event(&mut events).await;
+
+    server.send(Envelope::from(SESSION, Frame::TurnStarted));
+    server.send(Envelope::from(
+        SESSION,
+        Frame::ToolCall {
+            id: "call-1".to_owned(),
+            name: "bash".to_owned(),
+            arguments: "{\"command\":\"ls -la\"}".to_owned(),
+        },
+    ));
+    server.send(Envelope::from(
+        SESSION,
+        Frame::ToolCall {
+            id: "call-2".to_owned(),
+            name: "rg".to_owned(),
+            arguments: "{\"pattern\":\"fn main\"}".to_owned(),
+        },
+    ));
+
+    // One message was sent; the second call edited it instead of sending.
+    let edited = api.nth("editMessageText", 0).await;
+    assert_eq!(api.calls("sendMessage").len(), 1);
+    assert_eq!(edited["chat_id"], MINE);
+    let text = edited["text"].as_str().expect("a text");
+    assert!(text.contains("Tool Call: rg"), "{text}");
+    assert!(text.contains("(x2)"), "{text}");
+    assert!(
+        text.contains("rg {\"pattern\":\"fn main\"}"),
+        "the last call, whole: {text}"
+    );
+    assert!(
+        !text.contains("ls -la"),
+        "the earlier call is gone, not accumulated: {text}"
+    );
+
+    bridge.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_turn_opens_a_new_announcement() {
+    let temp = Temp::new("telegram-tools-turn");
+    let (api, feed) = Fake::new();
+    let config = Telegram {
+        tools: true,
+        ..allowed()
+    };
+    let (server, mut events, bridge) = bridge(&temp, config, api.clone());
+    feed.send(json!([message(1, MINE, "hello")])).expect("feed");
+
+    let Event::Opened { connection } = event(&mut events).await else {
+        panic!("attached");
+    };
+    greet(&server, connection);
+    event(&mut events).await;
+
+    let call = |id: &str, name: &str| Frame::ToolCall {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        arguments: "{}".to_owned(),
+    };
+
+    server.send(Envelope::from(SESSION, Frame::TurnStarted));
+    server.send(Envelope::from(SESSION, call("call-1", "bash")));
+    server.send(Envelope::from(
+        SESSION,
+        Frame::TurnEnded {
+            usage: Usage::default(),
+            stop: StopReason::Stop,
+            error: None,
+        },
+    ));
+    server.send(Envelope::from(SESSION, Frame::TurnStarted));
+    server.send(Envelope::from(SESSION, call("call-2", "rg")));
+
+    // Each turn's first call sends a fresh message; nothing is edited. The
+    // second send is what proves both turns ran before the counts are read.
+    let _ = api.nth("sendMessage", 1).await;
+    assert_eq!(api.calls("sendMessage").len(), 2);
+    assert_eq!(api.calls("editMessageText").len(), 0);
 
     bridge.abort();
 }
