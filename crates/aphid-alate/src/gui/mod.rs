@@ -1,0 +1,1231 @@
+//! A window on a running alate.
+//!
+//! `aphid alate attach` gives an alate a face in a terminal. This gives it one
+//! on the desktop: a console that drops from the top of the screen, or a column
+//! against its edge, that stays up while you work and shows what the agent is
+//! doing between prompts.
+//!
+//! It is a **client of the gateway** and nothing more. It holds no agent, no
+//! memory and no session of its own; [`crate::gateway::Client`] and the wire
+//! are the whole of what it shares with the daemon, which is the interface the
+//! documentation already promises to anything that can write a line of JSON.
+//! Closing the window does not stop the alate.
+//!
+//! There is one window for the machine, not one for each alate. A second
+//! `aphid alate gui` finds the first through `$APHID_HOME/gui.sock` and tells
+//! it to come forward; naming another alate points the same window at it.
+
+pub mod config;
+pub mod control;
+pub mod model;
+pub mod window;
+
+use std::collections::HashSet;
+use std::path::PathBuf;
+
+use gpui::{
+    App, Application, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
+    ListAlignment, ListState, Render, SharedString, Window, div, list, prelude::*, px, rgb, rgba,
+};
+use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::list::ListItem;
+use gpui_component::text::TextView;
+use gpui_component::{Disableable, Root};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+
+use aphid_code::gui::theme::{
+    self, ACCENT, BACKGROUND, BORDER, DANGER, MUTED, PANEL, PANEL_RAISED, TEXT, USER,
+};
+
+use crate::gateway::wire::{Answer, Envelope, Request, Risk};
+use crate::gateway::{Client, Reader, Writer};
+use crate::home::{DEFAULT_NAME, Home};
+
+use config::{Config, Familiar, Mode};
+use control::{Command, Control, Reply};
+use model::{Entry, Link, Model, ToolState};
+
+gpui::actions!(
+    alate,
+    [
+        /// Stop the run in flight, or close what is on top of the transcript.
+        Cancel,
+        /// Put a line break in the text box instead of sending it.
+        NewLine
+    ]
+);
+
+/// The key context of the window. The text box has a deeper one, so its own
+/// bindings are tried first and these are what reaches here.
+const CONTEXT: &str = "Alate";
+
+/// How long to wait before the first reconnection, in seconds. It doubles up to
+/// [`BACKOFF_MAX`].
+const BACKOFF_START: u64 = 1;
+const BACKOFF_MAX: u64 = 30;
+
+/// What reaches the window from somewhere that is not the keyboard.
+enum Msg {
+    /// A connection is up, and this is what to send requests on.
+    Opened(UnboundedSender<Request>),
+    /// The daemon said something.
+    Wire(Box<Envelope>),
+    /// There is no connection, and why.
+    Down(String),
+    /// Somebody ran `aphid alate gui …` while this window was already open.
+    Control(Command),
+}
+
+/// Everything the window draws.
+struct AlateView {
+    model: Model,
+    /// The text box. It owns its cursor, its selection and its marked text,
+    /// which is what makes a dead key compose: `Keystroke.key_char` gives the
+    /// key and not the character, so nothing built on key events alone types
+    /// `ação`.
+    composer: Entity<InputState>,
+    focus: FocusHandle,
+    /// The transcript, measured entry by entry and anchored at the newest.
+    entries: ListState,
+    /// What each entry looked like when it was last measured.
+    fingerprints: Vec<u64>,
+    expanded_tools: HashSet<usize>,
+    expanded_thinking: HashSet<usize>,
+    /// Where requests go while a connection is up.
+    outbox: Option<UnboundedSender<Request>>,
+    /// Which connection the messages arriving belong to. Pointing the window at
+    /// another alate bumps it, and the old connection's messages are dropped.
+    generation: u64,
+    /// Whether this window has ever been connected. What makes a reconnection
+    /// say so, rather than a first connection announcing itself.
+    connected_once: bool,
+    runtime: tokio::runtime::Handle,
+    config: Config,
+    config_path: PathBuf,
+    /// Whether the transcript and the text box are on screen. Always true in
+    /// companion mode, which has only one height.
+    expanded: bool,
+    /// Whether the session list is on top of the transcript.
+    picking: bool,
+    /// Why there is no connection, when there is none.
+    down: Option<String>,
+    /// The alate this window watches, as the control socket reports it to the
+    /// next `aphid alate gui`.
+    watching: std::sync::Arc<std::sync::Mutex<String>>,
+    /// Whether a `aphid alate run` was started from here and has not answered
+    /// yet, so the button cannot be pressed twice.
+    waking: bool,
+}
+
+impl AlateView {
+    fn new(
+        instance: String,
+        config: Config,
+        config_path: PathBuf,
+        runtime: tokio::runtime::Handle,
+        watching: std::sync::Arc<std::sync::Mutex<String>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let composer = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .auto_grow(1, 6)
+                .soft_wrap(true)
+                .placeholder("Say something, or /sessions…")
+        });
+        cx.subscribe_in(&composer, window, Self::on_composer)
+            .detach();
+        let expanded = config.mode == Mode::Companion;
+        Self {
+            model: Model::new(&instance),
+            composer,
+            focus: cx.focus_handle(),
+            entries: ListState::new(0, ListAlignment::Bottom, px(600.)),
+            fingerprints: Vec::new(),
+            expanded_tools: HashSet::new(),
+            expanded_thinking: HashSet::new(),
+            outbox: None,
+            generation: 0,
+            connected_once: false,
+            runtime,
+            config,
+            config_path,
+            expanded,
+            picking: false,
+            down: None,
+            watching,
+            waking: false,
+        }
+    }
+
+    /// Open a connection to the alate the model names, and keep it open.
+    fn connect(&mut self, cx: &mut Context<Self>) {
+        self.generation = self.generation.wrapping_add(1);
+        let generation = self.generation;
+        self.outbox = None;
+
+        let Ok(home) = Home::open(&self.model.instance) else {
+            self.down = Some(format!("{:?} cannot name an alate", self.model.instance));
+            self.model.link = Link::Asleep;
+            cx.notify();
+            return;
+        };
+        let socket = home.socket();
+        let (sender, receiver) = unbounded_channel();
+        self.runtime.spawn(supervise(socket, sender));
+        self.drain(generation, receiver, cx);
+        cx.notify();
+    }
+
+    /// Turn what the connection task sends into calls on this view.
+    fn drain(
+        &mut self,
+        generation: u64,
+        mut receiver: UnboundedReceiver<Msg>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |weak, cx| {
+            while let Some(msg) = receiver.recv().await {
+                let alive = weak.update(cx, |view, cx| view.receive(generation, msg, cx));
+                // The window is gone, or this connection is the old one.
+                if !matches!(alive, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Apply one message. `false` ends the task that is feeding them.
+    fn receive(&mut self, generation: u64, msg: Msg, cx: &mut Context<Self>) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        match msg {
+            Msg::Opened(outbox) => {
+                self.outbox = Some(outbox);
+                self.down = None;
+                self.waking = false;
+                if self.connected_once {
+                    // The daemon opens a session for each connection, so what
+                    // follows is a new conversation. Saying so beats drawing
+                    // the next reply under the last one as though nothing had
+                    // happened.
+                    self.model.reset();
+                    self.model.note("reconnected — this is a new session");
+                }
+                self.connected_once = true;
+            }
+            Msg::Wire(envelope) => self.model.arrived(*envelope),
+            Msg::Down(reason) => {
+                self.outbox = None;
+                self.model.link = Link::Asleep;
+                self.down = Some(reason);
+            }
+            Msg::Control(command) => return self.controlled(command, cx),
+        }
+        self.sync_entries();
+        cx.notify();
+        true
+    }
+
+    /// Do what another `aphid alate gui` asked for.
+    fn controlled(&mut self, command: Command, cx: &mut Context<Self>) -> bool {
+        match command {
+            Command::Ping => {}
+            Command::Show => {
+                self.expanded = true;
+                cx.activate(true);
+            }
+            Command::Toggle => self.expanded = !self.expanded,
+            Command::Mode => self.set_mode(self.config.mode.toggled(), cx),
+            Command::Instance { name } => self.point_at(name, cx),
+            Command::Quit => {
+                cx.quit();
+                return false;
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    /// Watch a different alate, on the same window.
+    fn point_at(&mut self, name: String, cx: &mut Context<Self>) {
+        if name == self.model.instance {
+            return;
+        }
+        self.model = Model::new(&name);
+        self.connected_once = false;
+        self.fingerprints.clear();
+        self.entries.reset(0);
+        if let Ok(mut watching) = self.watching.lock() {
+            name.clone_into(&mut watching);
+        }
+        self.config.instance = Some(name);
+        self.save_config();
+        self.connect(cx);
+    }
+
+    /// Change which window this is.
+    ///
+    /// A mode is a different window, not a different layout: GPUI fixes a
+    /// window's origin when it is created, so the one on screen has to close
+    /// and another open. Nothing about the connection is touched — it belongs
+    /// to this view, which outlives the window that draws it.
+    fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
+        self.config.mode = mode;
+        self.expanded = mode == Mode::Companion || self.expanded;
+        self.save_config();
+        cx.notify();
+    }
+
+    fn save_config(&self) {
+        // A window that cannot remember where it was is still a window.
+        let _ = self.config.save(&self.config_path);
+    }
+
+    /// Start the alate this window is pointed at.
+    ///
+    /// The documentation says that putting an alate in the background is the
+    /// system's job and not the agent's. **The window is the exception**, and
+    /// deliberately: it is already a process with a long life, and a companion
+    /// that can only tell you to go and open a terminal is not company. The
+    /// child is put in a process group of its own, so it is not taken down by
+    /// what takes this window down.
+    fn wake(&mut self, cx: &mut Context<Self>) {
+        if self.waking {
+            return;
+        }
+        let Ok(binary) = std::env::current_exe() else {
+            self.down = Some("cannot find the aphid binary to start it with".to_owned());
+            return;
+        };
+        let mut command = std::process::Command::new(binary);
+        command
+            .arg("alate")
+            .arg("run")
+            .arg("--name")
+            .arg(&self.model.instance)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        match command.spawn() {
+            Ok(_) => {
+                self.waking = true;
+                self.down = Some(format!("starting {}…", self.model.instance));
+            }
+            Err(error) => self.down = Some(format!("could not start it: {error}")),
+        }
+        cx.notify();
+    }
+
+    /// Ask the daemon for something, if there is one to ask.
+    fn ask(&mut self, requests: Vec<Request>) {
+        let Some(outbox) = &self.outbox else { return };
+        for request in requests {
+            let _ = outbox.send(request);
+        }
+    }
+
+    /// What the text box says happened.
+    ///
+    /// `Enter` in a multi-line box inserts the newline before it reports the
+    /// press, so the line is taken with that newline trimmed off. A newline on
+    /// purpose is `Shift-Enter`, which the box does not bind and this view does.
+    fn on_composer(
+        &mut self,
+        _: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::PressEnter { secondary: false } => self.send(window, cx),
+            InputEvent::Change => cx.notify(),
+            _ => {}
+        }
+    }
+
+    fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let line = self
+            .composer
+            .read(cx)
+            .value()
+            .trim_end_matches('\n')
+            .trim()
+            .to_owned();
+        self.composer.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+        });
+        if line.is_empty() {
+            return;
+        }
+        let requests = self.model.submit(&line);
+        // `/sessions` is worth showing as well as asking for.
+        if line.trim() == "/sessions" {
+            self.picking = true;
+        }
+        self.ask(requests);
+        self.sync_entries();
+        cx.notify();
+    }
+
+    /// Stop the run, or put away whatever is over the transcript.
+    fn on_cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+        if self.picking {
+            self.picking = false;
+        } else if self.model.confirm.is_some() {
+            let requests = self.model.answer(Answer::Deny);
+            self.ask(requests);
+        } else if self.model.status.running {
+            self.ask(vec![Request::Cancel]);
+        } else if self.config.mode == Mode::Quake {
+            // Nothing to stop: the console gets out of the way instead.
+            self.expanded = false;
+        }
+        cx.notify();
+    }
+
+    fn on_new_line(&mut self, _: &NewLine, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer.update(cx, |state, cx| {
+            state.insert("\n", window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Put the caret back in the text box, which a clicked button takes.
+    fn focus_composer(&self, window: &mut Window, cx: &mut App) {
+        self.composer.focus_handle(cx).focus(window);
+    }
+
+    fn answer(&mut self, decision: Answer, window: &mut Window, cx: &mut Context<Self>) {
+        let requests = self.model.answer(decision);
+        self.ask(requests);
+        self.focus_composer(window, cx);
+        cx.notify();
+    }
+
+    fn watch(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let requests = self.model.watch(&id);
+        self.ask(requests);
+        self.picking = false;
+        self.sync_entries();
+        self.focus_composer(window, cx);
+        cx.notify();
+    }
+
+    /// Tell the list what changed since the last frame.
+    ///
+    /// A transcript grows at the end, but it does not only grow: a tool result
+    /// lands in a card drawn several entries ago, and opening a card changes
+    /// its height. So each entry carries a fingerprint of what can change its
+    /// size, and the ones that moved are spliced — which is what makes the list
+    /// measure those again and keep every other height.
+    fn sync_entries(&mut self) {
+        let fresh: Vec<u64> = self
+            .model
+            .pane()
+            .entries()
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                fingerprint(
+                    entry,
+                    self.expanded_tools.contains(&index),
+                    self.expanded_thinking.contains(&index),
+                )
+            })
+            .collect();
+
+        // A transcript that shrank is a different conversation: a replay
+        // arrived, or the pane was cleared. Nothing measured is worth keeping.
+        if fresh.len() < self.fingerprints.len() {
+            self.entries.reset(fresh.len());
+            self.fingerprints = fresh;
+            return;
+        }
+        let old = self.fingerprints.len();
+        for (index, (new, was)) in fresh.iter().zip(&self.fingerprints).enumerate() {
+            if new != was {
+                self.entries.splice(index..index + 1, 1);
+            }
+        }
+        if fresh.len() > old {
+            self.entries.splice(old..old, fresh.len() - old);
+        }
+        self.fingerprints = fresh;
+    }
+}
+
+/// The drawing.
+impl AlateView {
+    /// The status bar, which is the whole window when the console is collapsed.
+    fn render_bar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let status = &self.model.status;
+        let state = if self.model.link != Link::Connected {
+            "asleep".to_owned()
+        } else if self.model.status.running {
+            "working".to_owned()
+        } else {
+            "idle".to_owned()
+        };
+        let tokens = if status.context_window == 0 {
+            String::new()
+        } else {
+            format!(" · {}/{}", status.context_used(), status.context_window)
+        };
+        div()
+            .h(px(56.))
+            .flex_none()
+            .px_3()
+            .flex()
+            .items_center()
+            .gap_2()
+            .border_b_1()
+            .border_color(rgb(BORDER))
+            .child(self.render_familiar())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(self.model.instance.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .child(format!("{state}{tokens}")),
+                    ),
+            )
+            .child(
+                Button::new("sessions")
+                    .ghost()
+                    .label("⧉")
+                    .tooltip("Sessions")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.picking = !this.picking;
+                        if this.picking {
+                            this.ask(vec![Request::Sessions]);
+                        }
+                        this.focus_composer(window, cx);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("mode")
+                    .ghost()
+                    .label(self.config.mode.label())
+                    .tooltip("Quake or companion")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.set_mode(this.config.mode.toggled(), cx);
+                    })),
+            )
+            .child(
+                Button::new("expand")
+                    .ghost()
+                    .label(if self.expanded { "▴" } else { "▾" })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.expanded = !this.expanded;
+                        this.focus_composer(window, cx);
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// Where the creature will be drawn.
+    ///
+    /// A rectangle with the familiar's name in it, until there is a renderer
+    /// behind it. The window is a gateway client first and a companion second:
+    /// everything below works with nothing here.
+    fn render_familiar(&self) -> gpui::AnyElement {
+        let size = if self.expanded { 40. } else { 32. };
+        div()
+            .w(px(size))
+            .h(px(size))
+            .flex_none()
+            .rounded_md()
+            .bg(rgb(PANEL_RAISED))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_xs()
+            .text_color(rgb(if self.model.link == Link::Connected {
+                ACCENT
+            } else {
+                MUTED
+            }))
+            .child(match self.config.familiar {
+                Familiar::Sap => "sap",
+                Familiar::Drift => "drf",
+            })
+            .into_any_element()
+    }
+
+    fn render_entry(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let Some(entry) = self.model.pane().entries().get(index).cloned() else {
+            return div().into_any_element();
+        };
+        let row = div().w_full().px_3().py_1();
+        match entry {
+            Entry::User(text) => row
+                .flex()
+                .justify_end()
+                .child(
+                    div()
+                        .max_w(px(320.))
+                        .px_3()
+                        .py_2()
+                        .rounded_lg()
+                        .bg(rgb(USER))
+                        .whitespace_normal()
+                        .child(text),
+                )
+                .into_any_element(),
+            Entry::Assistant(text) => row
+                .child(
+                    TextView::markdown(
+                        SharedString::from(format!("assistant-{index}")),
+                        text,
+                        window,
+                        cx,
+                    )
+                    .selectable(true),
+                )
+                .into_any_element(),
+            Entry::Thinking(text) => {
+                let open = self.expanded_thinking.contains(&index);
+                let body = if open {
+                    text
+                } else {
+                    text.lines().next().unwrap_or("thinking…").to_owned()
+                };
+                row.child(
+                    div()
+                        .id(SharedString::from(format!("thinking-{index}")))
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(rgb(PANEL))
+                        .text_color(rgb(MUTED))
+                        .text_xs()
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !this.expanded_thinking.remove(&index) {
+                                this.expanded_thinking.insert(index);
+                            }
+                            this.sync_entries();
+                            cx.notify();
+                        }))
+                        .child(if open { "▾ Thinking" } else { "▸ Thinking" })
+                        .child(div().mt_1().whitespace_normal().child(body)),
+                )
+                .into_any_element()
+            }
+            Entry::Tool(tool) => {
+                let open = self.expanded_tools.contains(&index);
+                let (mark, color) = match tool.state {
+                    ToolState::Streaming => ("◌", MUTED),
+                    ToolState::Running => ("●", ACCENT),
+                    ToolState::Done => ("✓", ACCENT),
+                    ToolState::Failed => ("✗", DANGER),
+                };
+                // The arguments as a value when they parsed, which is the point
+                // of keeping them as one.
+                let summary = tool.arguments.as_ref().map_or_else(
+                    || tool.raw.clone(),
+                    |json| {
+                        json.as_object().map_or_else(
+                            || json.to_string(),
+                            |fields| {
+                                fields
+                                    .iter()
+                                    .map(|(key, value)| format!("{key}: {value}"))
+                                    .collect::<Vec<_>>()
+                                    .join("  ")
+                            },
+                        )
+                    },
+                );
+                let head = if tool.state == ToolState::Streaming {
+                    format!("{mark} {} · {} bytes", tool.name, tool.streamed)
+                } else {
+                    format!("{mark} {}", tool.name)
+                };
+                let mut card = div()
+                    .id(SharedString::from(format!("tool-{index}")))
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(PANEL))
+                    .text_xs()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.expanded_tools.remove(&index) {
+                            this.expanded_tools.insert(index);
+                        }
+                        this.sync_entries();
+                        cx.notify();
+                    }))
+                    .child(div().text_color(rgb(color)).child(head))
+                    .child(
+                        div()
+                            .text_color(rgb(MUTED))
+                            .truncate()
+                            .child(summary.clone()),
+                    );
+                if open && !tool.output.is_empty() {
+                    card = card.child(
+                        div()
+                            .mt_1()
+                            .whitespace_normal()
+                            .text_color(rgb(if tool.state == ToolState::Failed {
+                                DANGER
+                            } else {
+                                TEXT
+                            }))
+                            .child(tool.output.clone()),
+                    );
+                }
+                row.child(card).into_any_element()
+            }
+            Entry::Notice(text) => row
+                .child(div().text_xs().text_color(rgb(MUTED)).child(text))
+                .into_any_element(),
+            Entry::Heartbeat { at, note } => row
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child(format!("woke at {at}"))
+                        .child(div().whitespace_normal().child(note)),
+                )
+                .into_any_element(),
+            Entry::Session(text) => row
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child(format!("── {text} ──")),
+                )
+                .into_any_element(),
+        }
+    }
+
+    /// The sessions there are, to pick one from.
+    fn render_sessions(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let current = self.model.current().to_owned();
+        let rows: Vec<_> = self
+            .model
+            .sessions
+            .live
+            .iter()
+            .chain(self.model.sessions.stored.iter())
+            .cloned()
+            .collect();
+        let mut panel =
+            div()
+                .absolute()
+                .inset_0()
+                .bg(rgba(0x000000cc))
+                .p_3()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .mb_2()
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child("Sessions"))
+                        .child(Button::new("close-sessions").ghost().label("✕").on_click(
+                            cx.listener(|this, _, window, cx| {
+                                this.picking = false;
+                                this.focus_composer(window, cx);
+                                cx.notify();
+                            }),
+                        )),
+                );
+        if rows.is_empty() {
+            panel = panel.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .child("none yet — the daemon answers in a moment"),
+            );
+        }
+        panel
+            .child(
+                div()
+                    .id("session-rows")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_scroll()
+                    .children(rows.into_iter().enumerate().map(|(index, info)| {
+                        let id = info.id.clone();
+                        ListItem::new(SharedString::from(format!("session-{index}")))
+                            .py_2()
+                            .my_1()
+                            .rounded_md()
+                            .selected(info.id == current)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.watch(id.clone(), window, cx);
+                            }))
+                            .child(div().child(div().child(info.id.clone())).child(
+                                div().text_xs().text_color(rgb(MUTED)).child(format!(
+                                    "{} · {}{}",
+                                    info.kind,
+                                    info.started,
+                                    if info.running { " · running" } else { "" }
+                                )),
+                            ))
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// The permission question, over everything else.
+    fn render_confirm(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let confirm = self.model.confirm.as_ref()?;
+        let risk = match confirm.risk {
+            Risk::Read => "reads",
+            Risk::Mutate => "changes something",
+            Risk::Destructive => "destroys something",
+        };
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .bg(rgba(0x000000cc))
+                .flex()
+                .items_center()
+                .justify_center()
+                .p_3()
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(420.))
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .bg(rgb(PANEL_RAISED))
+                        .p_4()
+                        .child(
+                            div()
+                                .font_weight(FontWeight::BOLD)
+                                .child(format!("Allow {}?", confirm.tool)),
+                        )
+                        .child(
+                            div()
+                                .my_2()
+                                .text_xs()
+                                .text_color(rgb(MUTED))
+                                .child(format!("it {risk}")),
+                        )
+                        .child(
+                            div()
+                                .my_2()
+                                .whitespace_normal()
+                                .child(confirm.summary.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(Button::new("deny").danger().label("Deny").on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.answer(Answer::Deny, window, cx);
+                                    }),
+                                ))
+                                .child(Button::new("allow").primary().label("Allow").on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.answer(Answer::Allow, window, cx);
+                                    }),
+                                ))
+                                .child(
+                                    Button::new("always")
+                                        .primary()
+                                        .outline()
+                                        .label("Always")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.answer(Answer::AllowAlways, window, cx);
+                                        })),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// What is drawn instead of a transcript when nothing is listening.
+    fn render_asleep(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let reason = self
+            .down
+            .clone()
+            .unwrap_or_else(|| format!("{} is not running", self.model.instance));
+        div()
+            .flex_1()
+            .min_h_0()
+            .p_4()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .child(div().text_color(rgb(MUTED)).child(reason))
+            .child(
+                Button::new("wake")
+                    .primary()
+                    .label(if self.waking { "Waking…" } else { "Wake it" })
+                    .disabled(self.waking)
+                    .on_click(cx.listener(|this, _, _, cx| this.wake(cx))),
+            )
+            .into_any_element()
+    }
+}
+
+impl Focusable for AlateView {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl Render for AlateView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut content = div()
+            .relative()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(BACKGROUND))
+            .text_color(rgb(TEXT))
+            .text_sm()
+            .font_family("system-ui")
+            .key_context(CONTEXT)
+            .track_focus(&self.focus)
+            .on_action(cx.listener(Self::on_cancel))
+            .on_action(cx.listener(Self::on_new_line))
+            .child(self.render_bar(cx));
+
+        if self.expanded {
+            if self.model.link == Link::Connected {
+                content = content.child(
+                    list(
+                        self.entries.clone(),
+                        cx.processor(|this, index: usize, window, cx| {
+                            this.render_entry(index, window, cx)
+                        }),
+                    )
+                    .flex_1()
+                    .min_h_0(),
+                );
+            } else {
+                content = content.child(self.render_asleep(cx));
+            }
+            let running = self.model.status.running;
+            content = content.child(
+                div().flex_none().p_2().child(
+                    div()
+                        .w_full()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(if running { rgb(0x9a8038) } else { rgb(BORDER) })
+                        .bg(rgb(PANEL_RAISED))
+                        .p_2()
+                        .child(Input::new(&self.composer).appearance(false)),
+                ),
+            );
+        }
+
+        if self.picking {
+            content = content.child(self.render_sessions(cx));
+        }
+        if let Some(confirm) = self.render_confirm(cx) {
+            content = content.child(confirm);
+        }
+        content
+    }
+}
+
+/// What an entry looks like to the list that measures it.
+///
+/// Only what can change an entry's height goes in: the kind, the length of each
+/// text it draws, and whether it is open. Lengths and not the text, because
+/// this runs for every entry on every frame that arrives.
+fn fingerprint(entry: &Entry, tool_open: bool, thinking_open: bool) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::mem::discriminant(entry).hash(&mut hasher);
+    match entry {
+        Entry::User(text) | Entry::Assistant(text) | Entry::Notice(text) | Entry::Session(text) => {
+            text.len().hash(&mut hasher);
+        }
+        Entry::Thinking(text) => {
+            text.len().hash(&mut hasher);
+            thinking_open.hash(&mut hasher);
+        }
+        Entry::Heartbeat { at, note } => {
+            at.len().hash(&mut hasher);
+            note.len().hash(&mut hasher);
+        }
+        Entry::Tool(tool) => {
+            tool.name.len().hash(&mut hasher);
+            tool.raw.len().hash(&mut hasher);
+            tool.output.len().hash(&mut hasher);
+            std::mem::discriminant(&tool.state).hash(&mut hasher);
+            tool.streamed.hash(&mut hasher);
+            tool.details.is_some().hash(&mut hasher);
+            tool_open.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// Keep a connection to `socket` up for as long as anybody is listening.
+///
+/// One connection at a time, reopened with a backoff that gives up on nothing:
+/// a window left open overnight finds the alate again when it comes back, and
+/// an alate that is not running yet costs one connect attempt every half minute.
+async fn supervise(socket: PathBuf, out: UnboundedSender<Msg>) {
+    let mut delay = BACKOFF_START;
+    loop {
+        match Client::connect_as(&socket, Some("gui")).await {
+            Ok(client) => {
+                delay = BACKOFF_START;
+                let (reader, writer) = client.split();
+                let (sender, receiver) = unbounded_channel();
+                if out.send(Msg::Opened(sender)).is_err() {
+                    return;
+                }
+                let pump = tokio::spawn(pump(writer, receiver));
+                let ended = follow(reader, &out).await;
+                pump.abort();
+                if !ended {
+                    return;
+                }
+                if out.send(Msg::Down("the alate hung up".to_owned())).is_err() {
+                    return;
+                }
+            }
+            Err(error) => {
+                let reason = if error.kind() == std::io::ErrorKind::NotFound
+                    || error.kind() == std::io::ErrorKind::ConnectionRefused
+                {
+                    String::new()
+                } else {
+                    format!(": {error}")
+                };
+                if out.send(Msg::Down(format!("not running{reason}"))).is_err() {
+                    return;
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+        delay = (delay * 2).min(BACKOFF_MAX);
+    }
+}
+
+/// Read envelopes until the connection ends. `false` when the window is gone.
+async fn follow(mut reader: Reader, out: &UnboundedSender<Msg>) -> bool {
+    loop {
+        match reader.recv().await {
+            Ok(Some(envelope)) => {
+                if out.send(Msg::Wire(Box::new(envelope))).is_err() {
+                    return false;
+                }
+            }
+            _ => return true,
+        }
+    }
+}
+
+/// Write requests until the connection ends.
+async fn pump(mut writer: Writer, mut requests: UnboundedReceiver<Request>) {
+    while let Some(request) = requests.recv().await {
+        if writer.send(&request).await.is_err() {
+            return;
+        }
+    }
+}
+
+/// Open the window, or bring the one that is open forward.
+///
+/// `name` is the alate to watch. Without one, the window opens on the alate it
+/// was last pointed at, and failing that on the default.
+///
+/// # Errors
+///
+/// Fails when there is no home directory, when the runtime cannot start, or
+/// when the window cannot be opened.
+pub fn run(name: Option<String>) -> Result<(), String> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("could not start the runtime: {error}"))?;
+
+    let socket = control::socket_path().map_err(|error| error.to_string())?;
+    let config_path = control::config_path().map_err(|error| error.to_string())?;
+    let mut config = Config::load(&config_path).unwrap_or_default();
+    let instance = name
+        .or_else(|| config.instance.clone())
+        .unwrap_or_else(|| DEFAULT_NAME.to_owned());
+
+    // One window for the machine. A second run is a remote control for the
+    // first, which is what makes `aphid alate gui` safe to bind to a key.
+    let control = match runtime.block_on(Control::bind(&socket)) {
+        Ok(control) => control,
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            return runtime.block_on(hand_over(&socket, &instance));
+        }
+        Err(error) => return Err(format!("{}: {error}", socket.display())),
+    };
+
+    config.instance = Some(instance.clone());
+    let handle = runtime.handle().clone();
+    // What the socket answers a `Ping` with. The window owns which alate it
+    // watches, and the socket is served on another thread, so the name is
+    // shared rather than asked for.
+    let watching = std::sync::Arc::new(std::sync::Mutex::new(instance));
+    let reporter = std::sync::Arc::clone(&watching);
+    let (commands, orders) = unbounded_channel();
+    runtime.spawn(control.serve(move |command| {
+        let answer = match &command {
+            Command::Ping => Reply::Pong {
+                instance: reporter.lock().ok().map(|name| name.clone()),
+            },
+            _ => Reply::Ok,
+        };
+        if commands.send(Msg::Control(command)).is_err() {
+            return Reply::Refused {
+                reason: "the window is closing".to_owned(),
+            };
+        }
+        answer
+    }));
+
+    let opened = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let reported = std::sync::Arc::clone(&opened);
+    let start = config.clone();
+
+    Application::new().run(move |cx: &mut App| {
+        // Before any window: the components read one theme out of a global, so
+        // nothing draws in the colors of aphid until this has run.
+        theme::init(cx);
+        cx.bind_keys([
+            gpui::KeyBinding::new("escape", Cancel, Some(CONTEXT)),
+            gpui::KeyBinding::new("shift-enter", NewLine, Some(CONTEXT)),
+        ]);
+
+        let display = cx
+            .active_window()
+            .and_then(|window| window.update(cx, |_, window, _| window.bounds()).ok())
+            .or_else(|| cx.primary_display().map(|display| display.bounds()))
+            .unwrap_or(gpui::Bounds {
+                origin: gpui::Point {
+                    x: px(0.),
+                    y: px(0.),
+                },
+                size: gpui::Size {
+                    width: px(1280.),
+                    height: px(800.),
+                },
+            });
+        let bounds = window::bounds(start.mode, start.mode == Mode::Companion, display);
+
+        match cx.open_window(window::options(start.mode, bounds), {
+            let start = start.clone();
+            move |window, cx| {
+                let view = cx.new(|cx| {
+                    AlateView::new(
+                        start
+                            .instance
+                            .clone()
+                            .unwrap_or_else(|| DEFAULT_NAME.to_owned()),
+                        start,
+                        config_path,
+                        handle,
+                        watching,
+                        window,
+                        cx,
+                    )
+                });
+                let focus = view.read(cx).focus.clone();
+                window.focus(&focus);
+                view.update(cx, |view, cx| {
+                    view.connect(cx);
+                    let generation = view.generation;
+                    view.drain(generation, orders, cx);
+                });
+                // The first layer has to be a `Root`: the text box reaches for
+                // it when it takes focus, and `Root::read` panics when the
+                // layer is anything else.
+                cx.new(|cx| Root::new(view, window, cx))
+            }
+        }) {
+            Ok(_) => cx.activate(true),
+            Err(error) => {
+                if let Ok(mut slot) = reported.lock() {
+                    *slot = Some(format!("could not open the window: {error}"));
+                }
+                cx.quit();
+            }
+        }
+    });
+
+    opened
+        .lock()
+        .map_err(|_| "could not read the window's startup result".to_owned())?
+        .take()
+        .map_or(Ok(()), Err)
+}
+
+/// Tell the window that is already open, and stop.
+async fn hand_over(socket: &std::path::Path, instance: &str) -> Result<(), String> {
+    let point = control::talk(
+        socket,
+        &Command::Instance {
+            name: instance.to_owned(),
+        },
+    )
+    .await;
+    if let Err(error) = point {
+        return Err(format!("a window is open but will not answer: {error}"));
+    }
+    control::talk(socket, &Command::Show)
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("a window is open but will not answer: {error}"))
+}
+
+/// Say one thing to the window that is open.
+///
+/// # Errors
+///
+/// Fails when no window is open, which is what `aphid alate gui toggle` with
+/// nothing running should say.
+pub async fn control_one(command: Command) -> Result<(), String> {
+    let socket = control::socket_path().map_err(|error| error.to_string())?;
+    match control::talk(&socket, &command).await {
+        Ok(Reply::Refused { reason }) => Err(reason),
+        Ok(_) => Ok(()),
+        Err(_) => Err("no window is open. `aphid alate gui` opens one".to_owned()),
+    }
+}

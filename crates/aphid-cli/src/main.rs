@@ -144,11 +144,19 @@ fn main() -> ExitCode {
     let Cli { code, command } = Cli::parse();
 
     // GPUI owns the process main thread and runs its own event loop. Its agent
-    // work still uses a Tokio runtime, which the graphical front end owns. A
+    // work still uses a Tokio runtime, which each graphical front end owns. A
     // build without the feature reaches the same call and says so.
-    if let Some(Command::Gui(args)) = command {
-        return code::gui(args);
-    }
+    //
+    // `alate gui` with a verb is not one of these: it is a client of the
+    // window's control socket, and it runs under the runtime like every other
+    // subcommand.
+    let command = match command {
+        Some(Command::Gui(args)) => return code::gui(args),
+        Some(Command::Alate(alate::Command::Gui(args))) if args.command.is_none() => {
+            return alate::window(args);
+        }
+        other => other,
+    };
 
     // The coding agent needs more than one worker: a permission prompt blocks
     // the agent's task until the UI answers on another one. So does an alate,

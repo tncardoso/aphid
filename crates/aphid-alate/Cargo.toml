@@ -19,6 +19,14 @@ telegram = ["dep:reqwest"]
 # The colony bridge. Off by default: it pulls a websocket client and the nostr
 # crate, which compiles C, and it is of no use without a colony to talk to.
 colony = ["dep:aphid-colony", "dep:aphid-nostr"]
+# The graphical companion. It is a gateway client with a window, so it needs
+# the window library and the component library the coding interface is drawn
+# with — including that interface's theme, which is why it turns on the coding
+# crate's own feature rather than mapping the palette a second time.
+#
+# The window owns a runtime of its own — the main thread belongs to GPUI — so
+# it is the one part of an alate that needs more than one worker.
+gui = ["dep:gpui", "dep:gpui-component", "aphid-code/gui", "tokio/rt-multi-thread"]
 
 [dependencies]
 aphid-agent.workspace = true
@@ -33,6 +41,8 @@ aphid-nostr = { workspace = true, optional = true }
 chrono.workspace = true
 compact_str.workspace = true
 croner.workspace = true
+gpui = { workspace = true, optional = true }
+gpui-component = { workspace = true, optional = true }
 ratatui.workspace = true
 ratatui-textarea.workspace = true
 reqwest = { workspace = true, features = ["json"], optional = true }

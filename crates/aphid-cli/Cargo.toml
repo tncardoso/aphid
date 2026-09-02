@@ -21,7 +21,10 @@ path = "src/main.rs"
 [features]
 default = ["gui"]
 # Passed through so `cargo run --features telegram` works from the binary.
-gui = ["aphid-code/gui"]
+# One feature turns on both windows: they are the same library and the same
+# theme, and a build that has the coding window and not the alate's would be a
+# distinction nobody asked for.
+gui = ["aphid-code/gui", "aphid-alate/gui"]
 telegram = ["aphid-alate/telegram"]
 colony = ["aphid-alate/colony"]
 

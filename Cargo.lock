@@ -184,6 +184,8 @@ dependencies = [
  "chrono",
  "compact_str",
  "croner",
+ "gpui",
+ "gpui-component",
  "ratatui",
  "ratatui-textarea",
  "reqwest",

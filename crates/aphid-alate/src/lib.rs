@@ -29,6 +29,8 @@ pub mod config;
 pub mod cron;
 pub mod daemon;
 pub mod gateway;
+#[cfg(feature = "gui")]
+pub mod gui;
 pub mod heartbeat;
 pub mod home;
 pub mod memory;

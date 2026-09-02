@@ -49,6 +49,23 @@
 
 ### Added
 
+- **`aphid alate gui` opens a window on a running alate.** It is a console that
+  drops from the top of the screen, or a column against its right edge, and it
+  shows what the agent is doing between prompts. It is a gateway client and
+  nothing more: closing the window does not stop the alate.
+  - `aphid alate gui toggle`, `show`, `mode` and `quit` are a remote control
+    for the window that is open, to bind to a key in a window manager. There is
+    one window for the machine: a second `aphid alate gui` brings the first
+    forward, and `--name` points it at another alate.
+  - Without a daemon, the window opens anyway, says the alate is asleep, and
+    offers to start it. That is the one place where aphid puts an agent in the
+    background for you.
+  - If the connection breaks it comes back, waiting a little longer each time
+    up to half a minute. The daemon opens a session for each connection, so the
+    window says the conversation is a new one instead of pretending otherwise.
+  - Where the window sits is best effort. Wayland lets no program place its own
+    windows, so on Wayland it needs a rule in the compositor, matching the
+    `com.embornal.aphid.alate` app id.
 - Alate now runs shell commands and plugin commands in a Bubblewrap sandbox.
   By default they can change only the Alate workspace. The user can grant
   extra paths and selected host environment variables in a policy outside the
