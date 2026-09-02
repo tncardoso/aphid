@@ -82,7 +82,13 @@
     its head until it says something else; `Escape` puts that away.
   - An icon in the tray carries the same commands as the socket does: show,
     expand, switch mode, choose a familiar, point the window at another alate,
-    and quit. A desktop with no tray gets no icon and no complaint.
+    and quit. Both tray protocols are spoken, since neither can be asked to do
+    the other's job: StatusNotifierItem over the bus, which is what KDE, a
+    GNOME with the extension and waybar listen for, and XEmbed, which is what
+    i3 with polybar, xfce4-panel and everything of that generation provide. On
+    an XEmbed panel there is no menu on the panel's side, so the right button
+    opens it in the window. A desktop with neither gets no icon, and the window
+    says so once rather than leaving you to wonder.
 - Alate now runs shell commands and plugin commands in a Bubblewrap sandbox.
   By default they can change only the Alate workspace. The user can grant
   extra paths and selected host environment variables in a policy outside the

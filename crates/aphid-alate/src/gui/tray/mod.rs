@@ -9,12 +9,19 @@
 //! what a window is, and a person with neither a tray nor a window manager
 //! loses nothing that the socket does not still offer.
 //!
-//! ## Two systems, two mechanisms
+//! ## Two systems, three mechanisms
 //!
-//! On Linux it is a StatusNotifierItem over D-Bus, through `ksni`, on a thread
-//! of its own. The companion this borrows from ran its tray in a **subprocess**,
-//! because the Python library it used wanted GTK 3 on Linux and the main thread
-//! on macOS; ksni wants neither, so the tray lives in this process.
+//! On Linux there are two tray protocols and no way to ask one to do the
+//! other's job, so both are spoken. **StatusNotifierItem**, over D-Bus through
+//! `ksni`, is what KDE, a GNOME with the extension, waybar and swaybar listen
+//! for. **XEmbed** is what everything older provides — i3 with polybar,
+//! xfce4-panel, stalonetray, trayer — where an icon is a window a panel adopts
+//! rather than a message on a bus. A desktop answers one or the other, so this
+//! offers the first and falls back to the second.
+//!
+//! The companion this borrows from ran its tray in a **subprocess**, because
+//! the Python library it used wanted GTK 3 on Linux and the main thread on
+//! macOS; neither of these wants either, so the tray lives in this process.
 //!
 //! On macOS it is an `NSStatusItem` through `tray-icon`, built on the thread
 //! GPUI runs its event loop on, since AppKit will take it from nowhere else.
@@ -28,6 +35,9 @@
 //! the menu to keep in step with the window, and the two platforms need no
 //! update path between them. The window is where the state is visible.
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub mod xembed;
+
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::Msg;
@@ -37,18 +47,18 @@ use crate::gateway::is_listening;
 use crate::home::Home;
 
 /// One thing a person can pick.
-struct Choice {
+pub(super) struct Choice {
     /// Stable across a run, and what the macOS side matches an event by. The
     /// Linux menu carries the command in a closure instead, so there the field
     /// is read only by the test that keeps the two in step.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     id: String,
-    label: String,
-    command: Command,
+    pub(super) label: String,
+    pub(super) command: Command,
 }
 
 /// A row of the menu: something to pick, a group of them, or a line.
-enum Row {
+pub(super) enum Row {
     One(Choice),
     Group { label: String, choices: Vec<Choice> },
     Separator,
@@ -72,7 +82,7 @@ fn awake() -> Vec<String> {
 }
 
 /// The whole menu.
-fn rows() -> Vec<Row> {
+pub(super) fn rows() -> Vec<Row> {
     let mut rows = vec![
         Row::One(Choice {
             id: "show".to_owned(),
@@ -135,7 +145,7 @@ fn rows() -> Vec<Row> {
 /// Drawn here rather than shipped as a file so that there is no asset to find
 /// at run time, and no icon theme to install into. RGBA, which is what the
 /// macOS side wants; the Linux side turns it into ARGB.
-fn glyph(size: u32) -> Vec<u8> {
+pub(super) fn glyph(size: u32) -> Vec<u8> {
     // 0x80c96b, the accent of both interfaces.
     const COLOR: [u8; 3] = [0x80, 0xc9, 0x6b];
     let half = size as f32 / 2.;
@@ -164,8 +174,11 @@ const ICON: u32 = 22;
 /// Dropping it takes the icon away, which is what should happen when the window
 /// closes.
 pub struct Tray {
+    /// Held when the desktop answered on the bus. An icon docked into a panel
+    /// needs nothing held: it is a window, and it lives until the panel or the
+    /// process does.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    _handle: ksni::Handle<Menu>,
+    _handle: Option<ksni::Handle<Menu>>,
     #[cfg(target_os = "macos")]
     _icon: tray_icon::TrayIcon,
 }
@@ -198,7 +211,7 @@ impl Menu {
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 impl ksni::Tray for Menu {
     fn id(&self) -> String {
-        super::window::APP_ID.to_owned()
+        crate::gui::window::APP_ID.to_owned()
     }
 
     fn title(&self) -> String {
@@ -247,26 +260,75 @@ impl ksni::Tray for Menu {
     }
 }
 
-/// Put the icon in the tray, if there is a tray to put it in.
+/// Put the icon in the tray, whichever tray this desktop has.
 ///
-/// A desktop with no StatusNotifierWatcher — several are — gets nothing and no
-/// complaint. The window is reachable from the control socket either way.
+/// The bus first, because a desktop that answers there wants a menu it draws
+/// itself. A panel that speaks only XEmbed gets a docked window instead, with
+/// the menu opening in the alate's own window since there is nothing on that
+/// side to draw one with.
+///
+/// # Errors
+///
+/// Fails when neither protocol finds anybody, which is a desktop with no tray
+/// at all. The window is reachable from the control socket either way, so this
+/// is worth saying once and not worth stopping for.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-#[must_use]
 pub(super) fn start(
     orders: UnboundedSender<Msg>,
     runtime: &tokio::runtime::Handle,
-) -> Option<Tray> {
+) -> Result<Tray, String> {
     use ksni::TrayMethods as _;
 
     // Registering is a D-Bus round trip, and it is done on the runtime the
     // window already owns rather than on an executor of ksni's own. It answers
-    // rather than hanging when there is no watcher, which is the ordinary case
-    // of a desktop with no tray.
-    runtime
-        .block_on(Menu { orders }.spawn())
-        .ok()
-        .map(|handle| Tray { _handle: handle })
+    // rather than hanging when there is no watcher.
+    let bus = runtime.block_on(
+        Menu {
+            orders: orders.clone(),
+        }
+        .spawn(),
+    );
+    match bus {
+        Ok(handle) => {
+            return Ok(Tray {
+                _handle: Some(handle),
+            });
+        }
+        Err(error) => {
+            // Not a failure yet: most desktops that answer nothing here have a
+            // panel that speaks the other protocol.
+            let _ = error;
+        }
+    }
+
+    // Docking blocks on X events for as long as the panel keeps the icon, so it
+    // takes a thread. Whether it docked at all is known before that thread is
+    // left to itself.
+    let (told, docked) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("alate-tray".to_owned())
+        .spawn(move || {
+            let result = xembed::dock(|click| {
+                let command = match click {
+                    xembed::Click::Primary => Command::Show,
+                    xembed::Click::Toggle => Command::Toggle,
+                    xembed::Click::Menu => Command::Menu,
+                };
+                let _ = orders.send(Msg::Control(command));
+            });
+            // Only the first of these is listened for; the rest is the panel
+            // going away long afterwards.
+            let _ = told.send(result.as_ref().err().map(ToString::to_string));
+        })
+        .map_err(|error| format!("no thread to dock a tray icon on: {error}"))?;
+
+    // The docking is a handful of round trips to the X server. Waiting for it
+    // is what turns "no icon" into a reason.
+    match docked.recv_timeout(std::time::Duration::from_secs(2)) {
+        Ok(None) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(Tray { _handle: None }),
+        Ok(Some(reason)) => Err(reason),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 // ---------------------------------------------------------------- macOS ----
@@ -277,11 +339,10 @@ pub(super) fn start(
 /// nowhere else. The events arrive on `MenuEvent::receiver`, which the window
 /// drains on its own beat rather than on a run loop of its own.
 #[cfg(target_os = "macos")]
-#[must_use]
 pub(super) fn start(
     orders: UnboundedSender<Msg>,
     runtime: &tokio::runtime::Handle,
-) -> Option<Tray> {
+) -> Result<Tray, String> {
     let _ = runtime;
     use tray_icon::menu::{Menu, MenuItem, Submenu};
 
@@ -290,35 +351,36 @@ pub(super) fn start(
         match row {
             Row::One(choice) => {
                 let item = MenuItem::with_id(choice.id, choice.label, true, None);
-                menu.append(&item).ok()?;
+                menu.append(&item).map_err(|error| error.to_string())?;
             }
             Row::Separator => {
                 menu.append(&tray_icon::menu::PredefinedMenuItem::separator())
-                    .ok()?;
+                    .map_err(|error| error.to_string())?;
             }
             Row::Group { label, choices } => {
                 let group = Submenu::new(label, true);
                 for choice in choices {
                     let item = MenuItem::with_id(choice.id, choice.label, true, None);
-                    group.append(&item).ok()?;
+                    group.append(&item).map_err(|error| error.to_string())?;
                 }
-                menu.append(&group).ok()?;
+                menu.append(&group).map_err(|error| error.to_string())?;
             }
         }
     }
 
-    let icon = tray_icon::Icon::from_rgba(glyph(ICON), ICON, ICON).ok()?;
+    let icon =
+        tray_icon::Icon::from_rgba(glyph(ICON), ICON, ICON).map_err(|error| error.to_string())?;
     let tray = tray_icon::TrayIconBuilder::new()
-        .with_id(super::window::APP_ID)
+        .with_id(crate::gui::window::APP_ID)
         .with_menu(Box::new(menu))
         .with_icon(icon)
         .with_tooltip("alate")
         .build()
-        .ok()?;
+        .map_err(|error| error.to_string())?;
     // The receiver is global and lives as long as the process, so the window
     // drains it rather than a thread here doing so.
     let _ = orders;
-    Some(Tray { _icon: tray })
+    Ok(Tray { _icon: tray })
 }
 
 /// Turn whatever the menu bar reported into commands.
@@ -367,13 +429,12 @@ fn command_of(id: &str) -> Option<Command> {
 
 /// Nothing to put an icon in.
 #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
-#[must_use]
 pub(super) fn start(
     orders: UnboundedSender<Msg>,
     runtime: &tokio::runtime::Handle,
-) -> Option<Tray> {
+) -> Result<Tray, String> {
     let _ = (orders, runtime);
-    None
+    Err("this system has no tray".to_owned())
 }
 
 #[cfg(test)]

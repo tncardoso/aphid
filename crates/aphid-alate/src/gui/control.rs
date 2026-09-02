@@ -33,6 +33,9 @@ pub enum Command {
     /// Draw the creature as this familiar: `sap` or `drift`. A name this build
     /// has never heard of is refused rather than guessed at.
     Familiar { name: String },
+    /// Come forward and open the menu. What the right button on a tray icon
+    /// sends where the panel draws no menu of its own.
+    Menu,
     /// Close the window and stop.
     Quit,
 }

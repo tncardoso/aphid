@@ -136,6 +136,9 @@ struct AlateView {
     expanded: bool,
     /// Whether the session list is on top of the transcript.
     picking: bool,
+    /// Whether the tray's menu is on top of it. There is nowhere else for it on
+    /// a panel that draws no menus of its own.
+    menu: bool,
     /// Why there is no connection, when there is none.
     down: Option<String>,
     /// What carries the text box's events here.
@@ -160,6 +163,9 @@ struct AlateView {
     /// A mode asked for by the control socket, which has no window to work
     /// with. Taken on the next frame, which has.
     mode_wanted: Option<Mode>,
+    /// Whether somebody asked for the window to come forward. Also taken on the
+    /// next frame: raising a window is something only a window can do.
+    raise_wanted: bool,
     /// What the creature is feeling, and what it was feeling before that.
     mood: Mood,
     /// The last thing it said, over its head.
@@ -214,9 +220,18 @@ impl AlateView {
         let expanded = config.mode == Mode::Companion;
         let (width, height) = render::size_of(config.familiar);
         let body = render::Body::start(config.familiar, width, height);
-        let tray = tray::start(orders.clone(), &runtime);
+        // A desktop with no tray of either kind is worth saying once, in the
+        // window, rather than leaving somebody to wonder where their icon went.
+        let mut model = Model::new(&instance);
+        let tray = match tray::start(orders.clone(), &runtime) {
+            Ok(tray) => Some(tray),
+            Err(reason) => {
+                model.note(format!("no tray icon: {reason}"));
+                None
+            }
+        };
         Self {
-            model: Model::new(&instance),
+            model,
             composer,
             focus: cx.focus_handle(),
             entries: ListState::new(0, ListAlignment::Bottom, px(600.)),
@@ -231,12 +246,14 @@ impl AlateView {
             config_path,
             expanded,
             picking: false,
+            menu: false,
             down: None,
             watching,
             waking: false,
             placing: PLACE_FRAMES,
             sized: None,
             mode_wanted: None,
+            raise_wanted: false,
             typing: None,
             mood: Mood::default(),
             balloon: Balloon::default(),
@@ -361,7 +378,7 @@ impl AlateView {
             Command::Ping => {}
             Command::Show => {
                 self.expanded = true;
-                cx.activate(true);
+                self.raise_wanted = true;
             }
             // The companion has one shape. Collapsing it would leave a
             // full-height column with a bar at the top of it and nothing
@@ -374,6 +391,11 @@ impl AlateView {
             Command::Mode => self.mode_wanted = Some(self.config.mode.toggled()),
             Command::Instance { name } => self.point_at(name, cx),
             Command::Familiar { name } => self.wear(&name, cx),
+            Command::Menu => {
+                self.menu = true;
+                self.expanded = true;
+                self.raise_wanted = true;
+            }
             Command::Quit => {
                 cx.quit();
                 return false;
@@ -578,7 +600,9 @@ impl AlateView {
 
     /// Stop the run, or put away whatever is over the transcript.
     fn on_cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
-        if self.picking {
+        if self.menu {
+            self.menu = false;
+        } else if self.picking {
             self.picking = false;
         } else if self.model.confirm.is_some() {
             let requests = self.model.answer(Answer::Deny);
@@ -1144,6 +1168,75 @@ impl AlateView {
             .into_any_element()
     }
 
+    /// The tray's menu, in this window.
+    ///
+    /// A panel that speaks XEmbed adopts a window and knows nothing else about
+    /// it — there is no menu on that side to hang items from. So the right
+    /// button brings this window forward and opens the menu here, where there
+    /// are already buttons to draw it with.
+    fn render_menu(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let mut list = div()
+            .id("tray-menu")
+            .w_full()
+            .max_w(px(320.))
+            .max_h(relative(0.9))
+            .overflow_y_scroll()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(BORDER))
+            .bg(rgb(PANEL_RAISED))
+            .p_2();
+        for row in tray::rows() {
+            list = match row {
+                tray::Row::Separator => list.child(div().my_1().h(px(1.)).w_full().bg(rgb(BORDER))),
+                tray::Row::One(choice) => list.child(self.render_choice(&choice, cx)),
+                tray::Row::Group { label, choices } => {
+                    let mut group = list.child(
+                        div()
+                            .mt_2()
+                            .px_2()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .child(label),
+                    );
+                    for choice in &choices {
+                        group = group.child(self.render_choice(choice, cx));
+                    }
+                    group
+                }
+            };
+        }
+        div()
+            .absolute()
+            .inset_0()
+            .bg(rgba(0x000000cc))
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_3()
+            .child(list)
+            .into_any_element()
+    }
+
+    /// One thing the menu offers, as a row that sends its command.
+    fn render_choice(&self, choice: &tray::Choice, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let command = choice.command.clone();
+        ListItem::new(SharedString::from(format!("menu-{}", choice.label)))
+            .py_2()
+            .my_1()
+            .rounded_md()
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.menu = false;
+                // Through the same channel the socket and the icon use, so
+                // there is one path into every one of these.
+                let _ = this.orders.send(Msg::Control(command.clone()));
+                this.focus_composer(window, cx);
+                cx.notify();
+            }))
+            .child(choice.label.clone())
+            .into_any_element()
+    }
+
     /// The permission question, over everything else.
     fn render_confirm(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let confirm = self.model.confirm.as_ref()?;
@@ -1260,6 +1353,13 @@ impl Render for AlateView {
                 this.set_mode(mode, window, cx)
             });
         }
+        if std::mem::take(&mut self.raise_wanted) {
+            // `App::activate` raises the application, which on a desktop with
+            // no such notion raises nothing. This asks the window manager for
+            // the window, which is what a person clicking a tray icon meant.
+            cx.activate(true);
+            window.activate_window();
+        }
         // The console grows downwards from an origin that never moves, so
         // showing the transcript is a resize and not a new window. Driven from
         // what is drawn rather than from the click, so that the button, the
@@ -1350,6 +1450,9 @@ impl Render for AlateView {
 
         if self.picking {
             content = content.child(self.render_sessions(cx));
+        }
+        if self.menu {
+            content = content.child(self.render_menu(cx));
         }
         if let Some(confirm) = self.render_confirm(cx) {
             content = content.child(confirm);

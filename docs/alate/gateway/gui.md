@@ -109,10 +109,21 @@ is no log there.
 
 ## The tray
 
-The icon carries the same commands: *Show*, *Expand or collapse*, *Switch
-mode*, *Familiar*, *Alate*, and *Quit the window*. A desktop with no tray gets
-no icon and no complaint, and everything on it is still reachable from
-`aphid alate gui`.
+The icon carries the same commands the control socket does: *Show*, *Expand or
+collapse*, *Switch mode*, *Familiar*, *Alate*, and *Quit the window*. A desktop
+with no tray at all gets no icon, and the window says so in its log once, since
+everything on the icon is still reachable from `aphid alate gui`.
+
+There are two tray protocols on Linux and no way to ask one to do the other's
+job, so aphid speaks both.
+
+| Protocol | Who listens | What the icon does |
+| --- | --- | --- |
+| StatusNotifierItem | KDE, GNOME with the extension, waybar, swaybar | The menu belongs to the desktop, and opens where it puts it. |
+| XEmbed | i3 with polybar, xfce4-panel, stalonetray, trayer | The panel adopts a window and knows nothing else about it, so there is no menu on that side. Left click brings the window forward, middle expands or collapses it, and **right click opens the menu in the window itself**. |
+
+The bus is tried first; a desktop that answers nothing there gets the docked
+window instead. Nothing has to be configured either way.
 
 The list of alates under *Alate* is read when the window opens. One started
 afterwards is reached with `aphid alate gui --name`.
