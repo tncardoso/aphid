@@ -40,9 +40,15 @@ const COMPANION_MARGIN: f32 = 24.;
 /// reports at all: a window somewhere beats no window.
 #[must_use]
 pub fn screen(cx: &mut gpui::App) -> Bounds<Pixels> {
+    // The display the active window is *on*, and not that window's own bounds.
+    // Once this program's window is the active one, asking for bounds asks it
+    // about itself: the console then grows to the size of the console, which is
+    // to say it never grows at all.
     cx.active_window()
-        .and_then(|window| window.update(cx, |_, window, _| window.bounds()).ok())
-        .or_else(|| cx.primary_display().map(|display| display.bounds()))
+        .and_then(|window| window.update(cx, |_, window, cx| window.display(cx)).ok())
+        .flatten()
+        .or_else(|| cx.primary_display())
+        .map(|display| display.bounds())
         .unwrap_or(Bounds {
             origin: Point {
                 x: px(0.),

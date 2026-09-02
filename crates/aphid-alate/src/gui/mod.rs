@@ -1411,7 +1411,13 @@ pub fn run(name: Option<String>) -> Result<(), String> {
                         cx,
                     )
                 });
-                let focus = view.read(cx).focus.clone();
+                // The text box and not the view: keys go where the focus is,
+                // and a view holding it means `Enter` reaches the action
+                // bindings instead of the composer, so nothing is ever sent
+                // until somebody clicks the box. The actions still fire — the
+                // box is inside the element that carries the key context, and
+                // dispatch walks up from the focus.
+                let focus = view.read(cx).composer.focus_handle(cx);
                 window.focus(&focus);
                 view.update(cx, |view, cx| {
                     view.connect(cx);
