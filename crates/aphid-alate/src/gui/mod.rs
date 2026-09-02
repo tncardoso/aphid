@@ -123,6 +123,12 @@ struct AlateView {
     picking: bool,
     /// Why there is no connection, when there is none.
     down: Option<String>,
+    /// What carries the text box's events here.
+    ///
+    /// Kept, because it has to be made again for each window: a subscription
+    /// holds the handle of the window it was made in, and one made in a window
+    /// that has since closed drops its events without a word.
+    typing: Option<gpui::Subscription>,
     /// The alate this window watches, as the control socket reports it to the
     /// next `aphid alate gui`.
     watching: std::sync::Arc<std::sync::Mutex<String>>,
@@ -188,8 +194,6 @@ impl AlateView {
                 .soft_wrap(true)
                 .placeholder("Say something, or /sessions…")
         });
-        cx.subscribe_in(&composer, window, Self::on_composer)
-            .detach();
         let expanded = config.mode == Mode::Companion;
         let (width, height) = render::size_of(config.familiar);
         let body = render::Body::start(config.familiar, width, height);
@@ -216,12 +220,22 @@ impl AlateView {
             placing: PLACE_FRAMES,
             sized: None,
             mode_wanted: None,
+            typing: None,
             mood: Mood::default(),
             body,
             opened: std::time::Instant::now(),
             _tray: tray,
             orders,
         }
+    }
+
+    /// Listen to the text box, in this window.
+    ///
+    /// Called once for each window the view is drawn in. Replacing the stored
+    /// subscription drops the one before it, which belonged to a window that is
+    /// closing.
+    fn watch_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.typing = Some(cx.subscribe_in(&self.composer, window, Self::on_composer));
     }
 
     /// Open a connection to the alate the model names, and keep it open.
@@ -423,9 +437,15 @@ impl AlateView {
         // end of the effect cycle, once the view is back in the app.
         window.defer(cx, move |window, cx| {
             if cx
-                .open_window(options, move |window, cx| {
-                    window.focus(&focus);
-                    cx.new(|cx| Root::new(view, window, cx))
+                .open_window(options, {
+                    let view = view.clone();
+                    move |window, cx| {
+                        // The text box moves to the new window, so what listens
+                        // to it has to move as well.
+                        view.update(cx, |view, cx| view.watch_composer(window, cx));
+                        window.focus(&focus);
+                        cx.new(|cx| Root::new(view, window, cx))
+                    }
                 })
                 .is_ok()
             {
@@ -1420,6 +1440,7 @@ pub fn run(name: Option<String>) -> Result<(), String> {
                 let focus = view.read(cx).composer.focus_handle(cx);
                 window.focus(&focus);
                 view.update(cx, |view, cx| {
+                    view.watch_composer(window, cx);
                     view.connect(cx);
                     view.attend(orders, cx);
                     view.animate(cx);
