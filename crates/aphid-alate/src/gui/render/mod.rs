@@ -45,11 +45,16 @@ pub fn size_of(familiar: Familiar) -> (u32, u32) {
 }
 
 /// What the window asks the thread for.
-struct Wish {
-    time: f32,
-    emote: Emote,
-    previous: Emote,
-    blend: f32,
+enum Order {
+    Draw {
+        time: f32,
+        emote: Emote,
+        previous: Emote,
+        blend: f32,
+    },
+    /// Put the context down and end, while the application is still up. See
+    /// [`Body::stop`] for why that matters.
+    Stop,
 }
 
 /// What the thread answers with.
@@ -61,8 +66,11 @@ enum Answer {
 
 /// The handle the window holds.
 pub struct Body {
-    wishes: Sender<Wish>,
+    orders: Sender<Order>,
     answers: Receiver<Answer>,
+    /// Kept so that a deliberate stop can wait for the context to be put down
+    /// before another is built.
+    thread: Option<std::thread::JoinHandle<()>>,
     width: u32,
     height: u32,
     /// The image last published, kept so it can be dropped when the next one
@@ -83,15 +91,16 @@ impl Body {
     /// have been. The panel is an ornament; the gateway client is the function.
     #[must_use]
     pub fn start(familiar: Familiar, width: u32, height: u32) -> Self {
-        let (wishes, orders) = channel::<Wish>();
+        let (orders, wishes) = channel::<Order>();
         let (replies, answers) = channel::<Answer>();
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name(format!("alate-{}", familiar.label()))
-            .spawn(move || paint(familiar, width, height, &orders, &replies))
+            .spawn(move || paint(familiar, width, height, &wishes, &replies))
             .ok();
         Self {
-            wishes,
+            orders,
             answers,
+            thread,
             width,
             height,
             image: None,
@@ -105,7 +114,7 @@ impl Body {
         if self.waiting || self.trouble.is_some() {
             return;
         }
-        let sent = self.wishes.send(Wish {
+        let sent = self.orders.send(Order::Draw {
             time,
             emote,
             previous,
@@ -176,19 +185,48 @@ impl Body {
     }
 }
 
-impl Drop for Body {
-    fn drop(&mut self) {
-        // Dropping the sender is what ends the thread: its next `recv` fails.
-        // The image is left to GPUI, which drops it with the window.
+impl Body {
+    /// End the drawing thread and wait for it to put its context down.
+    ///
+    /// Call this whenever a body is being replaced while the application is
+    /// still running — changing familiar is the one case. It is **not** called
+    /// when the process is closing: see [`paint`] for what happens then and
+    /// why the difference matters.
+    pub fn stop(&mut self) {
+        let _ = self.orders.send(Order::Stop);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
-/// The thread: build a context, then answer wishes until nobody wishes.
+impl Drop for Body {
+    fn drop(&mut self) {
+        // Deliberately not a stop. Dropping the sender ends the thread, which
+        // then leaves its context alone; the image is left to GPUI, which drops
+        // it with the window.
+    }
+}
+
+/// The thread: build a context, then draw what is asked for.
+///
+/// ## Why it sometimes walks away from its own context
+///
+/// Dropping the context calls `vkDestroyDevice`. Doing that **while GPUI is
+/// tearing down the device it draws windows with** segfaults inside the driver,
+/// which is what closing the window used to do here: the view is dropped, this
+/// channel closes, and this thread races the shutdown with a device to destroy.
+///
+/// So the two ways of ending are told apart. [`Order::Stop`] is a stop asked
+/// for while the application is up — changing familiar — and the context is put
+/// down properly. A channel that simply closes is the process going away, and
+/// then the context is left where it is: there is nothing to reclaim that the
+/// kernel will not reclaim a moment later anyway.
 fn paint(
     familiar: Familiar,
     width: u32,
     height: u32,
-    orders: &Receiver<Wish>,
+    wishes: &Receiver<Order>,
     replies: &Sender<Answer>,
 ) {
     let mut painter = match gpu::Painter::new(familiar, width, height) {
@@ -198,18 +236,30 @@ fn paint(
             return;
         }
     };
-    while let Ok(wish) = orders.recv() {
-        match painter.frame(wish.time, wish.emote, wish.previous, wish.blend) {
-            Ok(bytes) => {
-                if replies.send(Answer::Frame(bytes)).is_err() {
-                    return;
+    let closing = loop {
+        match wishes.recv() {
+            Ok(Order::Draw {
+                time,
+                emote,
+                previous,
+                blend,
+            }) => match painter.frame(time, emote, previous, blend) {
+                Ok(bytes) => {
+                    if replies.send(Answer::Frame(bytes)).is_err() {
+                        break true;
+                    }
                 }
-            }
-            Err(reason) => {
-                let _ = replies.send(Answer::Trouble(reason));
-                return;
-            }
+                Err(reason) => {
+                    let _ = replies.send(Answer::Trouble(reason));
+                    break false;
+                }
+            },
+            Ok(Order::Stop) => break false,
+            Err(_) => break true,
         }
+    };
+    if closing {
+        std::mem::forget(painter);
     }
 }
 

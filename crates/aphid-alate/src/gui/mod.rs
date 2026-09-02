@@ -262,6 +262,28 @@ impl AlateView {
         .detach();
     }
 
+    /// Answer the control socket and the tray, for as long as the window lives.
+    ///
+    /// Separate from [`Self::drain`], and deliberately not counted by the
+    /// connection's generation: pointing the window at another alate opens a
+    /// new connection and retires the old one, and a control channel retired
+    /// with it would leave the socket and the tray talking to nobody.
+    fn attend(&mut self, mut receiver: UnboundedReceiver<Msg>, cx: &mut Context<Self>) {
+        cx.spawn(async move |weak, cx| {
+            while let Some(msg) = receiver.recv().await {
+                let alive = weak.update(cx, |view, cx| match msg {
+                    Msg::Control(command) => view.controlled(command, cx),
+                    // Nothing else is sent on this channel.
+                    _ => true,
+                });
+                if !matches!(alive, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     /// Apply one message. `false` ends the task that is feeding them.
     fn receive(&mut self, generation: u64, msg: Msg, cx: &mut Context<Self>) -> bool {
         if generation != self.generation {
@@ -355,6 +377,9 @@ impl AlateView {
         }
         self.config.familiar = familiar;
         self.save_config();
+        // Put the old context down before building another, while there is
+        // still an application around for it to be put down under.
+        self.body.stop();
         let (width, height) = render::size_of(familiar);
         self.body = render::Body::start(familiar, width, height);
         cx.notify();
@@ -384,21 +409,31 @@ impl AlateView {
     /// reason changing mode does not end the session.
     fn reopen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let bounds = window::bounds(self.config.mode, self.expanded, window::screen(cx));
+        let options = window::options(self.config.mode, bounds);
         let view = cx.entity();
         let focus = self.composer.focus_handle(cx);
-        let opened = cx.open_window(
-            window::options(self.config.mode, bounds),
-            move |window, cx| {
-                window.focus(&focus);
-                cx.new(|cx| Root::new(view, window, cx))
-            },
-        );
-        if opened.is_ok() {
-            self.placing = PLACE_FRAMES;
-            self.sized = None;
-            window.remove_window();
-        }
-        cx.notify();
+        self.placing = PLACE_FRAMES;
+        self.sized = None;
+
+        // Opening a window draws its first frame there and then, and that frame
+        // renders this view. So this cannot run while the view is borrowed —
+        // and it always would be, since every way of asking for it arrives
+        // through a handler that holds it. `Window::defer` hands back an `App`
+        // and no view at all, which is exactly what is needed: it runs at the
+        // end of the effect cycle, once the view is back in the app.
+        window.defer(cx, move |window, cx| {
+            if cx
+                .open_window(options, move |window, cx| {
+                    window.focus(&focus);
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+                .is_ok()
+            {
+                // Second, so that there is never a moment with no window: GPUI
+                // stops when the last one goes.
+                window.remove_window();
+            }
+        });
     }
 
     fn save_config(&self) {
@@ -1380,8 +1415,7 @@ pub fn run(name: Option<String>) -> Result<(), String> {
                 window.focus(&focus);
                 view.update(cx, |view, cx| {
                     view.connect(cx);
-                    let generation = view.generation;
-                    view.drain(generation, orders, cx);
+                    view.attend(orders, cx);
                     view.animate(cx);
                 });
                 // The first layer has to be a `Root`: the text box reaches for
