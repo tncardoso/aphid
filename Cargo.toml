@@ -77,6 +77,29 @@ tray-icon = { version = "0.24", default-features = false }
 # The syscall behind `exec::kill`, called directly rather than by spawning the
 # `kill` binary.
 libc = "0.2"
+# Speech to text, and the pieces that put audio in the shape it wants. All of
+# them are behind the alate's `voice` feature, because the first of them pulls
+# an ONNX runtime and the rest are of no use without it.
+#
+# `default-features = false` keeps every engine out but the ONNX ones, which is
+# where Parakeet is. Parakeet reads a directory of ONNX files; it has no GGUF
+# loader, so the model is the export at `istupakov/parakeet-tdt-0.6b-v3-onnx`.
+transcribe-rs = { version = "0.3", default-features = false, features = ["onnx"] }
+# The container and codec reader for everything that is not Opus: an mp3 sent
+# as a file, the AAC track inside a video note, a wav. Pure Rust, and its
+# default features are turned off so the list below is the whole of it.
+symphonia = { version = "0.6", default-features = false, features = ["aac", "adpcm", "flac", "isomp4", "mkv", "mp3", "ogg", "pcm", "vorbis", "wav"] }
+# Opus is the one codec symphonia cannot decode, and it is the one Telegram
+# always sends a voice message in. This decoder is pure Rust, passes the RFC
+# 8251 vectors, and decodes straight to 16 kHz — which is the rate the model
+# wants, so the voice path never resamples.
+opus-decoder = "0.1"
+# The Ogg pages a voice message is packed in. The decoder above takes packets.
+ogg = "0.9"
+# What brings the other formats to 16 kHz. Only the symphonia path needs it.
+rubato = "5"
+# The checksum a downloaded model file is measured against.
+sha2 = "0.10"
 # Default features are `std` alone. NIP-04, NIP-44 and NIP-59 are opt-in there
 # and stay off: a colony is cleartext, and every one of them costs a cipher.
 # `os-rng` is what `Keys::generate` needs.

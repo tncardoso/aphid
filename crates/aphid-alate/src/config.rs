@@ -50,6 +50,10 @@ pub struct Config {
     pub heartbeat: Heartbeat,
     pub memory: MemoryConfig,
     pub gateway: Gateway,
+    /// Speech to text, for the clients that can carry audio. Absent means this
+    /// alate does not listen: an audio message is refused with a sentence
+    /// naming the block that turns it on.
+    pub voice: Option<Voice>,
     /// Literal environment values passed to sandboxed commands. Host values are
     /// deliberately configured in the user-owned sandbox policy instead.
     pub environment: BTreeMap<String, String>,
@@ -66,6 +70,7 @@ impl Default for Config {
             heartbeat: Heartbeat::default(),
             memory: MemoryConfig::default(),
             gateway: Gateway::default(),
+            voice: None,
             environment: BTreeMap::new(),
         }
     }
@@ -249,6 +254,93 @@ pub struct Telegram {
     /// The API root. `https://api.telegram.org` when absent; a test server
     /// otherwise.
     pub api: Option<String>,
+}
+
+/// Speech to text, so audio from a chat becomes words for the agent.
+///
+/// Kept in every build, and not behind the `voice` feature, for the reason
+/// [`Telegram`] is: one `alate.json` is the same file whichever build reads it.
+/// A build without the feature says which build listens and carries on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Voice {
+    /// Where the model is. [`Voice::directory`] when absent.
+    pub model: Option<PathBuf>,
+    /// Get the model when the directory has none. It is about 670 MB, once.
+    pub download: bool,
+    /// The longest recording to accept. `off` accepts all of them, and the 20
+    /// MB ceiling Telegram puts on a download is then the only limit.
+    pub longest: String,
+    /// How long the model stays in memory with no work. `off` keeps it there.
+    ///
+    /// The model is 670 MB of memory in a daemon that stays up for weeks, and
+    /// it takes seconds to read again. An alate that gets one recording a day
+    /// should not hold it all day.
+    pub idle: String,
+}
+
+/// The model this build reads, and the directory a download puts it in.
+pub const MODEL: &str = "parakeet-tdt-0.6b-v3-int8";
+
+impl Default for Voice {
+    fn default() -> Self {
+        Self {
+            model: None,
+            download: true,
+            longest: "off".to_owned(),
+            idle: "10m".to_owned(),
+        }
+    }
+}
+
+impl Voice {
+    /// Where the model is.
+    ///
+    /// A model is an artifact of the machine, in the manner of the binary, and
+    /// not state of one instance: three alates must not keep three copies of
+    /// 670 MB. So the default is the user's cache and not the alate's home.
+    #[must_use]
+    pub fn directory(&self) -> PathBuf {
+        if let Some(named) = &self.model {
+            return named.clone();
+        }
+        cache_dir().join("aphid").join("models").join(MODEL)
+    }
+
+    /// The longest recording to accept, and `None` for no limit.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `longest` is not a length of time.
+    pub fn limit(&self) -> Result<Option<Duration>, String> {
+        duration(&self.longest)
+    }
+
+    /// How long the model waits with no work before it is dropped, and `None`
+    /// to keep it for as long as the daemon runs.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `idle` is not a length of time.
+    pub fn patience(&self) -> Result<Option<Duration>, String> {
+        duration(&self.idle)
+    }
+}
+
+/// The user's cache directory, by the same two reads
+/// [`aphid_code::home_dir`] makes: the variable first, then `$HOME`.
+fn cache_dir() -> PathBuf {
+    if let Some(named) = std::env::var_os("XDG_CACHE_HOME") {
+        let named = PathBuf::from(named);
+        if named.is_absolute() {
+            return named;
+        }
+    }
+    match aphid_code::home_dir() {
+        Some(home) => home.join(".cache"),
+        // Nowhere else to put it. A relative path is at least visible.
+        None => PathBuf::from(".cache"),
+    }
 }
 
 /// The variable a bot token is read from when the configuration names none.

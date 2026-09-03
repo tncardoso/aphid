@@ -51,6 +51,7 @@ time.
 
 | What you send | Effect |
 | --- | --- |
+| A voice message | The words in it, for the agent. Refer to [Recordings](#recordings). |
 | Anything else | Words for the agent. |
 | `/new` | Start a new conversation. The one before it stays on disk. |
 | `/cancel` | Stop the run in flight. |
@@ -68,6 +69,85 @@ line, which makes a long run legible from a telephone.
 
 In `/sessions`, a chat is listed as `telegram: <chat id>` and not as `attached`,
 so you can tell a conversation in a chat from one in a terminal.
+
+## Recordings
+
+The bot can listen. A voice message becomes text on the machine of the alate,
+the chat shows the text, and the agent is given it as if you had typed it.
+
+Nothing is sent to a different company to do this. The model is
+[Parakeet TDT 0.6b v3][parakeet], it runs on the CPU of the alate, and it reads
+25 languages. This is behind a second build feature, because it adds a machine
+learning runtime that a build with no ears does not need:
+
+```console
+$ cargo build --release --features telegram,voice
+```
+
+Then put a `voice` block in `alate.json`:
+
+```json
+{ "voice": {} }
+```
+
+The block is at the top of the file and not inside `gateway`, because the ears
+belong to the alate and not to the bot.
+
+| Field | Effect |
+| --- | --- |
+| `model` | The directory the model is in. The cache of the machine when absent. |
+| `download` | Get the model when it is not there. `true` when absent. |
+| `longest` | The longest recording to accept. `off` when absent, which accepts all of them. |
+| `idle` | How long the model stays in memory with no work. `10m` when absent, and `off` keeps it. |
+
+### The model
+
+The model is 670 MB in four files. When it is not on the machine, the alate
+gets it at start and puts it in
+`$XDG_CACHE_HOME/aphid/models/parakeet-tdt-0.6b-v3-int8`. This occurs one time,
+in the background, and the alate does all its other work while it goes on.
+Every file is measured against a checksum before it is used.
+
+The cache is of the machine and not of the instance, so three alates on one
+computer share one model.
+
+The model is read into memory at the first recording and is put out of memory
+again after `idle`. This keeps 670 MB out of a daemon that stays awake for
+weeks and gets a recording each day. To read it once and keep it, set `idle` to
+`off`.
+
+### What you can send
+
+A voice message, a music file, a round video, and a file that says it is audio.
+Telegram gives a bot files up to 20 MB.
+
+A recording is cut into pieces of approximately 30 seconds before it is read,
+at the most quiet point near each boundary, and the texts are joined. So a
+recording of ten minutes is read correctly, and slowly.
+
+Voice messages, mp3 and wav are read correctly. A round video and an `.m4a`
+file are AAC, and the AAC decoder in this build is not as good: the words come
+out with mistakes in them. This is a limit of the decoder and not of the speech
+model.
+
+### What you see
+
+The chat shows 🎤 and the text before the agent answers, because speech
+recognition makes mistakes and you must be able to see the sentence the agent
+was given. A recording with no speech in it is said to have none, and the agent
+is not given a turn.
+
+Speech is never read as a command. If the recognition writes `/new`, it is
+words for the agent and it does not throw the conversation away.
+
+A recording is read in a task of its own, so the bot answers all the other
+chats while it goes on. Two effects follow. The order in one chat is not
+promised: a recording and then a typed line can reach the agent the other way
+round. And `/cancel` sent while a recording is being read does not stop it,
+because it is not yet a run — the words arrive, and the next `/cancel` stops
+what they start.
+
+[parakeet]: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
 
 ## Permission from a chat
 
@@ -91,3 +171,8 @@ answers.
 The bot is not necessary for the alate to start. A token that is absent, a
 `poll` that is not a length of time, and a Telegram that does not answer are all
 reported and passed over.
+
+The ears are not necessary either. A `voice` block in a build with no `voice`
+feature, a model that cannot be fetched, and a `longest` that is not a length of
+time are all reported and passed over. An alate that cannot listen says so to a
+chat that sends a recording, one time.

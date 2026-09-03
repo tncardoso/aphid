@@ -18,6 +18,8 @@
 //! - [`tui`] — the first client: a terminal attached to a running instance.
 //! - `telegram` — a second client, behind the `telegram` feature: a bot that
 //!   puts a chat on the same socket.
+//! - `voice` — behind the `voice` feature: speech to text, so a client that
+//!   carries audio can hand the agent words.
 //!
 //! The agent itself is still assembled by [`aphid_code::harness::build`]. This
 //! crate adds what a resident agent needs around it and changes nothing about
@@ -40,6 +42,8 @@ pub mod sessions;
 #[cfg(feature = "telegram")]
 pub mod telegram;
 pub mod tui;
+#[cfg(feature = "voice")]
+pub mod voice;
 
 pub use config::Config;
 pub use home::Home;

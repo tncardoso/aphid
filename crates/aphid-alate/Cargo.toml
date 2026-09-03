@@ -10,7 +10,7 @@ homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
-include = ["/src", "/tests", "/Cargo.toml"]
+include = ["/src", "/tests", "/examples", "/Cargo.toml"]
 
 [features]
 # The Telegram bridge. Off by default: it pulls in a TLS stack, and it is of no
@@ -19,6 +19,22 @@ telegram = ["dep:reqwest"]
 # The colony bridge. Off by default: it pulls a websocket client and the nostr
 # crate, which compiles C, and it is of no use without a colony to talk to.
 colony = ["dep:aphid-colony", "dep:aphid-nostr"]
+# Speech to text, so a client that can carry audio can hand the agent words.
+# Off by default, and by some distance the heaviest thing here: it pulls an
+# ONNX runtime, and the model it reads is 670 MB on disk.
+#
+# It does not need `telegram`. The daemon is what fetches and holds the model,
+# so the bridge is only the first client to ask it anything.
+voice = [
+    "dep:transcribe-rs",
+    "dep:symphonia",
+    "dep:opus-decoder",
+    "dep:ogg",
+    "dep:rubato",
+    "dep:sha2",
+    "dep:futures-util",
+    "dep:reqwest",
+]
 # The graphical companion. It is a gateway client with a window, so it needs
 # the window library and the component library the coding interface is drawn
 # with — including that interface's theme, which is why it turns on the coding
@@ -64,6 +80,13 @@ image = { workspace = true, optional = true }
 ratatui.workspace = true
 ratatui-textarea.workspace = true
 reqwest = { workspace = true, features = ["json"], optional = true }
+futures-util = { workspace = true, optional = true }
+ogg = { workspace = true, optional = true }
+opus-decoder = { workspace = true, optional = true }
+rubato = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+symphonia = { workspace = true, optional = true }
+transcribe-rs = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -88,3 +111,8 @@ workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+# Only builds with ears on, since it is a transcriber and nothing else.
+[[example]]
+name = "voice"
+required-features = ["voice"]

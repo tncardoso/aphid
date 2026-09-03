@@ -16,7 +16,7 @@ use std::time::Duration;
 use aphid_alate::config::Telegram;
 use aphid_alate::gateway::wire::{Envelope, Frame, Request, Risk};
 use aphid_alate::gateway::{Event, Server};
-use aphid_alate::telegram::{self, Api, Bridge, Call};
+use aphid_alate::telegram::{self, Api, Bridge, Call, Fetch};
 use aphid_code::plugins::permissions::{Decision, Risk as PermissionRisk};
 use aphid_core::{StopReason, Usage};
 use common::Temp;
@@ -37,6 +37,9 @@ struct Fake {
     calls: Mutex<Vec<(String, Value)>>,
     /// The next message id to give out, like a real chat would.
     messages: AtomicI64,
+    /// What a download hands back, and the paths that were asked for.
+    file: Mutex<Result<Vec<u8>, String>>,
+    fetched: Mutex<Vec<String>>,
 }
 
 impl Fake {
@@ -47,9 +50,16 @@ impl Fake {
                 updates: tokio::sync::Mutex::new(updates),
                 calls: Mutex::new(Vec::new()),
                 messages: AtomicI64::new(1),
+                file: Mutex::new(Ok(b"pretend this is Opus".to_vec())),
+                fetched: Mutex::new(Vec::new()),
             }),
             feed,
         )
+    }
+
+    /// Every file path that was asked for, in order.
+    fn fetched(&self) -> Vec<String> {
+        self.fetched.lock().expect("lock").clone()
     }
 
     /// Every call of one method, in order.
@@ -86,8 +96,14 @@ impl Api for Fake {
         self.calls
             .lock()
             .expect("lock")
-            .push((method.to_owned(), body));
+            .push((method.to_owned(), body.clone()));
         Box::pin(async move {
+            // Where a file is, in the shape Telegram answers it: a path under
+            // the file root, which the download then asks for.
+            if method == "getFile" {
+                let id = body["file_id"].as_str().unwrap_or("unknown").to_owned();
+                return Ok(json!({ "file_path": format!("voice/{id}.oga"), "file_size": 8_192 }));
+            }
             if method != "getUpdates" {
                 let message_id = self.messages.fetch_add(1, Ordering::Relaxed);
                 return Ok(json!({ "message_id": message_id }));
@@ -100,10 +116,64 @@ impl Api for Fake {
             }
         })
     }
+
+    fn fetch(&self, path: &str) -> Fetch<'_> {
+        self.fetched.lock().expect("lock").push(path.to_owned());
+        let answer = self.file.lock().expect("lock").clone();
+        Box::pin(async move { answer })
+    }
+}
+
+/// A transcriber that says what a test told it to, and remembers it was asked.
+#[cfg(feature = "voice")]
+struct Heard {
+    text: Result<String, String>,
+    asked: Mutex<u32>,
+}
+
+#[cfg(feature = "voice")]
+impl Heard {
+    fn saying(text: &str) -> Arc<Self> {
+        Arc::new(Self {
+            text: Ok(text.to_owned()),
+            asked: Mutex::new(0),
+        })
+    }
+
+    fn failing(why: &str) -> Arc<Self> {
+        Arc::new(Self {
+            text: Err(why.to_owned()),
+            asked: Mutex::new(0),
+        })
+    }
+
+    fn asked(&self) -> u32 {
+        *self.asked.lock().expect("lock")
+    }
+}
+
+#[cfg(feature = "voice")]
+impl aphid_alate::voice::Transcribe for Heard {
+    fn transcribe(&self, _audio: Vec<u8>) -> aphid_alate::voice::Transcription<'_> {
+        *self.asked.lock().expect("lock") += 1;
+        let answer = self.text.clone();
+        Box::pin(async move { answer })
+    }
 }
 
 fn message(id: i64, chat: i64, text: &str) -> Value {
     json!({ "update_id": id, "message": { "chat": { "id": chat }, "text": text } })
+}
+
+/// A voice message, which is what the microphone button sends.
+fn recording(id: i64, chat: i64, file: &str) -> Value {
+    json!({
+        "update_id": id,
+        "message": {
+            "chat": { "id": chat },
+            "voice": { "file_id": file, "duration": 3, "mime_type": "audio/ogg" },
+        },
+    })
 }
 
 fn allowed() -> Telegram {
@@ -125,6 +195,26 @@ fn bridge(
     UnboundedReceiver<Event>,
     tokio::task::JoinHandle<()>,
 ) {
+    listening(
+        temp,
+        config,
+        api,
+        #[cfg(feature = "voice")]
+        None,
+    )
+}
+
+/// The same, with a transcriber on it.
+fn listening(
+    temp: &Temp,
+    config: Telegram,
+    api: Arc<Fake>,
+    #[cfg(feature = "voice")] voice: Option<aphid_alate::voice::TranscribeFn>,
+) -> (
+    Server,
+    UnboundedReceiver<Event>,
+    tokio::task::JoinHandle<()>,
+) {
     let socket = temp.path("gateway.sock");
     let (server, events) = Server::bind(&socket, None).expect("bind");
     let running = telegram::spawn(Bridge {
@@ -132,6 +222,8 @@ fn bridge(
         config,
         api,
         notices: server.publisher(),
+        #[cfg(feature = "voice")]
+        voice,
     });
     (server, events, running)
 }
@@ -702,6 +794,244 @@ async fn a_failure_is_reported_one_time() {
         api.calls("sendMessage").len(),
         1,
         "the same failure is not said twice: {:?}",
+        api.calls("sendMessage")
+    );
+
+    bridge.abort();
+}
+
+/// A voice message is fetched, read, echoed, and asked as a prompt.
+#[cfg(feature = "voice")]
+#[tokio::test]
+async fn a_recording_becomes_an_echo_and_a_prompt() {
+    let temp = Temp::new("telegram-recording");
+    let (api, feed) = Fake::new();
+    let heard = Heard::saying("boa tarde");
+    let (server, mut events, bridge) =
+        listening(&temp, allowed(), api.clone(), Some(heard.clone()));
+    feed.send(json!([recording(1, MINE, "file-1")]))
+        .expect("feed");
+
+    let Event::Opened { connection } = event(&mut events).await else {
+        panic!("the first event is the chat attaching");
+    };
+    greet(&server, connection);
+
+    // The words the agent is given are the words that were said, and they go
+    // down the socket as an ordinary prompt: the wire knows nothing of audio.
+    assert_eq!(
+        event(&mut events).await,
+        Event::Asked {
+            connection,
+            session: Some(SESSION.to_owned()),
+            request: Request::Prompt {
+                text: "boa tarde".to_owned()
+            },
+        }
+    );
+
+    // Telegram was asked where the file is, and then for the file itself.
+    let asked = api.nth("getFile", 0).await;
+    assert_eq!(asked["file_id"], json!("file-1"));
+    assert_eq!(api.fetched(), vec!["voice/file-1.oga".to_owned()]);
+    assert_eq!(heard.asked(), 1);
+
+    // And the chat saw what was heard before it saw any answer, because
+    // recognition is wrong often enough that it has to be visible.
+    let echoed = api.calls("sendMessage");
+    assert!(
+        echoed.iter().any(|body| text(body) == "🎤 boa tarde"),
+        "{echoed:?}"
+    );
+
+    bridge.abort();
+}
+
+/// The poll loop keeps serving while a recording is being read.
+#[cfg(feature = "voice")]
+#[tokio::test]
+async fn a_recording_does_not_stop_the_other_chats() {
+    let temp = Temp::new("telegram-not-blocked");
+    let (api, feed) = Fake::new();
+    // A transcriber that never answers, which is the worst a slow one can be.
+    struct Never;
+    impl aphid_alate::voice::Transcribe for Never {
+        fn transcribe(&self, _audio: Vec<u8>) -> aphid_alate::voice::Transcription<'_> {
+            Box::pin(std::future::pending())
+        }
+    }
+    let (server, mut events, bridge) =
+        listening(&temp, allowed(), api.clone(), Some(Arc::new(Never)));
+
+    feed.send(json!([recording(1, MINE, "file-1")]))
+        .expect("feed");
+    let Event::Opened { connection } = event(&mut events).await else {
+        panic!("the first event is the chat attaching");
+    };
+    greet(&server, connection);
+
+    // The update after it is served, though the one before it never finishes.
+    feed.send(json!([message(2, MINE, "hello")])).expect("feed");
+    assert_eq!(
+        event(&mut events).await,
+        Event::Asked {
+            connection,
+            session: Some(SESSION.to_owned()),
+            request: Request::Prompt {
+                text: "hello".to_owned()
+            },
+        }
+    );
+
+    bridge.abort();
+}
+
+/// A recording with no speech in it does not cost the agent a turn.
+#[cfg(feature = "voice")]
+#[tokio::test]
+async fn a_silent_recording_is_said_to_be_silent() {
+    let temp = Temp::new("telegram-silence");
+    let (api, feed) = Fake::new();
+    let heard = Heard::saying("   ");
+    let (server, mut events, bridge) = listening(&temp, allowed(), api.clone(), Some(heard));
+    feed.send(json!([recording(1, MINE, "file-1")]))
+        .expect("feed");
+
+    let Event::Opened { connection } = event(&mut events).await else {
+        panic!("the first event is the chat attaching");
+    };
+    greet(&server, connection);
+
+    let said = text(&api.nth("sendMessage", 0).await);
+    assert!(said.contains("could not make out"), "{said}");
+
+    // Nothing was asked of the agent, and the chat is still attached.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), events.recv())
+            .await
+            .is_err(),
+        "a silent recording must not become a prompt"
+    );
+
+    bridge.abort();
+}
+
+/// A transcriber that fails says so in the chat and the bridge carries on.
+#[cfg(feature = "voice")]
+#[tokio::test]
+async fn a_recording_that_cannot_be_read_is_a_sentence() {
+    let temp = Temp::new("telegram-unreadable");
+    let (api, feed) = Fake::new();
+    let heard = Heard::failing("the file is not audio this build can read");
+    let (server, mut events, bridge) = listening(&temp, allowed(), api.clone(), Some(heard));
+    feed.send(json!([recording(1, MINE, "file-1")]))
+        .expect("feed");
+
+    let Event::Opened { connection } = event(&mut events).await else {
+        panic!("the first event is the chat attaching");
+    };
+    greet(&server, connection);
+
+    let said = text(&api.nth("sendMessage", 0).await);
+    assert!(said.contains("not audio"), "{said}");
+
+    // And the next message is still served.
+    feed.send(json!([message(2, MINE, "hello")])).expect("feed");
+    assert_eq!(
+        event(&mut events).await,
+        Event::Asked {
+            connection,
+            session: Some(SESSION.to_owned()),
+            request: Request::Prompt {
+                text: "hello".to_owned()
+            },
+        }
+    );
+
+    bridge.abort();
+}
+
+/// A download that fails is a sentence too, and the file is never read.
+#[cfg(feature = "voice")]
+#[tokio::test]
+async fn a_file_that_cannot_be_fetched_is_a_sentence() {
+    let temp = Temp::new("telegram-unfetchable");
+    let (api, feed) = Fake::new();
+    *api.file.lock().expect("lock") = Err("the file stopped coming".to_owned());
+    let heard = Heard::saying("never said");
+    let (server, mut events, bridge) =
+        listening(&temp, allowed(), api.clone(), Some(heard.clone()));
+    feed.send(json!([recording(1, MINE, "file-1")]))
+        .expect("feed");
+
+    let Event::Opened { connection } = event(&mut events).await else {
+        panic!("the first event is the chat attaching");
+    };
+    greet(&server, connection);
+
+    let said = text(&api.nth("sendMessage", 0).await);
+    assert!(said.contains("stopped coming"), "{said}");
+    assert_eq!(heard.asked(), 0, "nothing to read, so nothing was read");
+
+    bridge.abort();
+}
+
+/// An alate with no transcriber says so, and says it one time.
+#[tokio::test]
+async fn a_recording_with_nothing_to_read_it_is_refused_once() {
+    let temp = Temp::new("telegram-deaf");
+    let (api, feed) = Fake::new();
+    let (_server, _events, bridge) = bridge(&temp, allowed(), api.clone());
+
+    feed.send(json!([recording(1, MINE, "file-1")]))
+        .expect("feed");
+    let said = text(&api.nth("sendMessage", 0).await);
+    assert!(said.contains("does not listen"), "{said}");
+    assert!(said.contains("voice"), "{said}");
+
+    // A second recording says nothing more: a chat that only sends audio must
+    // not get the same sentence for every one of them.
+    feed.send(json!([recording(2, MINE, "file-2")]))
+        .expect("feed");
+    feed.send(json!([message(3, MINE, "hello")])).expect("feed");
+    // The text message opens a connection, which is how this waits for the
+    // second recording to have been handled and passed over.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while api.calls("sendMessage").len() > 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("no second refusal within five seconds");
+    assert_eq!(api.calls("sendMessage").len(), 1);
+    // And nothing was fetched, because there was nothing to read it with.
+    assert!(api.fetched().is_empty());
+
+    bridge.abort();
+}
+
+/// A file that is not audio is left alone, exactly as a photo is.
+#[tokio::test]
+async fn a_file_that_is_not_audio_is_ignored() {
+    let temp = Temp::new("telegram-not-audio");
+    let (api, feed) = Fake::new();
+    let (_server, _events, bridge) = bridge(&temp, allowed(), api.clone());
+
+    feed.send(json!([{
+        "update_id": 1,
+        "message": {
+            "chat": { "id": MINE },
+            "document": { "file_id": "z", "mime_type": "application/zip" },
+        },
+    }]))
+    .expect("feed");
+    feed.send(json!([message(2, MINE, "hello")])).expect("feed");
+
+    // The text after it is served, and the archive drew no sentence at all.
+    api.nth("getUpdates", 2).await;
+    assert!(
+        api.calls("sendMessage").is_empty(),
+        "{:?}",
         api.calls("sendMessage")
     );
 

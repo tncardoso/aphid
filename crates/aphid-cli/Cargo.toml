@@ -26,6 +26,7 @@ default = ["gui"]
 # distinction nobody asked for.
 gui = ["aphid-code/gui", "aphid-alate/gui"]
 telegram = ["aphid-alate/telegram"]
+voice = ["aphid-alate/voice"]
 colony = ["aphid-alate/colony"]
 
 [dependencies]

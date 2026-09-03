@@ -25,6 +25,9 @@ pub const API: &str = "https://api.telegram.org";
 /// One call in flight.
 pub type Call<'a> = Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'a>>;
 
+/// One download in flight.
+pub type Fetch<'a> = Pin<Box<dyn Future<Output = Result<Vec<u8>, String>> + Send + 'a>>;
+
 /// What the bridge needs of Telegram.
 pub trait Api: Send + Sync {
     /// Call `method`, and give back the `result` it answered with.
@@ -32,6 +35,14 @@ pub trait Api: Send + Sync {
     /// The method is `&'static str` because every one of them is a literal, and
     /// that saves the future an owned copy.
     fn call(&self, method: &'static str, body: Value) -> Call<'_>;
+
+    /// Get one file, by the `file_path` that `getFile` answered with.
+    ///
+    /// This is the one thing the Bot API does not do the way everything else
+    /// does: a file is a `GET` of `/file/bot<token>/<path>` and comes back as
+    /// bytes rather than as JSON. It is here, and not on a client of its own,
+    /// so that the seam a test replaces stays one thing.
+    fn fetch(&self, path: &str) -> Fetch<'_>;
 }
 
 /// A shared API, held by the poll loop and by every chat.
@@ -43,6 +54,8 @@ pub struct Live {
     client: reqwest::Client,
     /// `<api>/bot<token>`. Held made up, so the token is written once.
     base: String,
+    /// `<api>/file/bot<token>`, which is where files are and methods are not.
+    files: String,
 }
 
 impl Live {
@@ -60,9 +73,11 @@ impl Live {
             .timeout(poll + Duration::from_secs(10))
             .build()
             .map_err(|error| format!("could not build an HTTP client: {error}"))?;
+        let api = api.trim_end_matches('/');
         Ok(Self {
             client,
-            base: format!("{}/bot{token}", api.trim_end_matches('/')),
+            base: format!("{api}/bot{token}"),
+            files: format!("{api}/file/bot{token}"),
         })
     }
 }
@@ -93,6 +108,28 @@ impl Api for Live {
                 return Err(format!("{method} was refused: {why}"));
             }
             Ok(answer.get("result").cloned().unwrap_or(Value::Null))
+        })
+    }
+
+    fn fetch(&self, path: &str) -> Fetch<'_> {
+        let url = format!("{}/{path}", self.files);
+        Box::pin(async move {
+            let response = self
+                .client
+                .get(url)
+                .send()
+                .await
+                // Without the URL, as above: this one carries the token too.
+                .and_then(reqwest::Response::error_for_status)
+                .map_err(|error| {
+                    format!("the file could not be fetched: {}", error.without_url())
+                })?;
+
+            response
+                .bytes()
+                .await
+                .map(|bytes| bytes.to_vec())
+                .map_err(|error| format!("the file stopped coming: {}", error.without_url()))
         })
     }
 }

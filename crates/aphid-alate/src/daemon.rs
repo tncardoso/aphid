@@ -307,8 +307,23 @@ pub async fn run(options: Options) -> Result<(), String> {
     // A second client on the same socket, when one is asked for. It is started
     // here because here is where the socket is bound; the loop below neither
     // knows about it nor waits on it.
+    // The transcriber first: the bridge is only its first caller, and the
+    // model behind it is fetched whether a bot is configured or not.
+    #[cfg(feature = "voice")]
+    let (voice, voice_tasks) = transcriber(&config, &alate.server);
+    // Nothing asks it anything in a build with no client that carries audio.
+    // The model is still fetched and held, so turning the bridge on is the
+    // only step left.
+    #[cfg(all(feature = "voice", not(feature = "telegram")))]
+    let _ = &voice;
     #[cfg(feature = "telegram")]
-    let telegram = telegram_bridge(&config, &socket, &alate.server);
+    let telegram = telegram_bridge(
+        &config,
+        &socket,
+        &alate.server,
+        #[cfg(feature = "voice")]
+        voice,
+    );
     #[cfg(feature = "colony")]
     let colony_bridge = colony_bridge(
         &config,
@@ -324,6 +339,16 @@ pub async fn run(options: Options) -> Result<(), String> {
         alate.server.send(Envelope::daemon(Frame::Notice {
             text: "gateway.colony is set, but this build has no colony in it; \
                    build with `--features colony`"
+                .to_owned(),
+        }));
+    }
+
+    #[cfg(not(feature = "voice"))]
+    if config.voice.is_some() {
+        tracing::warn!("voice configured but this build has no voice feature");
+        alate.server.send(Envelope::daemon(Frame::Notice {
+            text: "voice is set, but this build does not listen; \
+                   build with `--features voice`"
                 .to_owned(),
         }));
     }
@@ -347,6 +372,10 @@ pub async fn run(options: Options) -> Result<(), String> {
     #[cfg(feature = "colony")]
     if let Some(colony) = colony_bridge {
         colony.abort();
+    }
+    #[cfg(feature = "voice")]
+    for task in voice_tasks {
+        task.abort();
     }
     alate.sessions.shutdown();
     alate
@@ -750,6 +779,7 @@ fn telegram_bridge(
     config: &Config,
     socket: &std::path::Path,
     server: &Server,
+    #[cfg(feature = "voice")] voice: Option<crate::voice::TranscribeFn>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let wanted = config.gateway.telegram.as_ref()?;
     let notices = server.publisher();
@@ -811,7 +841,102 @@ fn telegram_bridge(
         config: wanted.clone(),
         api: Arc::new(api),
         notices: server.publisher(),
+        #[cfg(feature = "voice")]
+        voice,
     }))
+}
+
+/// Start the transcriber, when the configuration asks for one.
+///
+/// The model is looked for on the disk and fetched in the background when it
+/// is not there. Never on the first recording: 670 MB is minutes, and a chat
+/// that sends a voice message must not sit there watching an alate that looks
+/// broken. Everything about it is reported and shrugged off, in the manner of
+/// [`telegram_bridge`] — an alate with no transcriber is an alate that does
+/// not listen, and not one that fails to wake up.
+#[cfg(feature = "voice")]
+fn transcriber(
+    config: &Config,
+    server: &Server,
+) -> (
+    Option<crate::voice::TranscribeFn>,
+    Vec<tokio::task::JoinHandle<()>>,
+) {
+    let Some(wanted) = config.voice.as_ref() else {
+        return (None, Vec::new());
+    };
+    let notices = server.publisher();
+
+    let longest = match wanted.limit() {
+        Ok(longest) => longest,
+        Err(why) => {
+            tracing::error!(%why, "voice: bad length");
+            notices.send(Frame::Notice {
+                text: format!("voice: {why}"),
+            });
+            return (None, Vec::new());
+        }
+    };
+    let patience = match wanted.patience() {
+        Ok(patience) => patience,
+        Err(why) => {
+            tracing::error!(%why, "voice: bad idle time");
+            notices.send(Frame::Notice {
+                text: format!("voice: {why}"),
+            });
+            return (None, Vec::new());
+        }
+    };
+
+    let files = crate::voice::Files::new(wanted.directory());
+    let mut tasks = Vec::new();
+
+    match (files.state(), wanted.download) {
+        (crate::voice::State::Ready, _) => {
+            tracing::info!(directory = %files.directory().display(), "voice: model found");
+        }
+        (_, true) => {
+            let megabytes = crate::voice::Files::size() / 1_000_000;
+            let directory = files.directory().display().to_string();
+            tracing::info!(directory, megabytes, "voice: fetching model");
+            notices.send(Frame::Notice {
+                text: format!(
+                    "voice: fetching the transcription model, {megabytes} MB, into {directory}.                      This happens once, and the alate works as usual meanwhile."
+                ),
+            });
+            let getting = files.clone();
+            tasks.push(tokio::spawn(async move {
+                match getting.fetch().await {
+                    Ok(()) => {
+                        tracing::info!("voice: model ready");
+                        notices.send(Frame::Notice {
+                            text: "voice: the transcription model is ready".to_owned(),
+                        });
+                    }
+                    Err(why) => {
+                        tracing::error!(%why, "voice: model not fetched");
+                        notices.send(Frame::Notice {
+                            text: format!("voice: {why}"),
+                        });
+                    }
+                }
+            }));
+        }
+        (_, false) => {
+            tracing::warn!(directory = %files.directory().display(), "voice: no model, and download is off");
+            notices.send(Frame::Notice {
+                text: format!(
+                    "voice: there is no model in {} and voice.download is false,                      so recordings cannot be read",
+                    files.directory().display()
+                ),
+            });
+        }
+    }
+
+    let voice = crate::voice::Voice::new(files, longest);
+    tasks.push(voice.keep(patience));
+    tracing::info!("voice started");
+    (Some(Arc::new(voice) as crate::voice::TranscribeFn), tasks)
 }
 
 /// The API key for a model, from the variable it names.

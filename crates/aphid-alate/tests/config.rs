@@ -6,7 +6,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use aphid_alate::config::{
-    Config, Heartbeat, MemoryConfig, Permissions, TOKEN_ENV, Telegram, Thinking, duration,
+    Config, Heartbeat, MODEL, MemoryConfig, Permissions, TOKEN_ENV, Telegram, Thinking, Voice,
+    duration,
 };
 use common::Temp;
 
@@ -191,4 +192,100 @@ fn a_colony_retry_that_is_not_a_length_of_time_is_a_sentence() {
         .interval()
         .expect_err("a wait of no length is a busy loop");
     assert!(error.contains("gateway.colony.retry"), "{error}");
+}
+
+#[test]
+fn an_alate_does_not_listen_until_it_is_written_down() {
+    let temp = Temp::new("config");
+    let path = temp.write("alate.json", r#"{"model": "deepseek-chat"}"#);
+    assert_eq!(Config::load(&path).expect("load").voice, None);
+}
+
+#[test]
+fn an_empty_voice_block_is_the_defaults() {
+    let temp = Temp::new("config");
+    let path = temp.write("alate.json", r#"{"voice": {}}"#);
+    let voice = Config::load(&path).expect("load").voice.expect("a block");
+
+    assert_eq!(voice, Voice::default());
+    assert!(voice.download);
+    // No ceiling by default: the 20 MB a bot can fetch is limit enough, and a
+    // long recording is cut into pieces rather than refused.
+    assert_eq!(voice.limit().expect("a length"), None);
+    assert_eq!(
+        voice.patience().expect("a length"),
+        Some(Duration::from_secs(600))
+    );
+}
+
+#[test]
+fn a_voice_block_keeps_what_was_written_for_it() {
+    let temp = Temp::new("config");
+    let path = temp.write(
+        "alate.json",
+        r#"{"voice": {"model": "/models/parakeet", "download": false,
+             "longest": "10m", "idle": "off"}}"#,
+    );
+    let voice = Config::load(&path).expect("load").voice.expect("a block");
+
+    assert_eq!(
+        voice.directory(),
+        std::path::PathBuf::from("/models/parakeet")
+    );
+    assert!(!voice.download);
+    assert_eq!(
+        voice.limit().expect("a length"),
+        Some(Duration::from_secs(600))
+    );
+    // `off` keeps the model in memory for as long as the daemon runs.
+    assert_eq!(voice.patience().expect("a length"), None);
+}
+
+#[test]
+fn a_model_with_no_path_lands_in_the_machine_s_cache() {
+    // A model is an artifact of the machine and not the state of one instance,
+    // so three alates share one copy instead of keeping three.
+    let voice = Voice::default();
+    let directory = voice.directory();
+    assert!(
+        directory.ends_with(std::path::Path::new("aphid/models").join(MODEL)),
+        "{}",
+        directory.display()
+    );
+    assert!(directory.is_absolute() || directory.starts_with(".cache"));
+}
+
+#[test]
+fn a_voice_length_that_is_not_one_is_a_sentence() {
+    let voice = Voice {
+        longest: "soon".to_owned(),
+        ..Voice::default()
+    };
+    assert!(voice.limit().is_err());
+
+    let voice = Voice {
+        idle: "a while".to_owned(),
+        ..Voice::default()
+    };
+    assert!(voice.patience().is_err());
+}
+
+#[test]
+fn a_voice_block_round_trips() {
+    let config = Config {
+        voice: Some(Voice {
+            model: Some(std::path::PathBuf::from("/models/parakeet")),
+            download: false,
+            longest: "30m".to_owned(),
+            idle: "5m".to_owned(),
+        }),
+        ..Config::default()
+    };
+
+    let temp = Temp::new("config");
+    let path = temp.write(
+        "alate.json",
+        &serde_json::to_string_pretty(&config).expect("write"),
+    );
+    assert_eq!(Config::load(&path).expect("load"), config);
 }

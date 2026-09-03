@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- **The Telegram bot listens.** Send it a voice message and the alate makes
+  text of it, shows you the text, and gives it to the agent as if you had typed
+  it. Music files, round videos and files that say they are audio work as well.
+  The speech is read on the machine of the alate and goes nowhere else: the
+  model is Parakeet TDT 0.6b v3, it reads 25 languages, and the alate gets it
+  one time into the cache of the machine. This is behind a build feature,
+  `voice`, and a `voice` block in `alate.json`. Refer to the Telegram page.
+
 ### Changed
 
 - The graphical interface is now a build feature, `gui`, on by default. A

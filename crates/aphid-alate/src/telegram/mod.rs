@@ -29,6 +29,7 @@
 
 pub mod api;
 mod chat;
+mod voice;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -38,7 +39,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 
-pub use api::{API, Api, ApiFn, Call, Live};
+pub use api::{API, Api, ApiFn, Call, Fetch, Live};
 
 use crate::config::Telegram;
 use crate::gateway::Publisher;
@@ -66,6 +67,10 @@ pub struct Bridge {
     /// Where a problem with Telegram is reported: the terminals, and
     /// `alate.log`. A chat cannot be told that Telegram is unreachable.
     pub notices: Publisher,
+    /// What turns a recording into words. Absent means this alate does not
+    /// listen, and a chat that sends audio is told so.
+    #[cfg(feature = "voice")]
+    pub voice: Option<crate::voice::TranscribeFn>,
 }
 
 /// What a chat task is given, and what the poll loop keeps a copy of.
@@ -74,6 +79,8 @@ struct Shared {
     api: ApiFn,
     socket: PathBuf,
     tools: bool,
+    #[cfg(feature = "voice")]
+    voice: Option<crate::voice::TranscribeFn>,
 }
 
 /// Start the bridge. It runs until the task is dropped or aborted.
@@ -89,6 +96,8 @@ async fn run(bridge: Bridge) {
         config,
         api,
         notices,
+        #[cfg(feature = "voice")]
+        voice,
     } = bridge;
 
     let seconds = match config.interval() {
@@ -106,6 +115,8 @@ async fn run(bridge: Bridge) {
         api: api.clone(),
         socket,
         tools: config.tools,
+        #[cfg(feature = "voice")]
+        voice,
     };
 
     let mut state = State::default();
@@ -174,6 +185,10 @@ struct State {
     /// The chats already told they are not allowed. Told once, so a stranger
     /// cannot make the bot answer them for ever.
     refused: HashSet<i64>,
+    /// The chats already told this alate does not listen. Told once, for the
+    /// same reason: a chat that only sends recordings must not get the same
+    /// sentence for every one of them.
+    deafened: HashSet<i64>,
 }
 
 /// One update.
@@ -188,18 +203,25 @@ async fn handle(
         let Some(chat) = message.pointer("/chat/id").and_then(Value::as_i64) else {
             return;
         };
-        // A photo, a sticker, somebody joining: nothing an agent can read.
         let text = message
             .get("text")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .trim();
-        if text.is_empty() {
+        let recording = voice::recording(message);
+
+        // A photo, a sticker, somebody joining: nothing an agent can read.
+        if text.is_empty() && recording.is_none() {
             return;
         }
 
         if !config.chats.contains(&chat) {
             refuse(chat, state, shared).await;
+            return;
+        }
+
+        if let Some(file) = recording {
+            heard(chat, file, state, shared, notices).await;
             return;
         }
 
@@ -286,6 +308,21 @@ async fn answered(
 
 /// Send a request to a chat's connection, opening one if it has none.
 async fn to(chat: i64, request: Request, state: &mut State, shared: &Shared, notices: &Publisher) {
+    if let Some(sender) = connection(chat, state, shared, notices).await {
+        let _ = sender.send(request);
+    }
+}
+
+/// A chat's connection, opening one if it has none.
+///
+/// Split out of [`to`] because a recording is read by a task of its own, which
+/// needs the sender before it starts and cannot reach [`State`] once it has.
+async fn connection(
+    chat: i64,
+    state: &mut State,
+    shared: &Shared,
+    notices: &Publisher,
+) -> Option<UnboundedSender<Request>> {
     // A connection whose task has ended leaves a closed sender behind. Attach
     // again rather than dropping what was said into it.
     if state
@@ -296,12 +333,12 @@ async fn to(chat: i64, request: Request, state: &mut State, shared: &Shared, not
         state.chats.remove(&chat);
     }
 
-    let sender = match state.chats.get(&chat) {
-        Some(sender) => sender.clone(),
+    match state.chats.get(&chat) {
+        Some(sender) => Some(sender.clone()),
         None => match chat::open(chat, shared.clone()).await {
             Ok(sender) => {
                 state.chats.insert(chat, sender.clone());
-                sender
+                Some(sender)
             }
             Err(error) => {
                 tracing::error!(chat, %error, "telegram: chat could not attach");
@@ -309,12 +346,62 @@ async fn to(chat: i64, request: Request, state: &mut State, shared: &Shared, not
                     text: format!("telegram: chat {chat} could not attach: {error}"),
                 });
                 say(shared, chat, "the agent cannot be reached").await;
-                return;
+                None
             }
         },
-    };
+    }
+}
 
-    let _ = sender.send(request);
+/// A chat sent a recording.
+///
+/// The work is a task of its own and not a step of the poll loop: fetching and
+/// reading take seconds, and the loop is what serves every other chat. The
+/// price is that order within one chat is no longer promised.
+async fn heard(chat: i64, file: String, state: &mut State, shared: &Shared, notices: &Publisher) {
+    if !listens(shared) {
+        deafen(chat, state, shared).await;
+        return;
+    }
+
+    let Some(sender) = connection(chat, state, shared, notices).await else {
+        return;
+    };
+    tracing::info!(chat, "telegram: recording");
+
+    #[cfg(feature = "voice")]
+    tokio::spawn(voice::read(chat, file, shared.clone(), sender));
+    #[cfg(not(feature = "voice"))]
+    let _ = (file, sender);
+}
+
+/// Whether this alate has anything to read a recording with.
+fn listens(shared: &Shared) -> bool {
+    #[cfg(feature = "voice")]
+    {
+        shared.voice.is_some()
+    }
+    #[cfg(not(feature = "voice"))]
+    {
+        let _ = shared;
+        false
+    }
+}
+
+/// Tell a chat this alate does not listen, once, and name the block that would
+/// make it.
+async fn deafen(chat: i64, state: &mut State, shared: &Shared) {
+    if !state.deafened.insert(chat) {
+        return;
+    }
+    tracing::warn!(chat, "telegram: recording, and no transcriber");
+    say(
+        shared,
+        chat,
+        "This alate does not listen to recordings.\n\
+         To make it listen, put a \"voice\" block in alate.json, \
+         and start the alate again from a build that has the voice feature.",
+    )
+    .await;
 }
 
 /// Tell a chat it is not on the list, once, and name the id to add.
