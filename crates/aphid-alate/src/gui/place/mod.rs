@@ -62,6 +62,11 @@ pub fn place(window: &Window, bounds: Bounds<Pixels>) {
 ///
 /// GPUI works in logical pixels and X11 in device ones, so a window placed by
 /// its logical origin on a display scaled by two lands half way across it.
+///
+/// Only X11 moves a window it has already opened, so only X11 needs this; the
+/// tests are kept on every platform because the arithmetic is the same one
+/// everywhere and a macOS run should still catch a mistake in it.
+#[cfg(any(target_os = "linux", target_os = "freebsd", test))]
 #[must_use]
 fn origin_of(bounds: Bounds<Pixels>, scale: f32) -> (i32, i32) {
     let scale = if scale > 0. { scale } else { 1. };
