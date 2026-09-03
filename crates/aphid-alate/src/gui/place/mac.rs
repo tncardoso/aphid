@@ -16,7 +16,10 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 /// Keep the window over the others, on every space.
 pub fn float(window: &Window) {
-    let Ok(handle) = window.window_handle() else {
+    // `Window` has a `window_handle` of its own, returning GPUI's own handle
+    // type, so the trait's method is named outright rather than called on the
+    // window: the inherent one wins otherwise.
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
         return;
     };
     let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
