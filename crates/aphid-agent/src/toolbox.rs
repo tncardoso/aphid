@@ -9,6 +9,7 @@
 //! loop reads the declarations afresh each turn, so a tool added between turns
 //! is offered on the next request.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -30,8 +31,12 @@ pub struct Toolbox {
 #[derive(Default)]
 struct Inner {
     tools: Tools,
+    /// Tools that exist only in one agent scope. An alate shares a composition
+    /// between conversations, but a capability offered by one gateway must not
+    /// leak into another conversation.
+    scoped: HashMap<String, Tools>,
     /// Which fiber contributed each name, so unloading removes exactly its own.
-    owners: Vec<(Uid, String)>,
+    owners: Vec<(Uid, String, Option<String>)>,
 }
 
 impl Toolbox {
@@ -50,7 +55,11 @@ impl Toolbox {
     pub fn push(&self, handler: Arc<dyn ToolHandler>) {
         if let Ok(mut inner) = self.inner.write() {
             let name = handler.declaration().name.as_str();
-            if inner.owners.iter().any(|(_, claimed)| claimed == name) {
+            if inner
+                .owners
+                .iter()
+                .any(|(_, claimed, scope)| scope.is_none() && claimed == name)
+            {
                 return;
             }
             inner.tools.push(handler);
@@ -66,14 +75,14 @@ impl Toolbox {
         let name = handler.declaration().name.to_string();
         if let Ok(mut inner) = self.inner.write() {
             inner.tools.push(handler);
-            inner.owners.push((owner, name.clone()));
+            inner.owners.push((owner, name.clone(), None));
         }
         self.version.fetch_add(1, Ordering::Release);
 
         // Holds the box rather than a borrow: the inverse has to work after
         // the component that asked for it is gone.
         let toolbox = Arc::clone(self);
-        Disposer::sync(move || toolbox.withdraw_tool(owner, &name))
+        Disposer::sync(move || toolbox.withdraw_tool(owner, &name, None))
     }
 
     /// Contribute a tool for as long as a component is loaded.
@@ -86,15 +95,46 @@ impl Toolbox {
         ctx.effect(move || toolbox.register(owner, handler));
     }
 
-    /// Remove one tool a fiber contributed.
-    fn withdraw_tool(&self, owner: Uid, name: &str) {
+    /// Contribute a tool only to agents whose scope equals `scope`.
+    pub fn contribute_scoped(
+        self: &Arc<Self>,
+        ctx: &Context,
+        scope: impl Into<String>,
+        handler: Arc<dyn ToolHandler>,
+    ) {
+        let scope = scope.into();
+        let name = handler.declaration().name.to_string();
         if let Ok(mut inner) = self.inner.write() {
-            let before = inner.owners.len();
+            inner.scoped.entry(scope.clone()).or_default().push(handler);
             inner
                 .owners
-                .retain(|(uid, tool)| !(*uid == owner && tool == name));
+                .push((ctx.uid(), name.clone(), Some(scope.clone())));
+        }
+        self.version.fetch_add(1, Ordering::Release);
+
+        let toolbox = Arc::clone(self);
+        let owner = ctx.uid();
+        ctx.effect(move || {
+            Disposer::sync(move || toolbox.withdraw_tool(owner, &name, Some(&scope)))
+        });
+    }
+
+    /// Remove one tool a fiber contributed.
+    fn withdraw_tool(&self, owner: Uid, name: &str, scope: Option<&str>) {
+        if let Ok(mut inner) = self.inner.write() {
+            let before = inner.owners.len();
+            inner.owners.retain(|(uid, tool, claimed_scope)| {
+                !(*uid == owner && tool == name && claimed_scope.as_deref() == scope)
+            });
             if inner.owners.len() != before {
-                inner.tools.remove(name);
+                match scope {
+                    Some(scope) => {
+                        if let Some(tools) = inner.scoped.get_mut(scope) {
+                            tools.remove(name);
+                        }
+                    }
+                    None => inner.tools.remove(name),
+                }
             }
         }
         self.version.fetch_add(1, Ordering::Release);
@@ -103,15 +143,22 @@ impl Toolbox {
     /// Everything a fiber contributed, removed.
     pub fn withdraw(&self, owner: Uid) {
         if let Ok(mut inner) = self.inner.write() {
-            let mine: Vec<String> = inner
+            let mine: Vec<(String, Option<String>)> = inner
                 .owners
                 .iter()
-                .filter(|(uid, _)| *uid == owner)
-                .map(|(_, name)| name.clone())
+                .filter(|(uid, _, _)| *uid == owner)
+                .map(|(_, name, scope)| (name.clone(), scope.clone()))
                 .collect();
-            inner.owners.retain(|(uid, _)| *uid != owner);
-            for name in mine {
-                inner.tools.remove(&name);
+            inner.owners.retain(|(uid, _, _)| *uid != owner);
+            for (name, scope) in mine {
+                match scope {
+                    Some(scope) => {
+                        if let Some(tools) = inner.scoped.get_mut(&scope) {
+                            tools.remove(&name);
+                        }
+                    }
+                    None => inner.tools.remove(&name),
+                }
             }
         }
         self.version.fetch_add(1, Ordering::Release);
@@ -126,12 +173,43 @@ impl Toolbox {
             .unwrap_or_default()
     }
 
+    /// Declarations visible to one agent scope. Scoped tools override a global
+    /// tool of the same name for that agent only.
+    #[must_use]
+    pub fn declarations_for(&self, scope: Option<&str>) -> Vec<Tool> {
+        self.inner
+            .read()
+            .map(|inner| {
+                let mut tools = inner.tools.clone();
+                if let Some(scope) = scope
+                    && let Some(scoped) = inner.scoped.get(scope)
+                {
+                    for handler in scoped.clone().into_handlers() {
+                        tools.push(handler);
+                    }
+                }
+                tools.declarations().to_vec()
+            })
+            .unwrap_or_default()
+    }
+
     #[must_use]
     pub fn get(&self, name: &str) -> Option<Arc<dyn ToolHandler>> {
         self.inner
             .read()
             .ok()
             .and_then(|inner| inner.tools.get(name).cloned())
+    }
+
+    /// Find a handler as one agent scope sees it.
+    #[must_use]
+    pub fn get_for(&self, scope: Option<&str>, name: &str) -> Option<Arc<dyn ToolHandler>> {
+        self.inner.read().ok().and_then(|inner| {
+            scope
+                .and_then(|scope| inner.scoped.get(scope))
+                .and_then(|tools| tools.get(name).cloned())
+                .or_else(|| inner.tools.get(name).cloned())
+        })
     }
 
     #[must_use]

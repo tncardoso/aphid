@@ -136,9 +136,13 @@ fn every_frame_round_trips() {
 #[test]
 fn every_request_round_trips() {
     for request in [
-        Request::Attach { channel: None },
+        Request::Attach {
+            channel: None,
+            attachments: false,
+        },
         Request::Attach {
             channel: Some("telegram: 42".to_owned()),
+            attachments: false,
         },
         Request::Prompt {
             text: "hello".to_owned(),
@@ -168,11 +172,18 @@ fn an_attach_with_nothing_to_say_is_still_an_attach() {
     // channel sent. It has to keep working, or the protocol is not one.
     assert_eq!(
         serde_json::from_str::<Request>(r#"{"kind":"attach"}"#).expect("read"),
-        Request::Attach { channel: None }
+        Request::Attach {
+            channel: None,
+            attachments: false
+        }
     );
     // And nothing is added to it on the way out.
     assert_eq!(
-        serde_json::to_string(&Request::Attach { channel: None }).expect("write"),
+        serde_json::to_string(&Request::Attach {
+            channel: None,
+            attachments: false
+        })
+        .expect("write"),
         r#"{"kind":"attach"}"#
     );
 }
@@ -257,6 +268,38 @@ async fn a_terminal_is_announced_and_can_ask() {
             }
         )
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_attachment_goes_only_to_the_gateway_that_declared_support() {
+    let temp = Temp::new("gateway-attachment");
+    let socket = temp.path("gateway.sock");
+    let (server, mut events) = Server::bind(&socket, None).expect("bind");
+    let mut client = Client::connect_as_with_attachments(&socket, Some("telegram: 42"), true)
+        .await
+        .expect("connect");
+    let Event::Opened { connection } = event(&mut events).await else {
+        panic!("expected an opened event");
+    };
+    let sender = server
+        .attachment_sender(connection)
+        .expect("attachment sender");
+    let sending = tokio::task::spawn_blocking(move || {
+        sender.send("s-1", "report.txt".to_owned(), "aGVsbG8=".to_owned(), None)
+    });
+
+    let envelope = next(&mut client).await;
+    assert_eq!(envelope.session.as_deref(), Some("s-1"));
+    let Frame::Attachment { id, name, data, .. } = envelope.frame else {
+        panic!("expected an attachment")
+    };
+    assert_eq!(name, "report.txt");
+    assert_eq!(data, "aGVsbG8=");
+    client
+        .send(&Request::AttachmentResult { id, error: None })
+        .await
+        .expect("result");
+    assert_eq!(sending.await.expect("join"), Ok(()));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

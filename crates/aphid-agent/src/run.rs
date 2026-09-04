@@ -170,7 +170,7 @@ impl Agent {
             let backend = self.stream_fn.clone();
             // Read afresh each turn rather than once at build, which is what
             // lets a component contribute or withdraw a tool mid-session.
-            let declarations = self.tools.declarations();
+            let declarations = self.tools.declarations_for(self.scope.as_deref());
             let mut stream = backend
                 .stream(&self.model, &self.transcript, &declarations, &self.options)
                 .await;
@@ -234,7 +234,7 @@ impl Agent {
                         id: call.id(),
                         name: call.name(),
                         arguments: Cow::Borrowed(call.arguments_raw()),
-                        handler: self.tools.get(call.name()),
+                        handler: self.tools.get_for(self.scope.as_deref(), call.name()),
                         blocked: None,
                     });
                 }

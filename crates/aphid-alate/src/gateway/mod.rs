@@ -18,6 +18,7 @@
 //! [`UiComponent`]: aphid_code::tui::UiComponent
 //! [`UiSink`]: aphid_code::tui::UiSink
 
+pub mod attachment;
 pub mod client;
 pub mod server;
 pub mod wire;

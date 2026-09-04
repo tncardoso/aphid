@@ -4,6 +4,10 @@
 
 ### Added
 
+- **The Telegram bot can receive files from the agent.** When you ask an
+  alate to send a file in a Telegram chat, it can attach a file from an allowed
+  workspace path as a document. The permission policy still controls each send.
+
 - **The Telegram bot listens.** Send it a voice message and the alate makes
   text of it, shows you the text, and gives it to the agent as if you had typed
   it. Music files, round videos and files that say they are audio work as well.

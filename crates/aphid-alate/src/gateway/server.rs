@@ -47,6 +47,8 @@ const ANSWER_TIMEOUT: Duration = Duration::from_secs(300);
 /// here because the error the kernel gives back names neither the limit nor the
 /// path, and a long `$APHID_HOME` is otherwise reported as a mystery.
 const MAX_SOCKET_PATH: usize = 90;
+/// Keeps attachment permission ids distinct from ordinary gateway questions.
+const ATTACHMENT_CONFIRM_BIT: u64 = 1 << 63;
 
 /// What the daemon hears from the socket.
 #[derive(Clone, Debug, PartialEq)]
@@ -69,12 +71,20 @@ pub struct Server {
     shared: Arc<Shared>,
 }
 
+/// Sends one file to the gateway connection that owns a session.
+#[derive(Clone)]
+pub struct AttachmentSender {
+    shared: Arc<Shared>,
+    connection: u64,
+}
+
 /// One attached client.
 struct Connection {
     /// What it is watching. Frames for anything else are not sent to it.
     current: Mutex<Option<String>>,
     /// What it said it was when it attached. `None` for a terminal.
     channel: Mutex<Option<String>>,
+    attachments: Mutex<bool>,
     /// Envelopes meant for this one alone: its greeting, a session list, a
     /// replay it asked for.
     direct: mpsc::UnboundedSender<Envelope>,
@@ -86,6 +96,10 @@ struct Shared {
     next_connection: AtomicU64,
     /// Tools waiting on an answer, by the id their frame carried.
     answers: Answers<Decision>,
+    attachment_confirms: Answers<Decision>,
+    attachment_confirm_connections: Mutex<HashMap<u64, (u64, u64)>>,
+    attachment_answers: Answers<Result<(), String>>,
+    attachment_answer_connections: Mutex<HashMap<u64, u64>>,
     log: Mutex<Option<File>>,
     envelopes: broadcast::Sender<Envelope>,
 }
@@ -134,6 +148,10 @@ impl Server {
             connections: Mutex::new(HashMap::new()),
             next_connection: AtomicU64::new(1),
             answers: Answers::default(),
+            attachment_confirms: Answers::default(),
+            attachment_confirm_connections: Mutex::new(HashMap::new()),
+            attachment_answers: Answers::default(),
+            attachment_answer_connections: Mutex::new(HashMap::new()),
             log: Mutex::new(log.and_then(open_log)),
             envelopes,
         });
@@ -216,6 +234,128 @@ impl Server {
         let channel = held.channel.lock().ok()?;
         channel.clone()
     }
+
+    /// A sender for an attachment-capable connection.
+    #[must_use]
+    pub fn attachment_sender(&self, connection: u64) -> Option<AttachmentSender> {
+        let connections = self.shared.connections.lock().ok()?;
+        let held = connections.get(&connection)?;
+        if !held
+            .attachments
+            .lock()
+            .ok()
+            .map(|value| *value)
+            .unwrap_or(false)
+        {
+            return None;
+        }
+        Some(AttachmentSender {
+            shared: self.shared.clone(),
+            connection,
+        })
+    }
+}
+
+impl AttachmentSender {
+    /// Ask only this gateway connection for permission.
+    pub fn confirm(&self, tool: &str, summary: &str, risk: Risk) -> Decision {
+        let (raw_id, answer) = self.shared.attachment_confirms.open();
+        let id = raw_id | ATTACHMENT_CONFIRM_BIT;
+        if let Ok(mut waiting) = self.shared.attachment_confirm_connections.lock() {
+            waiting.insert(id, (self.connection, raw_id));
+        }
+        let direct = self.shared.connections.lock().ok().and_then(|connections| {
+            connections
+                .get(&self.connection)
+                .map(|connection| connection.direct.clone())
+        });
+        let Some(direct) = direct else {
+            self.shared.attachment_confirms.abandon(id);
+            if let Ok(mut waiting) = self.shared.attachment_confirm_connections.lock() {
+                waiting.remove(&id);
+            }
+            return Decision::Deny;
+        };
+        if direct
+            .send(Envelope::daemon(Frame::Confirm {
+                id,
+                tool: tool.to_owned(),
+                summary: summary.to_owned(),
+                risk: risk.into(),
+            }))
+            .is_err()
+        {
+            self.shared.attachment_confirms.abandon(id);
+            if let Ok(mut waiting) = self.shared.attachment_confirm_connections.lock() {
+                waiting.remove(&id);
+            }
+            return Decision::Deny;
+        }
+        let decision = answer
+            .recv_timeout(ANSWER_TIMEOUT)
+            .unwrap_or(Decision::Deny);
+        if let Ok(mut waiting) = self.shared.attachment_confirm_connections.lock() {
+            waiting.remove(&id);
+        }
+        decision
+    }
+
+    /// Deliver a file and wait for the gateway's acknowledgement.
+    pub fn send(
+        &self,
+        session: &str,
+        name: String,
+        data: String,
+        caption: Option<String>,
+    ) -> Result<(), String> {
+        let (id, answer) = self.shared.attachment_answers.open();
+        if let Ok(mut waiting) = self.shared.attachment_answer_connections.lock() {
+            waiting.insert(id, self.connection);
+        }
+        let direct = self.shared.connections.lock().ok().and_then(|connections| {
+            connections
+                .get(&self.connection)
+                .map(|connection| connection.direct.clone())
+        });
+        let Some(direct) = direct else {
+            self.shared.attachment_answers.abandon(id);
+            if let Ok(mut waiting) = self.shared.attachment_answer_connections.lock() {
+                waiting.remove(&id);
+            }
+            return Err("the gateway disconnected before the attachment could be sent".to_owned());
+        };
+        if direct
+            .send(Envelope::from(
+                session,
+                Frame::Attachment {
+                    id,
+                    name,
+                    data,
+                    caption,
+                },
+            ))
+            .is_err()
+        {
+            self.shared.attachment_answers.abandon(id);
+            if let Ok(mut waiting) = self.shared.attachment_answer_connections.lock() {
+                waiting.remove(&id);
+            }
+            return Err("the gateway disconnected before the attachment could be sent".to_owned());
+        }
+        let result = answer
+            .recv_timeout(ANSWER_TIMEOUT)
+            .unwrap_or_else(|_| Err("the gateway did not confirm the attachment".to_owned()));
+        if let Ok(mut waiting) = self.shared.attachment_answer_connections.lock() {
+            waiting.remove(&id);
+        }
+        result
+    }
+}
+
+impl Confirmer for AttachmentSender {
+    fn confirm(&self, tool: &str, summary: &str, risk: Risk) -> Decision {
+        self.confirm(tool, summary, risk)
+    }
 }
 
 impl Drop for Server {
@@ -281,6 +421,26 @@ impl Publisher {
             Err(poisoned) => poisoned.into_inner().clone(),
         };
         self.shared.publish(Envelope { session, frame });
+    }
+
+    /// Get a file sender for one attachment-capable gateway connection.
+    #[must_use]
+    pub fn attachment_sender(&self, connection: u64) -> Option<AttachmentSender> {
+        let connections = self.shared.connections.lock().ok()?;
+        let held = connections.get(&connection)?;
+        if !held
+            .attachments
+            .lock()
+            .ok()
+            .map(|value| *value)
+            .unwrap_or(false)
+        {
+            return None;
+        }
+        Some(AttachmentSender {
+            shared: self.shared.clone(),
+            connection,
+        })
     }
 }
 
@@ -361,6 +521,7 @@ async fn serve(
     let connection = Arc::new(Connection {
         current: Mutex::new(None),
         channel: Mutex::new(None),
+        attachments: Mutex::new(false),
         direct,
     });
     if let Ok(mut connections) = shared.connections.lock() {
@@ -411,12 +572,15 @@ async fn serve(
                     // A probe connects and hangs up without saying this, which
                     // is how `is_listening` checks that an alate is awake
                     // without leaving a conversation behind it.
-                    if let Request::Attach { channel } = request {
+                    if let Request::Attach { channel, attachments } = request {
                         announced = true;
                         // Before the event, so the daemon can read it back the
                         // moment it hears that somebody arrived.
                         if let Ok(mut said) = connection.channel.lock() {
                             *said = stated(channel);
+                        }
+                        if let Ok(mut supported) = connection.attachments.lock() {
+                            *supported = attachments;
                         }
                         if events.send(Event::Opened { connection: id }).is_err() {
                             break;
@@ -424,7 +588,35 @@ async fn serve(
                         continue;
                     }
                     if let Request::Answer { id: call, decision } = request {
-                        shared.answers.answer(call, decision.into());
+                        let belongs = shared
+                            .attachment_confirm_connections
+                            .lock()
+                            .ok()
+                            .and_then(|waiting| waiting.get(&call).copied());
+                        if let Some((owner, raw)) = belongs
+                            && owner == id
+                        {
+                            shared.attachment_confirms.answer(raw, decision.into());
+                        } else {
+                            shared.answers.answer(call, decision.into());
+                        }
+                        continue;
+                    }
+                    if let Request::AttachmentResult {
+                        id: attachment,
+                        error,
+                    } = request {
+                        if shared
+                            .attachment_answer_connections
+                            .lock()
+                            .ok()
+                            .and_then(|waiting| waiting.get(&attachment).copied())
+                            == Some(id)
+                        {
+                            shared
+                                .attachment_answers
+                                .answer(attachment, error.map_or(Ok(()), Err));
+                        }
                         continue;
                     }
                     let asked = Event::Asked {
@@ -459,6 +651,58 @@ fn watching(connection: &Arc<Connection>) -> Option<String> {
 fn finish(shared: &Arc<Shared>, id: u64) {
     if let Ok(mut connections) = shared.connections.lock() {
         connections.remove(&id);
+    }
+    abandon_confirms(
+        &shared.attachment_confirm_connections,
+        &shared.attachment_confirms,
+        id,
+    );
+    abandon_for(
+        &shared.attachment_answer_connections,
+        &shared.attachment_answers,
+        id,
+    );
+}
+
+fn abandon_confirms(
+    waiting: &Mutex<HashMap<u64, (u64, u64)>>,
+    answers: &Answers<Decision>,
+    connection: u64,
+) {
+    let ids = waiting
+        .lock()
+        .map(|mut waiting| {
+            let ids: Vec<(u64, u64)> = waiting
+                .iter()
+                .filter_map(|(id, (owner, raw))| (*owner == connection).then_some((*id, *raw)))
+                .collect();
+            for (id, _) in &ids {
+                waiting.remove(id);
+            }
+            ids
+        })
+        .unwrap_or_default();
+    for (_, raw) in ids {
+        answers.abandon(raw);
+    }
+}
+
+fn abandon_for<A>(waiting: &Mutex<HashMap<u64, u64>>, answers: &Answers<A>, connection: u64) {
+    let ids = waiting
+        .lock()
+        .map(|mut waiting| {
+            let ids: Vec<u64> = waiting
+                .iter()
+                .filter_map(|(id, owner)| (*owner == connection).then_some(*id))
+                .collect();
+            for id in &ids {
+                waiting.remove(id);
+            }
+            ids
+        })
+        .unwrap_or_default();
+    for id in ids {
+        answers.abandon(id);
     }
 }
 

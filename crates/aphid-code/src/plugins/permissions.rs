@@ -103,6 +103,20 @@ impl Permissions {
     #[must_use]
     pub fn verdict(&self, tool: &str, arguments: &str) -> Option<Blocked> {
         let (risk, summary) = assess(tool, arguments)?;
+        self.verdict_with(self.confirmer.as_ref(), tool, &summary, risk)
+    }
+
+    /// Apply this policy to a precomputed summary and a caller-selected
+    /// confirmer. A file attachment needs this because its confirmation must
+    /// name the content hash and the gateway that will receive it.
+    #[must_use]
+    pub fn verdict_with(
+        &self,
+        confirmer: &dyn Confirmer,
+        tool: &str,
+        summary: &str,
+        risk: Risk,
+    ) -> Option<Blocked> {
         if risk == Risk::Read {
             return None;
         }
@@ -116,7 +130,7 @@ impl Permissions {
             return None;
         }
 
-        match self.ask(tool, &summary, risk) {
+        match self.ask_with(confirmer, tool, summary, risk) {
             Decision::Allow => None,
             Decision::AllowAlways => {
                 if let Ok(mut remembered) = self.remembered.lock() {
@@ -135,13 +149,19 @@ impl Permissions {
         }
     }
 
-    fn ask(&self, tool: &str, summary: &str, risk: Risk) -> Decision {
+    fn ask_with(
+        &self,
+        confirmer: &dyn Confirmer,
+        tool: &str,
+        summary: &str,
+        risk: Risk,
+    ) -> Decision {
         let multi = tokio::runtime::Handle::try_current()
             .is_ok_and(|handle| handle.runtime_flavor() == RuntimeFlavor::MultiThread);
         if multi {
-            tokio::task::block_in_place(|| self.confirmer.confirm(tool, summary, risk))
+            tokio::task::block_in_place(|| confirmer.confirm(tool, summary, risk))
         } else {
-            self.confirmer.confirm(tool, summary, risk)
+            confirmer.confirm(tool, summary, risk)
         }
     }
 }

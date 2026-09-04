@@ -14,6 +14,7 @@
 
 use std::collections::VecDeque;
 
+use base64::Engine;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
@@ -29,7 +30,12 @@ use crate::gateway::wire::{Envelope, Frame, Request, Risk};
 pub(super) async fn open(chat: i64, shared: Shared) -> std::io::Result<UnboundedSender<Request>> {
     // Named, so `/sessions` says which chat a conversation belongs to rather
     // than showing several rows that all say the same word.
-    let client = Client::connect_as(&shared.socket, Some(&format!("telegram: {chat}"))).await?;
+    let client = Client::connect_as_with_attachments(
+        &shared.socket,
+        Some(&format!("telegram: {chat}")),
+        true,
+    )
+    .await?;
     tracing::info!(chat, "telegram: chat connected");
     let (sender, requests) = mpsc::unbounded_channel();
     tokio::spawn(serve(
@@ -199,6 +205,30 @@ impl Chat {
                 // it then did.
                 self.flush().await;
                 self.tool_call(&name, &arguments).await;
+            }
+
+            Frame::Attachment {
+                id,
+                name,
+                data,
+                caption,
+            } if mine => {
+                let result = base64::engine::general_purpose::STANDARD
+                    .decode(data)
+                    .map_err(|error| format!("invalid attachment data: {error}"));
+                let result = match result {
+                    Ok(data) => self
+                        .shared
+                        .api
+                        .document(self.id, name, data, caption)
+                        .await
+                        .map(|_| ()),
+                    Err(error) => Err(error),
+                };
+                self.hold(Request::AttachmentResult {
+                    id,
+                    error: result.err(),
+                });
             }
 
             Frame::TurnEnded { error, .. } if mine => {

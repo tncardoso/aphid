@@ -573,10 +573,12 @@ fn handle(alate: &mut Alate, event: Event) {
             // are not typing into one transcript. It is named after whatever
             // the client said it was, so a listing tells a terminal from a chat.
             let channel = alate.server.channel(connection);
+            let attachments = alate.server.attachment_sender(connection).is_some();
             tracing::info!(connection, channel = ?channel, "client connected");
             let Some(id) = alate.open(Kind::Attached {
                 connection,
                 channel,
+                attachments,
             }) else {
                 return;
             };
@@ -628,9 +630,11 @@ fn handle(alate: &mut Alate, event: Event) {
             }
             Request::New => {
                 let channel = alate.server.channel(connection);
+                let attachments = alate.server.attachment_sender(connection).is_some();
                 if let Some(id) = alate.open(Kind::Attached {
                     connection,
                     channel,
+                    attachments,
                 }) {
                     alate.watch(connection, &id);
                 }
@@ -638,7 +642,7 @@ fn handle(alate: &mut Alate, event: Event) {
             // Both answered inside the server: an answer belongs to the tool
             // waiting on it, and an attach has already been turned into
             // `Event::Opened`.
-            Request::Answer { .. } | Request::Attach { .. } => {}
+            Request::Answer { .. } | Request::AttachmentResult { .. } | Request::Attach { .. } => {}
         },
     }
 }

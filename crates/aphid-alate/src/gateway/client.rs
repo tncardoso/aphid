@@ -40,6 +40,15 @@ impl Client {
     ///
     /// Fails when nothing is listening.
     pub async fn connect_as(socket: &Path, channel: Option<&str>) -> std::io::Result<Self> {
+        Self::connect_as_with_attachments(socket, channel, false).await
+    }
+
+    /// Attach and declare whether this client can receive file attachments.
+    pub async fn connect_as_with_attachments(
+        socket: &Path,
+        channel: Option<&str>,
+        attachments: bool,
+    ) -> std::io::Result<Self> {
         let stream = UnixStream::connect(socket).await?;
         let (reader, writer) = stream.into_split();
         let mut client = Self {
@@ -52,6 +61,7 @@ impl Client {
         client
             .send(&Request::Attach {
                 channel: channel.map(ToOwned::to_owned),
+                attachments,
             })
             .await?;
         Ok(client)

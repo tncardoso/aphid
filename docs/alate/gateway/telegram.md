@@ -70,6 +70,17 @@ line, which makes a long run legible from a telephone.
 In `/sessions`, a chat is listed as `telegram: <chat id>` and not as `attached`,
 so you can tell a conversation in a chat from one in a terminal.
 
+## Files from the agent
+
+When you explicitly ask the agent to send a file, it can call `send_attachment`
+and Telegram receives the file as a document in the same chat. It can send a
+file from an allowed workspace read path. The default limit is 20 MiB. Set
+`gateway.attachment_limit` to change it, or to `0` to turn this feature off.
+
+With `permissions: ask`, the chat shows the file path, name, size, hash and
+caption before it is sent. The confirmation is only for the chat that receives
+the file. A group chat on the allow list can receive a file as well.
+
 ## Recordings
 
 The bot can listen. A voice message becomes text on the machine of the alate,

@@ -19,6 +19,7 @@ use aphid_alate::gateway::{Event, Server};
 use aphid_alate::telegram::{self, Api, Bridge, Call, Fetch};
 use aphid_code::plugins::permissions::{Decision, Risk as PermissionRisk};
 use aphid_core::{StopReason, Usage};
+use base64::Engine;
 use common::Temp;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -121,6 +122,26 @@ impl Api for Fake {
         self.fetched.lock().expect("lock").push(path.to_owned());
         let answer = self.file.lock().expect("lock").clone();
         Box::pin(async move { answer })
+    }
+
+    fn document(
+        &self,
+        chat: i64,
+        name: String,
+        data: Vec<u8>,
+        caption: Option<String>,
+    ) -> Call<'_> {
+        self.calls.lock().expect("lock").push((
+            "sendDocument".to_owned(),
+            json!({
+                "chat_id": chat,
+                "name": name,
+                "data": base64::engine::general_purpose::STANDARD.encode(data),
+                "caption": caption,
+            }),
+        ));
+        let message_id = self.messages.fetch_add(1, Ordering::Relaxed);
+        Box::pin(async move { Ok(json!({ "message_id": message_id })) })
     }
 }
 
@@ -279,6 +300,40 @@ async fn a_message_becomes_a_prompt() {
         }
     );
 
+    bridge.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_attachment_becomes_a_telegram_document() {
+    let temp = Temp::new("telegram-attachment");
+    let (api, feed) = Fake::new();
+    let (server, mut events, bridge) = bridge(&temp, allowed(), api.clone());
+    feed.send(json!([message(1, MINE, "send it")]))
+        .expect("feed");
+
+    let Event::Opened { connection } = event(&mut events).await else {
+        panic!("attached");
+    };
+    greet(&server, connection);
+    event(&mut events).await;
+
+    server.reply(
+        connection,
+        Envelope::from(
+            SESSION,
+            Frame::Attachment {
+                id: 9,
+                name: "report.txt".to_owned(),
+                data: "aGVsbG8=".to_owned(),
+                caption: Some("done".to_owned()),
+            },
+        ),
+    );
+    let document = api.nth("sendDocument", 0).await;
+    assert_eq!(document["chat_id"], json!(MINE));
+    assert_eq!(document["name"], json!("report.txt"));
+    assert_eq!(document["data"], json!("aGVsbG8="));
+    assert_eq!(document["caption"], json!("done"));
     bridge.abort();
 }
 

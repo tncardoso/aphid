@@ -219,16 +219,30 @@ impl Default for MemoryConfig {
 }
 
 /// The socket terminals attach to.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Gateway {
     /// `gateway.sock` in the home when absent.
     pub socket: Option<PathBuf>,
+    /// Largest file a gateway may receive from the agent, in bytes. Zero turns
+    /// attachment support off.
+    pub attachment_limit: u64,
     /// A Telegram bot on the same gateway. Absent means no bot.
     pub telegram: Option<Telegram>,
     /// A colony on the same gateway. Absent means this alate talks to no other
     /// agents.
     pub colony: Option<Colony>,
+}
+
+impl Default for Gateway {
+    fn default() -> Self {
+        Self {
+            socket: None,
+            attachment_limit: 20 * 1024 * 1024,
+            telegram: None,
+            colony: None,
+        }
+    }
 }
 
 /// A Telegram bot that speaks to this alate.

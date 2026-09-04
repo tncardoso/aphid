@@ -176,7 +176,7 @@ Each field has a default. An absent file, and an empty file, give the defaults.
   "permissions": "ask",
   "heartbeat": { "every": "15m", "prompt": null },
   "memory": { "recall": 5 },
-  "gateway": { "socket": null, "telegram": null, "colony": null },
+  "gateway": { "socket": null, "attachment_limit": 20971520, "telegram": null, "colony": null },
   "environment": {}
 }
 ```
@@ -191,6 +191,7 @@ Each field has a default. An absent file, and an empty file, give the defaults.
 | `heartbeat.prompt` | What to say on a wake. See [The heartbeat](#the-heartbeat). |
 | `memory.recall` | The quantity of facts offered for each prompt. Use `0` for none. |
 | `gateway.socket` | The socket file. `gateway.sock` in the home when absent. |
+| `gateway.attachment_limit` | The largest file, in bytes, an attachment-capable gateway can receive. It is 20 MiB when absent. Set `0` to turn attachments off. |
 | `gateway.telegram` | A Telegram bot on the gateway. No bot when absent. See [Telegram](alate/gateway/telegram.md). |
 | `gateway.colony` | A colony on the gateway. No colony when absent. See [Colony](alate/gateway/colony.md). |
 | `environment` | Literal variables for sandboxed commands. `${NAME}` copies an allowed host variable. See [Sandbox](#sandbox). |

@@ -37,6 +37,10 @@ pub enum Request {
     Attach {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         channel: Option<String>,
+        /// This client can receive files the agent sends. Absent stays false so
+        /// clients written before attachments remain compatible.
+        #[serde(default, skip_serializing_if = "is_false")]
+        attachments: bool,
     },
     /// Say this to the agent, as though it had been typed.
     Prompt { text: String },
@@ -45,6 +49,12 @@ pub enum Request {
     /// The answer to a [`Frame::Confirm`]. The first answer for an id wins;
     /// later ones find nothing waiting and are dropped.
     Answer { id: u64, decision: Answer },
+    /// The result of one [`Frame::Attachment`] the daemon sent to this client.
+    AttachmentResult {
+        id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// Watch this session instead. It is replayed from the beginning, whether
     /// it is running or long finished on disk, and then followed live.
     Watch { id: String },
@@ -52,6 +62,10 @@ pub enum Request {
     Sessions,
     /// Open another session on this connection.
     New,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// What a client said about a tool that asked permission.
@@ -226,6 +240,14 @@ pub enum Frame {
         is_error: bool,
         details: Option<Json>,
     },
+    /// A file the agent asked this gateway to deliver. This is always sent
+    /// directly to the gateway that owns the session, never published.
+    Attachment {
+        id: u64,
+        name: String,
+        data: String,
+        caption: Option<String>,
+    },
     TurnEnded {
         usage: Usage,
         stop: StopReason,
@@ -278,6 +300,7 @@ impl Frame {
         !matches!(
             self,
             Frame::Confirm { .. }
+                | Frame::Attachment { .. }
                 | Frame::Hello { .. }
                 | Frame::Sessions { .. }
                 | Frame::HistoryStart { .. }

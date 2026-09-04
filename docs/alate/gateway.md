@@ -32,9 +32,11 @@ field can be absent, and a client that does not send it is listed as `attached`.
 | Kind | Fields | Effect |
 | --- | --- | --- |
 | `attach` | `channel` (optional) | Say that this is a client, and open a session for it. |
+| `attach` | `attachments` (optional) | Set this to `true` when the client can receive file attachments from the agent. |
 | `prompt` | `text` | Say this to the agent, as if it were typed. |
 | `cancel` | | Stop the run in flight. |
 | `answer` | `id`, `decision` | Answer a `confirm`. `allow`, `allow_always` or `deny`. |
+| `attachment_result` | `id`, `error` (optional) | Confirm an attachment, or report why the gateway could not send it. |
 | `watch` | `id` | Look at a different session, and replay it. |
 | `sessions` | | Ask what sessions there are. |
 | `new` | | Open another session on this connection. |
@@ -60,6 +62,7 @@ and each request is about that one. `watch` is what changes it.
 | `tool_call` | `id`, `name`, `arguments` | A tool call, complete and committed. |
 | `tool_progress` | `id`, `chunk` | Partial output of a tool. |
 | `tool_result` | `id`, `name`, `text`, `is_error`, `details` | A tool completed. |
+| `attachment` | `id`, `name`, `data`, `caption` | A Base64 file for an attachment-capable client. This goes only to that client. |
 | `turn_ended` | `usage`, `stop`, `error` | A turn is complete. |
 | `run_ended` | `stop`, `turns`, `error` | The run stopped. |
 | `notice` | `text` | Something a plugin wants seen. |

@@ -58,6 +58,7 @@ pub enum Kind {
     Attached {
         connection: u64,
         channel: Option<String>,
+        attachments: bool,
     },
     /// Made by a job, and ended when its run ends.
     Cron { name: String },
@@ -442,6 +443,29 @@ impl Blueprint {
             )),
             serde_json::Value::Null,
         )?;
+        if let Kind::Attached {
+            connection,
+            ref channel,
+            attachments: true,
+        } = kind
+            && self.config.gateway.attachment_limit > 0
+            && let Some(sender) = self.publisher.attachment_sender(connection)
+        {
+            options.composition.mount(
+                Arc::new(crate::gateway::attachment::AttachmentComponent::new(
+                    self.workspace.clone(),
+                    id.clone(),
+                    channel
+                        .clone()
+                        .unwrap_or_else(|| "attached gateway".to_owned()),
+                    sender,
+                    self.permissions.clone(),
+                    self.config.gateway.attachment_limit,
+                    &options.composition,
+                )),
+                serde_json::Value::Null,
+            )?;
+        }
         options.composition.mount(
             Arc::new(MemoryComponent::new(
                 Some(id.clone().into()),

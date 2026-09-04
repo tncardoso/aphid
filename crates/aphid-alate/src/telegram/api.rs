@@ -43,6 +43,10 @@ pub trait Api: Send + Sync {
     /// bytes rather than as JSON. It is here, and not on a client of its own,
     /// so that the seam a test replaces stays one thing.
     fn fetch(&self, path: &str) -> Fetch<'_>;
+
+    /// Send a file as a Telegram document.
+    fn document(&self, chat: i64, name: String, data: Vec<u8>, caption: Option<String>)
+    -> Call<'_>;
 }
 
 /// A shared API, held by the poll loop and by every chat.
@@ -130,6 +134,45 @@ impl Api for Live {
                 .await
                 .map(|bytes| bytes.to_vec())
                 .map_err(|error| format!("the file stopped coming: {}", error.without_url()))
+        })
+    }
+
+    fn document(
+        &self,
+        chat: i64,
+        name: String,
+        data: Vec<u8>,
+        caption: Option<String>,
+    ) -> Call<'_> {
+        Box::pin(async move {
+            let mut form = reqwest::multipart::Form::new()
+                .text("chat_id", chat.to_string())
+                .part(
+                    "document",
+                    reqwest::multipart::Part::bytes(data).file_name(name),
+                );
+            if let Some(caption) = caption {
+                form = form.text("caption", caption);
+            }
+            let response = self
+                .client
+                .post(format!("{}/sendDocument", self.base))
+                .multipart(form)
+                .send()
+                .await
+                .map_err(|error| format!("sendDocument failed: {}", error.without_url()))?;
+            let answer: Value = response
+                .json()
+                .await
+                .map_err(|error| format!("sendDocument gave no JSON: {}", error.without_url()))?;
+            if answer.get("ok").and_then(Value::as_bool) != Some(true) {
+                let why = answer
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("no reason given");
+                return Err(format!("sendDocument was refused: {why}"));
+            }
+            Ok(answer.get("result").cloned().unwrap_or(Value::Null))
         })
     }
 }

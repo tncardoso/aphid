@@ -57,6 +57,7 @@ fn a_bot_is_off_until_it_is_written_down() {
     assert!(bot.chats.is_empty());
     assert!(!bot.tools);
     assert_eq!(bot.interval().expect("a poll"), Duration::from_secs(25));
+    assert_eq!(config.gateway.attachment_limit, 20 * 1024 * 1024);
 }
 
 #[test]
