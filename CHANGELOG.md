@@ -122,6 +122,10 @@
 
 ### Fixed
 
+- **`cargo install` of the CLI works again.** Installing from the repository
+  failed to compile because the newest `tinyvec` does not build on the
+  supported compiler. The GUI build now pins the last working release of that
+  crate.
 - **An alate's sessions no longer see one another's runs.** Each session
   mounted its components on the one composition the daemon shares, and a
   bus announcement reached every listener whatever session made it — so the

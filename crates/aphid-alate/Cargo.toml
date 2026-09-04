@@ -51,6 +51,7 @@ gui = [
     "dep:ksni",
     "dep:objc2-app-kit",
     "dep:raw-window-handle",
+    "dep:tinyvec",
     "dep:tray-icon",
     "dep:x11rb",
     "aphid-code/gui",
@@ -77,6 +78,7 @@ bytemuck = { workspace = true, optional = true }
 gpui = { workspace = true, optional = true }
 gpui-component = { workspace = true, optional = true }
 image = { workspace = true, optional = true }
+tinyvec = { workspace = true, optional = true }
 ratatui.workspace = true
 ratatui-textarea.workspace = true
 reqwest = { workspace = true, features = ["json", "multipart"], optional = true }
