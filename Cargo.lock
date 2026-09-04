@@ -206,6 +206,7 @@ dependencies = [
  "sha2 0.10.9",
  "symphonia",
  "thiserror 2.0.20",
+ "tinyvec",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -230,6 +231,7 @@ dependencies = [
  "rhai",
  "serde",
  "serde_json",
+ "tinyvec",
  "tokio",
 ]
 

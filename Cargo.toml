@@ -61,6 +61,11 @@ x11rb = "0.13"
 blade-graphics = "0.7"
 blade-macros = "0.3"
 bytemuck = { version = "1", features = ["derive"] }
+# The inline-vector crate the GUI stack builds on: already in the tree under
+# gpui's fontdb and blade-graphics' gpu-alloc-ash. Its 1.13.0 does not compile
+# on rustc 1.98 — `use alloc::vec::{self, Vec}` hides the `vec!` macro from its
+# own `vec!` call — so the last good release is pinned until a fixed one ships.
+tinyvec = "=1.12.0"
 # Not re-exported by gpui, so it is named here. Cargo unifies it with the
 # 0.25 already in the lock, and `image::Frame` is what `RenderImage` holds.
 image = { version = "0.25", default-features = false }

@@ -14,7 +14,7 @@ include = ["/src", "/tests", "/Cargo.toml"]
 
 [features]
 default = []
-gui = ["dep:gpui", "dep:gpui-component"]
+gui = ["dep:gpui", "dep:gpui-component", "dep:tinyvec"]
 
 [dependencies]
 aphid-agent.workspace = true
@@ -25,6 +25,7 @@ chrono.workspace = true
 compact_str.workspace = true
 gpui = { workspace = true, optional = true }
 gpui-component = { workspace = true, optional = true }
+tinyvec = { workspace = true, optional = true }
 ratatui.workspace = true
 ratatui-textarea.workspace = true
 serde.workspace = true
