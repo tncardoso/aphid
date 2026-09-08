@@ -291,6 +291,7 @@ The jobs are in `cron.json` in the home. You can edit that file yourself.
       "name": "morning-review",
       "schedule": "0 9 * * *",
       "prompt": "Read yesterday's notes and tell me what is still open.",
+      "since": "2026-08-10T20:14:00-03:00",
       "last": "2026-08-11T09:00:00-03:00"
     }
   ]
@@ -312,6 +313,11 @@ says so.
 
 **The times are local.** `0 9 * * *` is nine in the morning where the machine
 is, not nine UTC.
+
+A new job waits for the first time its schedule names **after you write it**.
+`since` records that moment. A job written at 20:00 for `0 9 * * *` runs at
+09:00 the next morning, and not at once. Writing over a job that exists starts
+its clock again in the same way.
 
 A job that goes past while the alate is stopped runs **one time** when the alate
 comes back. A daily job and a week of stopped time make one run, not seven.

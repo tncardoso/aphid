@@ -43,6 +43,13 @@ pub struct Entry {
     /// When this last ran. Absent until it has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last: Option<DateTime<Local>>,
+    /// When this job was written. A job that has never run counts its first
+    /// occurrence from here, so writing one at eight in the evening does not
+    /// make it run for the nine o'clock that is already past.
+    ///
+    /// An entry from an older file, or one somebody wrote by hand, has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<DateTime<Local>>,
 }
 
 /// The whole file.
@@ -80,6 +87,16 @@ impl Crontab {
     /// notices.
     #[must_use]
     pub fn open(path: &Path) -> (Self, Vec<String>) {
+        Self::open_at(path, Local::now())
+    }
+
+    /// Read the crontab as of a moment.
+    ///
+    /// [`open`](Self::open) reads the clock. This takes one, so a caller can
+    /// say when the watch started: a test plays a daemon that has been up for
+    /// hours without waiting for them.
+    #[must_use]
+    pub fn open_at(path: &Path, opened: DateTime<Local>) -> (Self, Vec<String>) {
         let mut problems = Vec::new();
         let entries = match std::fs::read_to_string(path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
@@ -124,7 +141,7 @@ impl Crontab {
             Self {
                 path: path.to_path_buf(),
                 entries: kept,
-                opened: Local::now(),
+                opened,
             },
             problems,
         )
@@ -167,6 +184,7 @@ impl Crontab {
             // A rewritten job starts again: its old `last` belongs to a
             // schedule that no longer exists.
             last: None,
+            since: Some(Local::now()),
         };
         self.entries.retain(|held| held.name != name);
         self.entries.push(entry.clone());
@@ -208,7 +226,15 @@ impl Crontab {
         let mut fired = Vec::new();
 
         for entry in &mut self.entries {
-            let after = entry.last.unwrap_or(opened);
+            // The later of the two: a job written after the daemon came up
+            // counts from the writing, and a job the daemon found on disk
+            // counts from the open. Either one alone is wrong — `opened` makes
+            // a new job fire for an occurrence that went past before it
+            // existed, and `since` makes a restart skip the occurrence a job
+            // written yesterday is waiting for.
+            let after = entry
+                .last
+                .unwrap_or_else(|| entry.since.map_or(opened, |since| since.max(opened)));
             let Some(next) = parse(&entry.schedule)
                 .ok()
                 .and_then(|cron| cron.find_next_occurrence(&after, false).ok())
