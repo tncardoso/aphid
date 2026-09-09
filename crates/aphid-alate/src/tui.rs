@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use aphid_code::plugins::permissions::Decision;
 use aphid_code::tui::input::{Action, Input};
 use aphid_code::tui::modal::{Confirm, Modal};
+use aphid_code::tui::picker::{Picker, Row};
 use aphid_code::tui::render::ScrollbackCache;
 use aphid_code::tui::runtime::{
     self, Cmd, Draw, Effects, Hub, Program, Subs, Timer, restore, setup,
@@ -26,7 +27,7 @@ use aphid_code::tui::runtime::{
 use aphid_code::tui::scrollback::{Scrollback, Viewport};
 use aphid_code::tui::status::Status;
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout};
 use ratatui::widgets::Paragraph;
 use std::time::Duration;
@@ -45,7 +46,7 @@ const MAX_INPUT_ROWS: u16 = 4;
 const PAGE_LINES: usize = 10;
 
 const HELP: &str = "\
-/sessions      what conversations there are, running and stored
+/sessions      pick a conversation, with a filter you type
 /session <id>  look at one of them
 /new           start another conversation here
 /log           show or hide notices, heartbeats and jobs
@@ -95,6 +96,10 @@ pub struct App {
     status: Status,
     instance: String,
     modal: Option<Modal>,
+    /// The session list on screen, while one is. It holds what the daemon last
+    /// said there was, so a list that changes under the cursor is a `set_rows`
+    /// and not a reopen.
+    picker: Option<Picker>,
     /// The confirmation on screen, and the channel the modal answers into. The
     /// modal type wants a sender, so it gets a local one and the answer is
     /// carried to the daemon from the other end.
@@ -109,6 +114,12 @@ impl App {
     #[must_use]
     pub fn pane(&self, id: &str) -> Option<&Scrollback> {
         self.views.get(id)
+    }
+
+    /// The session list on screen, for a test to read.
+    #[must_use]
+    pub fn picker(&self) -> Option<&Picker> {
+        self.picker.as_ref()
     }
 
     /// Whether the session on screen is streaming.
@@ -189,6 +200,7 @@ impl App {
             status: Status::default(),
             instance: instance.to_owned(),
             modal: None,
+            picker: None,
             show_log: true,
             quit: false,
         }
@@ -270,8 +282,13 @@ impl Program for App {
             Msg::Key(key) => self.keyed(key),
             Msg::Paste(text) => {
                 // A modal takes single keys for an answer; a paste is not one.
+                // The picker is the other way round: pasting an id into the
+                // filter is exactly what somebody with an id in hand wants.
                 if self.modal.is_none() {
-                    self.input.paste(&text);
+                    match &mut self.picker {
+                        Some(picker) => picker.paste(&text),
+                        None => self.input.paste(&text),
+                    }
                 }
                 Cmd::none()
             }
@@ -336,6 +353,11 @@ impl Draw for App {
         frame.render_widget(self.input.textarea(), input_row);
         frame.render_widget(Paragraph::new(self.status.line()), status);
 
+        if let Some(picker) = &self.picker {
+            picker.render(frame, frame.area());
+        }
+        // Last, so it is on top: the permission question is the daemon's, and
+        // it is the one thing here that something else is waiting on.
         if let Some(modal) = &self.modal {
             modal.render(frame, frame.area());
         }
@@ -388,24 +410,52 @@ impl App {
             }
             Wire::HistoryEnd { .. } => self.filling = None,
             Wire::Sessions { live, stored } => {
-                let mut text = String::from("sessions");
-                for info in live.iter().chain(stored.iter()) {
-                    let mark = if info.id == self.current { "*" } else { " " };
-                    let running = if info.running { " running" } else { "" };
-                    text.push_str(&format!(
-                        "\n{mark} {}  {}  {}{running}",
-                        info.id, info.kind, info.started
-                    ));
+                let current = self.current.clone();
+                let rows: Vec<Row> = live
+                    .iter()
+                    .chain(stored.iter())
+                    .map(|info| {
+                        // A middle dot and not two spaces: the row is drawn
+                        // through `one_line`, which folds a run of spaces into
+                        // one, and the fields would read as a single phrase.
+                        let running = if info.running { " · running" } else { "" };
+                        Row::new(info.id.clone(), info.id.clone())
+                            .detail(format!("{} · {}{running}", info.kind, info.started))
+                            .current(info.id == current)
+                    })
+                    .collect();
+                // The list is asked for by opening the picker, so there is
+                // nearly always one to fill. The text is what is left if the
+                // answer outlived it, so an answer is never lost in silence.
+                if let Some(picker) = &mut self.picker {
+                    picker.set_rows(rows);
+                } else {
+                    let mut text = String::from("sessions");
+                    for info in live.iter().chain(stored.iter()) {
+                        let mark = if info.id == current { "*" } else { " " };
+                        let running = if info.running { " running" } else { "" };
+                        text.push_str(&format!(
+                            "\n{mark} {}  {}  {}{running}",
+                            info.id, info.kind, info.started
+                        ));
+                    }
+                    text.push_str("\n\n/session <id> looks at one. An id can be shortened.");
+                    self.scrollback().push_notice(text);
                 }
-                text.push_str("\n\n/session <id> looks at one. An id can be shortened.");
-                self.scrollback().push_notice(text);
             }
             Wire::SessionOpened { info } => {
-                if !self.show_log || info.id == self.current {
-                    return Cmd::none();
+                // A list on screen must not go stale while it is being read.
+                // The daemon says when one opens, so the refresh needs no timer
+                // of the kind the coding terminal's process list has.
+                let refresh = self.picker.is_some();
+                if self.show_log && info.id != self.current {
+                    self.scrollback()
+                        .push_notice(format!("── {} started: {} ──", info.kind, info.id));
                 }
-                self.scrollback()
-                    .push_notice(format!("── {} started: {} ──", info.kind, info.id));
+                if refresh {
+                    return ask(Request::Sessions);
+                }
+                return Cmd::none();
             }
             // The alate's own, so it is drawn wherever the terminal happens to
             // be looking.
@@ -417,12 +467,16 @@ impl App {
                     .push_notice(format!("── woke at {at} ──\n{note}"));
             }
             Wire::SessionClosed { id } => {
+                let refresh = self.picker.is_some();
                 if id == self.current {
                     self.scrollback().push_notice("── this session ended ──");
                 } else {
                     self.views.remove(&id);
-                    return Cmd::none();
                 }
+                if refresh {
+                    return ask(Request::Sessions);
+                }
+                return Cmd::none();
             }
             // A permission question is the daemon's, not a conversation's: it
             // goes to every terminal, so whoever is at a keyboard can answer it
@@ -434,7 +488,9 @@ impl App {
                 risk,
             } => {
                 // The daemon's own id travels with the question and comes back
-                // with the answer, so nothing local has to remember it.
+                // with the answer, so nothing local has to remember it. It
+                // takes the screen from a list that is only being browsed.
+                self.picker = None;
                 self.modal = Some(Modal::Confirm(Confirm {
                     id,
                     tool,
@@ -533,6 +589,10 @@ impl App {
             return Cmd::none();
         }
 
+        if self.picker.is_some() {
+            return self.key_in_picker(key);
+        }
+
         match self.input.handle(key) {
             Action::None => Cmd::none(),
             Action::Quit => {
@@ -587,6 +647,51 @@ impl App {
         }
     }
 
+    /// Handle a keypress the session list is claiming.
+    ///
+    /// It claims every one of them: a picker is a filter you type into, so a
+    /// key that means nothing here means nothing at all rather than reaching
+    /// the input box behind it.
+    fn key_in_picker(&mut self, key: KeyEvent) -> Cmd<Effect> {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let Some(picker) = &mut self.picker else {
+            return Cmd::none();
+        };
+
+        match key.code {
+            KeyCode::Up => picker.move_selection(-1),
+            KeyCode::Down => picker.move_selection(1),
+            KeyCode::Char('p') if control => picker.move_selection(-1),
+            KeyCode::Char('n') if control => picker.move_selection(1),
+            // Ctrl-C detaches everywhere else, and here it is the other way
+            // out of a list somebody opened by mistake.
+            KeyCode::Esc => self.picker = None,
+            KeyCode::Char('c') if control => self.picker = None,
+            KeyCode::Backspace => picker.backspace(),
+            KeyCode::Enter => {
+                let chosen = picker.chosen().map(|row| row.key.clone());
+                self.picker = None;
+                if let Some(id) = chosen {
+                    return self.watch(&id);
+                }
+            }
+            KeyCode::Char(c) if !control && !key.modifiers.contains(KeyModifiers::ALT) => {
+                picker.type_char(c);
+            }
+            _ => {}
+        }
+        Cmd::none()
+    }
+
+    /// Look at one session, whether it was typed or picked off the list.
+    fn watch(&mut self, id: &str) -> Cmd<Effect> {
+        // The daemon resolves a shortened id, because it is the one
+        // that knows every session there has ever been.
+        self.current = id.to_owned();
+        self.views.entry(self.current.clone()).or_default();
+        ask(Request::Watch { id: id.to_owned() })
+    }
+
     /// The commands a terminal answers, or turns into a request.
     ///
     /// Anything else goes to the agent, including a line that opens with a
@@ -607,7 +712,12 @@ impl App {
                 self.scrollback().push_notice(HELP);
                 Cmd::none()
             }
-            "sessions" => ask(Request::Sessions),
+            // Opened empty and filled by the answer, the way `/ps` opens the
+            // coding terminal's process list before it has read one.
+            "sessions" => {
+                self.picker = Some(Picker::new("sessions", Vec::new()));
+                ask(Request::Sessions)
+            }
             "new" => ask(Request::New),
             "session" => {
                 let id = rest.trim();
@@ -616,11 +726,7 @@ impl App {
                         .push_notice("which one? /sessions lists them");
                     return Cmd::none();
                 }
-                // The daemon resolves a shortened id, because it is the one
-                // that knows every session there has ever been.
-                self.current = id.to_owned();
-                self.views.entry(self.current.clone()).or_default();
-                ask(Request::Watch { id: id.to_owned() })
+                self.watch(id)
             }
             "log" => {
                 self.show_log = !self.show_log;

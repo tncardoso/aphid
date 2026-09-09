@@ -559,14 +559,29 @@ impl Blueprint {
     }
 }
 
-/// The sessions on disk that are not open, newest first.
+/// How many stored sessions a client is told about.
+///
+/// A machine that has run an alate for a month has hundreds of session files,
+/// and a list that long is of no use to anybody: what a reader looks for is
+/// nearly always among the last few. The open sessions are not counted against
+/// this, because a conversation that runs now must never be missing from a
+/// list of what there is.
+///
+/// The cut is only in what is listed. [`aphid_code::session::resolve`] still
+/// reads the whole directory, so `/session <id>` opens an older conversation
+/// that this no longer names.
+pub const RECENT: usize = 20;
+
+/// The most recent sessions on disk that are not open, newest first.
 ///
 /// The open ones are filtered out so a list never shows one conversation twice.
+/// At most [`RECENT`] of them come back.
 #[must_use]
 pub fn stored(workspace: &Workspace, sessions_dir: &Path, open: &Sessions) -> Vec<Info> {
     session::list_for(sessions_dir, workspace.root())
         .into_iter()
         .filter(|summary| !open.contains(&summary.header.id))
+        .take(RECENT)
         .map(|summary| Info {
             id: summary.header.id.clone(),
             kind: "stored".to_owned(),

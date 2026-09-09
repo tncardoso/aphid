@@ -98,7 +98,7 @@ fn running(rows: &[Process]) -> Vec<Process> {
 }
 
 /// A centred box `width` columns wide and `height` rows tall, clamped to `area`.
-fn centred(area: Rect, width: u16, height: u16) -> Rect {
+pub(crate) fn centred(area: Rect, width: u16, height: u16) -> Rect {
     let [row] = Layout::vertical([Constraint::Length(height.min(area.height))])
         .flex(Flex::Center)
         .areas(area);

@@ -59,7 +59,7 @@ Each line goes to the agent, unless it begins with `/`.
 
 | Command | Effect |
 | --- | --- |
-| `/sessions` | Show the conversations, and open the list to pick one. |
+| `/sessions` | Open the list of conversations and pick one. It holds the open ones and the 20 most recent stored ones. |
 | `/session <id>` | Look at one of them. A shortened id is enough. |
 | `/new` | Start another conversation. |
 | `/log` | Show or hide notices, heartbeats and session events. |

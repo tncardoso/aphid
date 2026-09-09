@@ -18,6 +18,8 @@ use aphid_alate::gateway::wire::{Envelope, Frame, Request};
 use aphid_alate::gateway::{Client, is_listening};
 use aphid_alate::home::Home;
 use aphid_alate::memory::Memory;
+use aphid_alate::sessions::{RECENT, Sessions, stored};
+use aphid_code::tools::Workspace;
 use aphid_core::Model;
 use aphid_core::catalog::ModelEntry;
 use common::Temp;
@@ -899,6 +901,48 @@ async fn a_session_can_be_watched_after_it_ended() {
     .await;
 
     daemon.abort();
+}
+
+/// A session file with nothing in it but a header, started `age` days ago.
+fn session_file(dir: &Path, cwd: &Path, id: &str, age: i64) {
+    let started = chrono::Utc::now() - chrono::Duration::days(age);
+    let header = serde_json::json!({
+        "kind": "session",
+        "id": id,
+        "cwd": cwd.display().to_string(),
+        "started": started.to_rfc3339(),
+    });
+    std::fs::create_dir_all(dir).expect("sessions dir");
+    std::fs::write(dir.join(format!("{id}.jsonl")), format!("{header}\n")).expect("write");
+}
+
+#[test]
+fn a_listing_names_only_the_most_recent_stored_sessions() {
+    // A machine that has run an alate for months has hundreds of these, and a
+    // list that long is of no use to a reader or to a filter.
+    let temp = Temp::new("stored");
+    let sessions_dir = temp.path("sessions");
+    let workspace = Workspace::new(&temp.root);
+
+    for age in 0..(RECENT as i64 + 5) {
+        session_file(&sessions_dir, &temp.root, &format!("s{age:03}"), age);
+    }
+
+    let listed = stored(&workspace, &sessions_dir, &Sessions::new());
+
+    assert_eq!(listed.len(), RECENT, "the list is cut to {RECENT}");
+    let ids: Vec<&str> = listed.iter().map(|info| info.id.as_str()).collect();
+    assert_eq!(ids[0], "s000", "the newest is first");
+    assert_eq!(
+        ids[RECENT - 1],
+        format!("s{:03}", RECENT - 1),
+        "and the oldest kept is the {RECENT}th, not the {}th",
+        RECENT + 5
+    );
+    assert!(
+        !ids.contains(&"s024"),
+        "what falls off the end is the oldest"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

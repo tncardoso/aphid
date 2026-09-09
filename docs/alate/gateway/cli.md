@@ -67,7 +67,7 @@ connects and closes, and thus it leaves no conversation behind it.
 
 | Command | Effect |
 | --- | --- |
-| `/sessions` | Show the conversations, running and stored. |
+| `/sessions` | Open the list of conversations and pick one. |
 | `/session <id>` | Look at one of them. A shortened id is enough. |
 | `/new` | Start another conversation in this terminal. |
 | `/log` | Show or hide notices, heartbeats and jobs. |
@@ -80,6 +80,16 @@ connects and closes, and thus it leaves no conversation behind it.
 | `Esc` | Stop the run in this session. |
 | `Ctrl-C` | Detach. |
 
+In the `/sessions` list the keys are different:
+
+| Key | Effect |
+| --- | --- |
+| Any character | Add it to the filter. |
+| `Backspace` | Remove the last character of the filter. |
+| `↑` `↓` | Move the cursor. `Ctrl-P` and `Ctrl-N` do the same. |
+| `Enter` | Look at the conversation under the cursor. |
+| `Esc` | Close the list. Nothing changes. `Ctrl-C` does the same. |
+
 Each other line goes to the agent.
 
 There is no model selector here. The model is a property of the alate, and not
@@ -87,14 +97,25 @@ of a terminal. Set `model` in [`alate.json`](../../alate.md#alatejson).
 
 ## Moving between sessions
 
-`/sessions` lists the conversations that run now and the ones on disk.
+`/sessions` opens a list of the conversations that run now and the ones on
+disk. Type to cut the list down: the filter reads the id, the kind and the date,
+and the characters do not have to be next to each other. `telegram` finds the
+chats, `cron` finds the jobs, and the first digits of a date find that day.
 
 ```
-  20260811T091500-0000  resident      2026-08-11 09:15  running
-* 20260811T142200-0000  attached      2026-08-11 14:22
-  20260811T143000-0000  telegram: 42  2026-08-11 14:30
-  20260811T090000-0000  cron: news    2026-08-11 09:00
+┌ sessions — type to filter, ↑↓ to move, Enter to open, Esc to close ┐
+│ > cron                                                             │
+│ ▸ 20260811T143000-0000  cron: news  2026-08-11 14:30  running      │
+│   20260810T090000-0000  cron: news  2026-08-10 09:00               │
+└────────────────────────────────────────────────────────────────────┘
 ```
+
+The conversations that run now are first, and a `*` marks the one this terminal
+is looking at. `Enter` looks at the one under the cursor.
+
+The list names the conversations that run now, and the 20 most recent of the
+ones on disk. An older one is still there: `/session <id>` opens it, because the
+daemon looks for the id among every session there has ever been.
 
 `/session <id>` looks at one. The daemon reads the transcript and sends it back,
 so a session that ended last week draws exactly like one running now. Only the

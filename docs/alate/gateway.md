@@ -44,6 +44,11 @@ field can be absent, and a client that does not send it is listed as `attached`.
 A request needs no session on it. A connection has one session that it watches,
 and each request is about that one. `watch` is what changes it.
 
+`sessions` does not name every session there has ever been: the answer holds the
+open ones and the 20 most recent stored ones, because a client prints the answer
+in a list. `watch` still finds an older session by its id, or by the start of
+one.
+
 ## What the daemon sends
 
 | Kind | Fields | Meaning |
@@ -51,7 +56,7 @@ and each request is about that one. `watch` is what changes it.
 | `hello` | `instance`, `model`, `context_window`, `thinking` | The first frame. What this alate is. |
 | `session_opened` | `info` | A session started. Sent to everybody. |
 | `session_closed` | `id` | A session ended, and sends nothing more. |
-| `sessions` | `live`, `stored` | The answer to `sessions`, to the connection that asked. |
+| `sessions` | `live`, `stored` | The answer to `sessions`, to the connection that asked. `live` holds every session that is open; `stored` holds the 20 most recent on disk. |
 | `history_start` | `id` | A replay starts. What is drawn for this session is old. |
 | `history_end` | `id` | The replay is complete. What comes now is live. |
 | `turn_started` | | A turn started. |

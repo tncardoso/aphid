@@ -33,6 +33,18 @@
   one time into the cache of the machine. This is behind a build feature,
   `voice`, and a `voice` block in `alate.json`. Refer to the Telegram page.
 
+### Changed
+
+- **`/sessions` in the alate terminal opens a list you can filter.** Type any
+  part of an id, a kind or a date and the list cuts down to what matches; the
+  characters do not have to be next to each other. Move with the arrows and
+  press Enter to look at the conversation under the cursor. `/session <id>`
+  still works as before.
+
+- **A session list holds the 20 most recent stored conversations.** Every
+  conversation that runs now is still named. An older one on disk is still
+  there, and `/session <id>` opens it.
+
 ### Fixed
 
 - **A scheduled job waits for its time.** A job you gave the alate ran as soon

@@ -5,6 +5,7 @@
 use aphid_agent::exec;
 use aphid_code::plugins::permissions::Risk;
 use aphid_code::tui::modal::{Confirm, Modal};
+use aphid_code::tui::picker::{Picker, Row};
 use aphid_code::tui::render::ScrollbackCache;
 use aphid_code::tui::scrollback::Scrollback;
 use aphid_code::tui::select::Spot;
@@ -605,4 +606,88 @@ fn the_copied_text_is_what_the_selection_covers() {
         cache.selected_text((Spot { line: 0, column: 2 }, Spot { line: 0, column: 9 },)),
         "explain"
     );
+}
+
+#[test]
+fn the_picker_shows_the_query_the_cursor_and_what_matched() {
+    let mut picker = Picker::new(
+        "sessions",
+        vec![
+            Row::new("a", "20260811T091500-0000").detail("resident  2026-08-11 09:15  running"),
+            Row::new("b", "20260811T142200-0000")
+                .detail("attached  2026-08-11 14:22")
+                .current(true),
+            Row::new("c", "20260811T143000-0000").detail("cron: news  2026-08-11 14:30"),
+        ],
+    );
+    for c in "cron".chars() {
+        picker.type_char(c);
+    }
+
+    let rendered = draw(90, 14, |frame| {
+        picker.render(frame, Rect::new(0, 0, 90, 14));
+    });
+    let joined = rendered.join("\n");
+
+    assert!(joined.contains("sessions — type to filter"), "{joined}");
+    assert!(
+        joined.contains("> cron"),
+        "the query is on screen: {joined}"
+    );
+    assert!(
+        joined.contains("▸ 20260811T143000-0000"),
+        "the one match is under the cursor: {joined}"
+    );
+    assert!(
+        !joined.contains("20260811T091500-0000"),
+        "and the rest is filtered away: {joined}"
+    );
+}
+
+#[test]
+fn the_picker_lights_the_characters_the_query_matched() {
+    let mut picker = Picker::new("sessions", vec![Row::new("a", "20260811T143000-0000")]);
+    for c in "1430".chars() {
+        picker.type_char(c);
+    }
+
+    let mut terminal = Terminal::new(TestBackend::new(60, 10)).expect("terminal");
+    terminal
+        .draw(|frame| picker.render(frame, Rect::new(0, 0, 60, 10)))
+        .expect("draw");
+    let buffer = terminal.backend().buffer().clone();
+
+    // The run `1430` inside the id is what the query matched, and the underline
+    // is on exactly those cells. The row is under the cursor, so it is bold and
+    // on cyan whether it matched or not; the underline is what tells them apart.
+    let lit: String = (0..60u16)
+        .flat_map(|x| (0..10u16).map(move |y| (x, y)))
+        .filter(|(x, y)| {
+            buffer[(*x, *y)]
+                .style()
+                .add_modifier
+                .contains(Modifier::UNDERLINED)
+        })
+        .map(|(x, y)| buffer[(x, y)].symbol().to_owned())
+        .collect();
+    assert_eq!(lit, "1430", "only the match is underlined");
+}
+
+#[test]
+fn the_picker_marks_the_session_you_are_already_on() {
+    let picker = Picker::new(
+        "sessions",
+        vec![
+            Row::new("a", "first").detail("resident"),
+            Row::new("b", "second").detail("attached").current(true),
+        ],
+    );
+
+    let rendered = draw(60, 10, |frame| {
+        picker.render(frame, Rect::new(0, 0, 60, 10));
+    });
+    let joined = rendered.join("\n");
+
+    assert!(joined.contains("▸ first"), "{joined}");
+    assert!(joined.contains("* second"), "{joined}");
 }
