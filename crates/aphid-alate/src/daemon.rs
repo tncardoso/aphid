@@ -32,6 +32,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::config::Config;
 use crate::cron::{self, CronComponent, Crontab};
+use crate::gateway::origin;
 use crate::gateway::wire::{Envelope, Frame, Request};
 use crate::gateway::{Event, GatewaySink, Server};
 use crate::heartbeat::Schedule;
@@ -78,6 +79,10 @@ struct Alate {
     sessions: Sessions,
     schedule: Schedule,
     crontab: cron::Shared,
+    /// The open conversations, so a job can find the one that scheduled it.
+    /// The gateway holds it, because the gateway is what routes into it; this
+    /// is what keeps it in step.
+    directory: origin::Shared,
     workspace: Workspace,
     sessions_dir: PathBuf,
     model: String,
@@ -172,6 +177,7 @@ pub async fn run(options: Options) -> Result<(), String> {
             ),
             _ => format!("could not listen on {}: {error}", socket.display()),
         })?;
+    let directory = server.directory();
 
     // Once for the whole daemon, not once per session: loading the scripts
     // twice would double every hook, and the host's own session is the
@@ -216,7 +222,12 @@ pub async fn run(options: Options) -> Result<(), String> {
     }
     composition
         .mount(
-            Arc::new(CronComponent::new(crontab.clone(), &composition)),
+            Arc::new(CronComponent::new(
+                crontab.clone(),
+                None,
+                None,
+                &composition,
+            )),
             serde_json::Value::Null,
         )
         .map_err(|error| format!("could not mount the crontab: {error}"))?;
@@ -273,6 +284,7 @@ pub async fn run(options: Options) -> Result<(), String> {
         sessions: Sessions::new(),
         schedule,
         crontab,
+        directory,
         workspace,
         sessions_dir,
     };
@@ -395,10 +407,16 @@ pub async fn run(options: Options) -> Result<(), String> {
 }
 
 impl Alate {
-    /// Tell everybody a session started.
+    /// Tell everybody a session started, and enter it in the directory.
+    ///
+    /// The directory is what turns a job's recorded address back into a live
+    /// conversation, so it is kept in step here rather than anywhere else: this
+    /// is already the one place a session becomes public.
     fn opened(&self, id: &str) {
         if let Some(session) = self.sessions.get(id) {
-            tracing::info!(session = %id, kind = %session.kind.label(), "session opened");
+            let label = session.kind.label();
+            tracing::info!(session = %id, kind = %label, "session opened");
+            origin::write(&self.directory).opened(id, &label);
             self.server.send(Envelope::daemon(Frame::SessionOpened {
                 info: session.info(),
             }));
@@ -440,6 +458,7 @@ impl Alate {
     fn close(&mut self, id: &str) {
         if self.sessions.close(id).is_some() {
             tracing::info!(session = %id, "session closed");
+            origin::write(&self.directory).closed(id);
             self.server
                 .send(Envelope::daemon(Frame::SessionClosed { id: id.to_owned() }));
         }
@@ -673,6 +692,7 @@ fn wake(alate: &mut Alate) {
         // behind in a conversation somebody else is having.
         let Some(id) = alate.open(Kind::Cron {
             name: entry.name.clone(),
+            origin: entry.origin.clone(),
         }) else {
             continue;
         };

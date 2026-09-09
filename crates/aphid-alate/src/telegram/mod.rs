@@ -122,6 +122,15 @@ async fn run(bridge: Bridge) {
     let mut state = State::default();
     let mut failures: u32 = 0;
 
+    // Attach every allowed chat before polling, so each one has a conversation
+    // from the moment the alate is up. A chat that connects only when somebody
+    // writes to it is unreachable all night, and a job scheduled there has
+    // nowhere to report to at nine in the morning. The price is a session per
+    // allowed chat in `/sessions` from the start.
+    for chat in &config.chats {
+        connection(*chat, &mut state, &shared, &notices).await;
+    }
+
     loop {
         let asked = api
             .call(

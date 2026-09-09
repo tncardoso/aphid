@@ -3,6 +3,7 @@
 mod common;
 
 use aphid_alate::cron::{Crontab, MAX_ENTRIES, parse};
+use aphid_alate::gateway::Origin;
 use chrono::{Local, TimeZone};
 use common::Temp;
 
@@ -40,7 +41,7 @@ fn a_job_round_trips() {
 
     let (mut crontab, _) = Crontab::open(&path);
     crontab
-        .set("morning", "0 9 * * *", "Read yesterday's notes.")
+        .set("morning", "0 9 * * *", "Read yesterday's notes.", None)
         .expect("set");
 
     let (again, problems) = Crontab::open(&path);
@@ -55,8 +56,12 @@ fn a_job_is_replaced_by_name() {
     let temp = Temp::new("cron");
     let (mut crontab, _) = Crontab::open(&temp.path("cron.json"));
 
-    crontab.set("job", "0 9 * * *", "First.").expect("set");
-    crontab.set("job", "0 17 * * *", "Second.").expect("set");
+    crontab
+        .set("job", "0 9 * * *", "First.", None)
+        .expect("set");
+    crontab
+        .set("job", "0 17 * * *", "Second.", None)
+        .expect("set");
 
     assert_eq!(crontab.entries().len(), 1);
     let entry = crontab.find("job").expect("kept");
@@ -70,7 +75,9 @@ fn a_job_can_be_removed() {
     let path = temp.path("cron.json");
 
     let (mut crontab, _) = Crontab::open(&path);
-    crontab.set("job", "0 9 * * *", "Something.").expect("set");
+    crontab
+        .set("job", "0 9 * * *", "Something.", None)
+        .expect("set");
     assert!(crontab.remove("job"));
     assert!(!crontab.remove("job"), "removing twice does nothing");
 
@@ -100,9 +107,13 @@ fn a_job_needs_a_schedule_that_parses() {
     let temp = Temp::new("cron");
     let (mut crontab, _) = Crontab::open(&temp.path("cron.json"));
 
-    assert!(crontab.set("job", "whenever", "Something.").is_err());
-    assert!(crontab.set("job", "0 9 * * *", "   ").is_err());
-    assert!(crontab.set("../escape", "0 9 * * *", "Something.").is_err());
+    assert!(crontab.set("job", "whenever", "Something.", None).is_err());
+    assert!(crontab.set("job", "0 9 * * *", "   ", None).is_err());
+    assert!(
+        crontab
+            .set("../escape", "0 9 * * *", "Something.", None)
+            .is_err()
+    );
     assert!(crontab.entries().is_empty());
 }
 
@@ -149,7 +160,7 @@ fn nothing_is_due_before_its_time() {
     let temp = Temp::new("cron");
     let (mut crontab, _) = Crontab::open(&temp.path("cron.json"));
     crontab
-        .set("morning", &daily_in_twelve_hours(), "Wake.")
+        .set("morning", &daily_in_twelve_hours(), "Wake.", None)
         .expect("set");
 
     // The crontab was opened now, and an entry that never ran measures from
@@ -161,7 +172,9 @@ fn nothing_is_due_before_its_time() {
 fn a_job_fires_once_when_its_time_has_passed() {
     let temp = Temp::new("cron");
     let (mut crontab, _) = Crontab::open(&temp.path("cron.json"));
-    crontab.set("morning", "0 9 * * *", "Wake.").expect("set");
+    crontab
+        .set("morning", "0 9 * * *", "Wake.", None)
+        .expect("set");
 
     let tomorrow = Local::now() + chrono::Duration::days(1);
     let fired = crontab.due(tomorrow);
@@ -180,7 +193,7 @@ fn a_week_of_downtime_is_one_run_and_not_seven() {
     let temp = Temp::new("cron");
     let (mut crontab, _) = Crontab::open(&temp.path("cron.json"));
     crontab
-        .set("daily", &daily_in_twelve_hours(), "Wake.")
+        .set("daily", &daily_in_twelve_hours(), "Wake.", None)
         .expect("set");
 
     let next_week = Local::now() + chrono::Duration::days(7);
@@ -197,13 +210,17 @@ fn a_week_of_downtime_is_one_run_and_not_seven() {
 fn a_rewritten_job_starts_its_clock_again() {
     let temp = Temp::new("cron");
     let (mut crontab, _) = Crontab::open(&temp.path("cron.json"));
-    crontab.set("job", "0 9 * * *", "First.").expect("set");
+    crontab
+        .set("job", "0 9 * * *", "First.", None)
+        .expect("set");
 
     let tomorrow = Local::now() + chrono::Duration::days(1);
     assert_eq!(crontab.due(tomorrow).len(), 1);
 
     // The old `last` belonged to a schedule that no longer exists.
-    crontab.set("job", "0 17 * * *", "Second.").expect("set");
+    crontab
+        .set("job", "0 17 * * *", "Second.", None)
+        .expect("set");
     assert!(crontab.find("job").expect("kept").last.is_none());
 }
 
@@ -211,7 +228,9 @@ fn a_rewritten_job_starts_its_clock_again() {
 fn the_next_run_is_the_one_the_expression_names() {
     let temp = Temp::new("cron");
     let (mut crontab, _) = Crontab::open(&temp.path("cron.json"));
-    let entry = crontab.set("nine", "0 9 * * *", "Wake.").expect("set");
+    let entry = crontab
+        .set("nine", "0 9 * * *", "Wake.", None)
+        .expect("set");
 
     // From eight in the morning, nine the same day.
     let next = crontab
@@ -233,7 +252,9 @@ fn a_schedule_is_read_in_local_time() {
     // proves the same thing.
     let temp = Temp::new("cron");
     let (mut crontab, _) = Crontab::open(&temp.path("cron.json"));
-    let entry = crontab.set("nine", "0 9 * * *", "Wake.").expect("set");
+    let entry = crontab
+        .set("nine", "0 9 * * *", "Wake.", None)
+        .expect("set");
 
     let next = crontab
         .next_for(&entry, at(2026, 8, 11, 0, 1))
@@ -248,7 +269,7 @@ fn the_prompt_section_says_what_is_scheduled() {
     assert!(crontab.prompt_section().is_none(), "nothing to say yet");
 
     crontab
-        .set("morning", "0 9 * * *", "Read the notes.")
+        .set("morning", "0 9 * * *", "Read the notes.", None)
         .expect("set");
     let section = crontab.prompt_section().expect("some");
 
@@ -266,12 +287,16 @@ fn there_is_a_limit_on_how_many_jobs_there_can_be() {
     let (mut crontab, _) = Crontab::open(&temp.path("cron.json"));
     for index in 0..MAX_ENTRIES {
         crontab
-            .set(&format!("job-{index}"), "0 9 * * *", "Something.")
+            .set(&format!("job-{index}"), "0 9 * * *", "Something.", None)
             .expect("set");
     }
-    assert!(crontab.set("one-more", "0 9 * * *", "Something.").is_err());
+    assert!(
+        crontab
+            .set("one-more", "0 9 * * *", "Something.", None)
+            .is_err()
+    );
     // Replacing one that exists is still allowed at the limit.
-    assert!(crontab.set("job-0", "0 10 * * *", "Changed.").is_ok());
+    assert!(crontab.set("job-0", "0 10 * * *", "Changed.", None).is_ok());
 }
 
 #[test]
@@ -316,7 +341,7 @@ fn a_job_written_after_the_daemon_started_waits_for_its_schedule() {
     let (mut crontab, _) = Crontab::open_at(&temp.path("cron.json"), started_thirteen_hours_ago());
 
     let entry = crontab
-        .set("morning", &daily_in_twelve_hours(), "Wake.")
+        .set("morning", &daily_in_twelve_hours(), "Wake.", None)
         .expect("set");
     let promised = crontab
         .next_for(&entry, Local::now())
@@ -335,7 +360,7 @@ fn a_job_written_after_the_daemon_started_still_fires_when_it_is_due() {
     let (mut crontab, _) = Crontab::open_at(&temp.path("cron.json"), started_thirteen_hours_ago());
 
     let entry = crontab
-        .set("morning", &daily_in_twelve_hours(), "Wake.")
+        .set("morning", &daily_in_twelve_hours(), "Wake.", None)
         .expect("set");
     let promised = crontab
         .next_for(&entry, Local::now())
@@ -354,7 +379,7 @@ fn a_rewritten_job_waits_for_its_new_schedule() {
     let (mut crontab, _) = Crontab::open_at(&temp.path("cron.json"), started_thirteen_hours_ago());
 
     let entry = crontab
-        .set("job", &daily_in_twelve_hours(), "First.")
+        .set("job", &daily_in_twelve_hours(), "First.", None)
         .expect("set");
     let promised = crontab
         .next_for(&entry, Local::now())
@@ -362,7 +387,7 @@ fn a_rewritten_job_waits_for_its_new_schedule() {
     assert_eq!(crontab.due(promised).len(), 1);
 
     crontab
-        .set("job", &daily_in_twelve_hours(), "Second.")
+        .set("job", &daily_in_twelve_hours(), "Second.", None)
         .expect("set");
     assert!(
         crontab.due(Local::now()).is_empty(),
@@ -389,4 +414,73 @@ fn an_entry_from_an_older_file_measures_from_the_open() {
     let (mut crontab, problems) = Crontab::open_at(&path, started_thirteen_hours_ago());
     assert!(problems.is_empty(), "{problems:?}");
     assert_eq!(crontab.due(Local::now()).len(), 1);
+}
+
+#[test]
+fn a_job_remembers_the_conversation_that_wrote_it() {
+    let temp = Temp::new("cron");
+    let path = temp.path("cron.json");
+    let origin = Origin::new("20260909T090000-0000", "telegram: 42");
+
+    let (mut crontab, _) = Crontab::open(&path);
+    crontab
+        .set("morning", "0 9 * * *", "Say good morning.", Some(&origin))
+        .expect("set");
+
+    let (again, problems) = Crontab::open(&path);
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(again.find("morning").expect("the job").origin, Some(origin));
+}
+
+#[test]
+fn a_job_written_by_hand_answers_nowhere() {
+    let temp = Temp::new("cron");
+    let path = temp.path("cron.json");
+    temp.write(
+        "cron.json",
+        r#"{"version":1,"entries":[
+            {"name":"typed","schedule":"0 9 * * *","prompt":"Wake."}
+        ]}"#,
+    );
+
+    let (crontab, problems) = Crontab::open(&path);
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(crontab.find("typed").expect("the job").origin, None);
+}
+
+#[test]
+fn a_rewritten_job_answers_where_it_was_rewritten() {
+    let temp = Temp::new("cron");
+    let (mut crontab, _) = Crontab::open(&temp.path("cron.json"));
+    let first = Origin::new("s1", "telegram: 42");
+    let second = Origin::new("s2", "colony: #general");
+
+    crontab
+        .set("job", "0 9 * * *", "First.", Some(&first))
+        .expect("set");
+    crontab
+        .set("job", "0 9 * * *", "Second.", Some(&second))
+        .expect("set");
+
+    assert_eq!(crontab.find("job").expect("the job").origin, Some(second));
+}
+
+#[test]
+fn the_prompt_section_says_where_a_job_answers() {
+    let temp = Temp::new("cron");
+    let (mut crontab, _) = Crontab::open(&temp.path("cron.json"));
+    crontab
+        .set(
+            "morning",
+            "0 9 * * *",
+            "Read the notes.",
+            Some(&Origin::new("s1", "telegram: 42")),
+        )
+        .expect("set");
+
+    let section = crontab.prompt_section().expect("a section");
+    assert!(
+        section.contains("answers in telegram: 42"),
+        "the section says where it answers: {section}"
+    );
 }

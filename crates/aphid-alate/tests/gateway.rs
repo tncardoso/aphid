@@ -4,8 +4,9 @@ mod common;
 
 use std::time::Duration;
 
+use aphid_alate::gateway::origin::{self, Directory};
 use aphid_alate::gateway::wire::{Answer, Envelope, Frame, Request, Risk};
-use aphid_alate::gateway::{Client, Event, Server, is_listening};
+use aphid_alate::gateway::{Client, Event, Origin, Server, is_listening};
 use aphid_alate::sessions::Info;
 use aphid_code::plugins::permissions::{Decision, Risk as PermissionRisk};
 use aphid_core::{StopReason, Usage};
@@ -101,6 +102,10 @@ fn every_frame_round_trips() {
         },
         Frame::Notice {
             text: "a note".to_owned(),
+        },
+        Frame::Message {
+            from: "cron: morning-review".to_owned(),
+            text: "the build passed".to_owned(),
         },
         Frame::Prompt {
             text: "do the thing".to_owned(),
@@ -592,4 +597,126 @@ async fn what_a_client_calls_itself_still_fits_in_a_list() {
         panic!("attached");
     };
     assert_eq!(server.channel(connection), None);
+}
+
+// A directory resolves an address into a live conversation. These rules are the
+// whole of what makes a job reach somebody after the daemon was restarted.
+
+#[test]
+fn an_address_finds_the_session_that_is_still_open() {
+    let mut directory = Directory::default();
+    directory.opened("s1", "telegram: 42");
+    directory.opened("s2", "resident");
+
+    let origin = Origin::new("s1", "telegram: 42");
+    assert_eq!(directory.resolve(&origin), Some("s1".to_owned()));
+}
+
+#[test]
+fn an_address_finds_the_same_name_when_the_session_is_gone() {
+    let mut directory = Directory::default();
+    // The chat reconnected after a restart: same name, new conversation.
+    directory.opened("s9", "telegram: 42");
+
+    let origin = Origin::new("s1", "telegram: 42");
+    assert_eq!(directory.resolve(&origin), Some("s9".to_owned()));
+}
+
+#[test]
+fn a_name_two_conversations_share_is_no_address() {
+    let mut directory = Directory::default();
+    directory.opened("s1", "attached");
+    directory.opened("s2", "attached");
+
+    // A terminal says nothing when it attaches, so several carry one word.
+    // Guessing between them would put a job's report in a stranger's window.
+    assert_eq!(directory.resolve(&Origin::new("gone", "attached")), None);
+}
+
+#[test]
+fn a_conversation_that_closed_is_no_address() {
+    let mut directory = Directory::default();
+    directory.opened("s1", "telegram: 42");
+    directory.closed("s1");
+
+    assert_eq!(directory.resolve(&Origin::new("s1", "telegram: 42")), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_message_reaches_the_conversation_it_names_and_no_other() {
+    let temp = Temp::new("gateway");
+    let socket = temp.path("gateway.sock");
+    let (server, mut events) = Server::bind(&socket, None).expect("bind");
+    let directory = server.directory();
+
+    let mut chat = Client::connect(&socket).await.expect("connect");
+    let Event::Opened { connection: first } = event(&mut events).await else {
+        panic!("expected an opened event");
+    };
+    let mut other = Client::connect(&socket).await.expect("connect");
+    let Event::Opened {
+        connection: second, ..
+    } = event(&mut events).await
+    else {
+        panic!("expected an opened event");
+    };
+
+    // Two conversations, each watched by one client, as the daemon would do it.
+    server.watch(first, "s-chat");
+    server.watch(second, "s-other");
+    origin::write(&directory).opened("s-chat", "telegram: 42");
+    origin::write(&directory).opened("s-other", "attached");
+
+    let sent = server
+        .publisher()
+        .deliver(
+            &Origin::new("s-chat", "telegram: 42"),
+            "cron: morning-review",
+            "the build passed",
+        )
+        .expect("delivered");
+    assert_eq!(sent, 1);
+
+    let envelope = next(&mut chat).await;
+    assert_eq!(envelope.session.as_deref(), Some("s-chat"));
+    assert_eq!(
+        envelope.frame,
+        Frame::Message {
+            from: "cron: morning-review".to_owned(),
+            text: "the build passed".to_owned(),
+        }
+    );
+
+    // The other conversation is not shown somebody else's report.
+    server.send(Envelope::daemon(Frame::Notice {
+        text: "for everybody".to_owned(),
+    }));
+    assert!(
+        matches!(next(&mut other).await.frame, Frame::Notice { .. }),
+        "the second client saw the message meant for the first"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn a_message_nobody_would_read_is_not_a_delivery() {
+    let temp = Temp::new("gateway");
+    let socket = temp.path("gateway.sock");
+    let (server, _events) = Server::bind(&socket, None).expect("bind");
+    let directory = server.directory();
+
+    // An address that names nothing open.
+    let error = server
+        .publisher()
+        .deliver(&Origin::new("s1", "telegram: 42"), "cron: nightly", "hello")
+        .expect_err("nowhere to say it");
+    assert!(error.contains("telegram: 42"), "{error}");
+
+    // Open, and nobody watching it: a job's own session is like this, and so is
+    // a resident conversation with no terminal on it.
+    origin::write(&directory).opened("s1", "telegram: 42");
+    let error = server
+        .publisher()
+        .deliver(&Origin::new("s1", "telegram: 42"), "cron: nightly", "hello")
+        .expect_err("nobody to say it to");
+    assert!(error.contains("nobody"), "{error}");
 }

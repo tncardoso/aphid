@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 
 use crate::config::{Config, Permissions as Wanted};
-use crate::cron;
+use crate::cron::{self, CronComponent};
 use crate::gateway::{GatewayComponent, Publisher};
 use crate::home::Home;
 use crate::memory::{self, MemoryComponent};
@@ -61,7 +61,15 @@ pub enum Kind {
         attachments: bool,
     },
     /// Made by a job, and ended when its run ends.
-    Cron { name: String },
+    ///
+    /// `origin` is the conversation the job was scheduled in, and the only one
+    /// this session can speak into: nobody is watching a job's own session.
+    /// Absent for a job written by hand, or scheduled somewhere that is not a
+    /// conversation anybody returns to.
+    Cron {
+        name: String,
+        origin: Option<crate::gateway::Origin>,
+    },
 }
 
 impl Kind {
@@ -75,7 +83,21 @@ impl Kind {
                 ..
             } => channel.clone(),
             Kind::Attached { .. } => "attached".to_owned(),
-            Kind::Cron { name } => format!("cron: {name}"),
+            Kind::Cron { name, .. } => format!("cron: {name}"),
+        }
+    }
+
+    /// The address a job scheduled in this session should answer to.
+    ///
+    /// A job's own session is not one: it is closed when its run ends, and
+    /// nobody watches it while it lives, so a job scheduled by a job answers
+    /// where the first one answers rather than into a conversation that has
+    /// already gone.
+    #[must_use]
+    pub fn origin(&self, id: &str) -> Option<crate::gateway::Origin> {
+        match self {
+            Kind::Cron { origin, .. } => origin.clone(),
+            _ => Some(crate::gateway::Origin::new(id, self.label())),
         }
     }
 }
@@ -461,6 +483,39 @@ impl Blueprint {
                     sender,
                     self.permissions.clone(),
                     self.config.gateway.attachment_limit,
+                    &options.composition,
+                )),
+                serde_json::Value::Null,
+            )?;
+        }
+        // The `cron` tool this conversation offers, carrying its own address, so
+        // a job scheduled here knows where to answer. It shadows the daemon's
+        // global one for this agent alone.
+        if let Some(origin) = kind.origin(&id) {
+            options.composition.mount(
+                Arc::new(CronComponent::new(
+                    self.crontab.clone(),
+                    Some(origin),
+                    Some(id.clone()),
+                    &options.composition,
+                )),
+                serde_json::Value::Null,
+            )?;
+        }
+        // A job speaks in the conversation that scheduled it, and only there.
+        // Nobody is watching a job's own session, so without this its findings
+        // reach the transcript and no person.
+        if let Kind::Cron {
+            origin: Some(ref origin),
+            ..
+        } = kind
+        {
+            options.composition.mount(
+                Arc::new(crate::gateway::message::MessageComponent::new(
+                    id.clone(),
+                    kind.label(),
+                    origin.clone(),
+                    self.publisher.clone(),
                     &options.composition,
                 )),
                 serde_json::Value::Null,

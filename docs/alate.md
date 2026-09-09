@@ -59,7 +59,13 @@ one is being had.
 
 A **cron** session starts empty each time. It cannot see what you are saying,
 and you cannot see it in your own window — but the memory is shared, so a job
-can write a fact that you recall an hour later.
+can write a fact that you recall an hour later, and it can say one thing out
+loud in the conversation that scheduled it. Refer to [Cron](#cron).
+
+A chat on the Telegram bot is attached from the moment the alate starts, and not
+only once somebody writes to it. That is what gives a job at three in the
+morning somewhere to report to; the cost is a conversation in `/sessions` for
+each allowed chat, whether or not anybody is using it.
 
 What sessions share is everything that is *the alate* and not a conversation:
 the memory, the crontab, the plugins, the model and the permission gate.
@@ -291,12 +297,40 @@ The jobs are in `cron.json` in the home. You can edit that file yourself.
       "name": "morning-review",
       "schedule": "0 9 * * *",
       "prompt": "Read yesterday's notes and tell me what is still open.",
+      "origin": {
+        "session": "20260810T201400-0007",
+        "label": "telegram: 42"
+      },
       "since": "2026-08-10T20:14:00-03:00",
       "last": "2026-08-11T09:00:00-03:00"
     }
   ]
 }
 ```
+
+### Answering back
+
+Nobody is watching a job's own session, so what it says there reaches its
+transcript and no person. To reach one it has a `send_message` tool, which says
+one thing in **the conversation the job was scheduled in** — a Telegram chat, a
+colony channel, a terminal, the resident conversation. That conversation is
+`origin` on the job, written when the job was written, and the tool takes only
+the words: a job cannot choose somewhere else to write.
+
+The tool is not gated by `permissions`. The destination is not the agent's to
+pick, and a question asked at three in the morning is a question nobody answers.
+
+A conversation is found again by its id while it is still open, and by its name
+after that — `telegram: 42` comes back under that name when the chat reconnects,
+and so does `resident` when the alate is restarted. A terminal that said nothing
+when it attached is listed as `attached`, and several of them carry that one
+word: a job scheduled from such a terminal is answered while the terminal is
+there, and once it closes there is nothing to tell those apart, so the job is
+told there is nowhere to say it. Attach with a name — `aphid alate attach` and
+the Telegram bot both do — to be reachable tomorrow.
+
+A message that has nowhere to go is reported to the job as a failed tool call,
+not swallowed. The job can then write what it found to the memory instead.
 
 ### The schedule
 

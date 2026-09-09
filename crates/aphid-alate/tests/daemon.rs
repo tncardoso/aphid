@@ -24,9 +24,16 @@ use common::Temp;
 
 /// Wait for a daemon to come up, rather than for a fixed time.
 async fn attach(socket: &Path) -> Client {
+    attach_as(socket, None).await
+}
+
+/// The same, saying what this client is — which is what a listing shows, and
+/// what finds this conversation again after the daemon it first attached to has
+/// gone.
+async fn attach_as(socket: &Path, channel: Option<&str>) -> Client {
     for _ in 0..200 {
         if is_listening(socket)
-            && let Ok(client) = Client::connect(socket).await
+            && let Ok(client) = Client::connect_as(socket, channel).await
         {
             return client;
         }
@@ -407,7 +414,7 @@ async fn a_stored_fact_and_the_crontab_reach_the_model() {
         .expect("store");
     let (mut crontab, _) = Crontab::open(&home.cron_file());
     crontab
-        .set("nightly", "0 3 * * *", "Tidy the notes.")
+        .set("nightly", "0 3 * * *", "Tidy the notes.", None)
         .expect("set");
     drop(crontab);
 
@@ -1034,5 +1041,127 @@ async fn a_session_is_listed_under_the_channel_it_belongs_to() {
 
     drop(terminal);
     drop(bot);
+    daemon.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_job_reports_into_the_conversation_that_scheduled_it() {
+    // The bug this fixes: a job ran, said what it found, and nobody heard it.
+    // Nothing about this is Telegram — the client here is a plain terminal
+    // that gave itself a name.
+    let temp = Temp::new("daemon");
+    let config = quiet();
+    let home = home(&temp, &config);
+    let socket = home.socket();
+
+    // The job's address survives the daemon that recorded it: the session id
+    // below belongs to no conversation this daemon ever opened, so the only
+    // thing that can find the terminal is the name it attaches under. That is
+    // the case a restart leaves behind.
+    //
+    // No `last`, unlike the test above: a job that is already overdue fires on
+    // the daemon's first tick, which is before any terminal can have attached.
+    // Counted from the open, the job waits for the next minute — always after
+    // the terminal is there, which is what this test is about.
+    std::fs::write(
+        home.cron_file(),
+        r#"{"version":1,"entries":[
+            {"name":"sweep","schedule":"* * * * *","prompt":"Check on things.",
+             "origin":{"session":"a-session-from-yesterday","label":"desk"}}
+        ]}"#,
+    )
+    .expect("write");
+
+    // The only run in this test is the job's: the heartbeat is off and nothing
+    // is typed at the terminal, so the script is not a race.
+    let (stream_fn, _script) = scripted([
+        Turn::call(
+            "c1",
+            "send_message",
+            r#"{"text":"the sweep found nothing"}"#,
+        ),
+        Turn::text("Told them."),
+    ]);
+    let daemon = tokio::spawn(daemon::run(Options {
+        home,
+        config,
+        model: Some(dummy_model()),
+        stream_fn: Some(stream_fn),
+        sessions_dir: temp.path("sessions"),
+    }));
+
+    let mut client = attach_as(&socket, Some("desk")).await;
+    let mine = greeting(&mut client).await;
+
+    // Waiting on a minute of the daemon's clock, so the patience is the job's
+    // and not an answer's.
+    let envelope = within(&mut client, Duration::from_secs(90), |envelope| {
+        matches!(envelope.frame, Frame::Message { .. })
+    })
+    .await;
+
+    assert_eq!(
+        envelope.session.as_deref(),
+        Some(&mine[..]),
+        "the message arrived in this terminal's own conversation"
+    );
+    let Frame::Message { from, text } = envelope.frame else {
+        unreachable!("matched above")
+    };
+    assert_eq!(text, "the sweep found nothing");
+    assert_eq!(from, "cron: sweep", "the message says which job spoke");
+
+    daemon.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_job_is_written_with_the_conversation_that_asked_for_it() {
+    let temp = Temp::new("daemon");
+    let config = quiet();
+    let home = home(&temp, &config);
+    let socket = home.socket();
+    let cron_file = home.cron_file();
+
+    let (stream_fn, _script) = scripted([
+        Turn::call(
+            "c1",
+            "cron",
+            r#"{"name":"nightly","schedule":"0 3 * * *","prompt":"Tidy the notes."}"#,
+        ),
+        Turn::text("Scheduled."),
+    ]);
+    let daemon = tokio::spawn(daemon::run(Options {
+        home,
+        config,
+        model: Some(dummy_model()),
+        stream_fn: Some(stream_fn),
+        sessions_dir: temp.path("sessions"),
+    }));
+
+    let mut client = attach_as(&socket, Some("desk")).await;
+    let mine = greeting(&mut client).await;
+    client
+        .send(&Request::Prompt {
+            text: "schedule the tidy-up".to_owned(),
+        })
+        .await
+        .expect("send");
+
+    until(&mut client, |envelope| {
+        matches!(envelope.frame, Frame::RunEnded { .. })
+    })
+    .await;
+
+    let (crontab, problems) = Crontab::open(&cron_file);
+    assert!(problems.is_empty(), "{problems:?}");
+    let origin = crontab
+        .find("nightly")
+        .expect("the job")
+        .origin
+        .clone()
+        .expect("the job remembers where it was written");
+    assert_eq!(origin.session, mine);
+    assert_eq!(origin.label, "desk");
+
     daemon.abort();
 }

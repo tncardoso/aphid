@@ -70,6 +70,19 @@ line, which makes a long run legible from a telephone.
 In `/sessions`, a chat is listed as `telegram: <chat id>` and not as `attached`,
 so you can tell a conversation in a chat from one in a terminal.
 
+Every chat on the allow list is attached when the alate starts, before anybody
+has written to it. That is what lets a scheduled job report into a chat at three
+in the morning. It also means `/sessions` holds a conversation for each allowed
+chat from the moment the alate is up.
+
+## Messages from a scheduled job
+
+A job scheduled from a chat runs in a session of its own, and can say one thing
+back in that chat with `send_message`. It arrives as an ordinary message, with
+nothing added to it: what the job says is what you read, so the prompt of the
+job is what has to make it make sense. Refer to
+[Cron](../../alate.md#answering-back).
+
 ## Files from the agent
 
 When you explicitly ask the agent to send a file, it can call `send_attachment`
@@ -167,11 +180,10 @@ always** and **Deny**. The question goes only to a chat with a run in flight. A
 question that belongs to a terminal or to a job is left for the terminal to
 answer.
 
-Note that a chat that has spoken stays attached until the daemon stops. So an
-alate with a bot **is attended**, and a tool that asks permission is asked in
-the chat instead of being refused. Before a chat speaks for the first time, no
-connection exists, and an unattended alate behaves as it does with no bot. Refer
-to [Permissions](../../alate.md#permissions).
+Note that a chat on the allow list is attached from the moment the alate starts,
+and stays attached until the daemon stops. So an alate with a bot **is
+attended**, and a tool that asks permission is asked in the chat instead of
+being refused. Refer to [Permissions](../../alate.md#permissions).
 
 ## When Telegram does not answer
 

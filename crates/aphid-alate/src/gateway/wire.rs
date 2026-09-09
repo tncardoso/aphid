@@ -262,6 +262,16 @@ pub enum Frame {
     Notice {
         text: String,
     },
+    /// A message from another conversation, delivered into this one.
+    ///
+    /// A scheduled job runs in a session nobody is watching. This is the only
+    /// frame that crosses from one conversation into another, which is why it
+    /// says where it came from: `from` is the label of the session that spoke,
+    /// as `/sessions` would show it.
+    Message {
+        from: String,
+        text: String,
+    },
     /// A prompt went to the agent, from a client or from a plugin. Echoed to
     /// everybody watching that session, so two terminals on one session agree.
     Prompt {

@@ -28,6 +28,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
 
+use super::origin::{self, Origin};
 use super::wire::{Envelope, Frame, Request};
 
 /// How many envelopes the fan-out holds for a connection that is behind.
@@ -102,6 +103,12 @@ struct Shared {
     attachment_answer_connections: Mutex<HashMap<u64, u64>>,
     log: Mutex<Option<File>>,
     envelopes: broadcast::Sender<Envelope>,
+    /// The conversations that are open, by id and by the name each carries.
+    ///
+    /// The daemon owns the sessions and keeps this in step; the gateway holds
+    /// it because the gateway is what has to turn an address into a session to
+    /// publish into. See [`Server::directory`].
+    directory: origin::Shared,
 }
 
 impl Server {
@@ -154,6 +161,7 @@ impl Server {
             attachment_answer_connections: Mutex::new(HashMap::new()),
             log: Mutex::new(log.and_then(open_log)),
             envelopes,
+            directory: origin::Shared::default(),
         });
 
         tokio::spawn(accept(listener, shared.clone(), events));
@@ -167,6 +175,16 @@ impl Server {
             },
             incoming,
         ))
+    }
+
+    /// The directory of open conversations, for the daemon to keep in step.
+    ///
+    /// It calls `opened` and `closed` at the two points that already announce a
+    /// session starting and ending, so what this holds is what the clients were
+    /// told.
+    #[must_use]
+    pub fn directory(&self) -> origin::Shared {
+        Arc::clone(&self.shared.directory)
     }
 
     /// A handle for the plugin and the sink, which publish from hooks.
@@ -376,6 +394,29 @@ impl Shared {
             .unwrap_or(false)
     }
 
+    /// How many connections are watching a session.
+    ///
+    /// Publishing into a conversation nobody is looking at reaches the log and
+    /// nothing else, so a delivery counts its audience before calling itself
+    /// one.
+    fn watchers(&self, session: &str) -> usize {
+        self.connections
+            .lock()
+            .map(|connections| {
+                connections
+                    .values()
+                    .filter(|connection| {
+                        connection
+                            .current
+                            .lock()
+                            .ok()
+                            .is_some_and(|current| current.as_deref() == Some(session))
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
     fn publish(&self, envelope: Envelope) {
         if let Ok(mut log) = self.log.lock()
             && let Some(file) = log.as_mut()
@@ -421,6 +462,54 @@ impl Publisher {
             Err(poisoned) => poisoned.into_inner().clone(),
         };
         self.shared.publish(Envelope { session, frame });
+    }
+
+    /// Deliver a message into the conversation an origin names.
+    ///
+    /// Returns how many connections received it.
+    ///
+    /// The address is resolved **now** and not when the sender was built. That
+    /// is the difference from [`AttachmentSender`], which binds a connection at
+    /// mount time: between a job being scheduled and the job running, the
+    /// conversation it answers to may have come back with a new session id, and
+    /// only a fresh look finds it.
+    ///
+    /// This publishes rather than writing to one connection, so the message
+    /// reaches everybody watching that conversation — a terminal and a window
+    /// on the same session both see it — and goes through `alate.log` like
+    /// everything else.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the origin names no open conversation, and when it names one
+    /// nobody is watching. A message published where nobody is looking is not a
+    /// delivery, and reporting it as one is the very thing this exists to fix.
+    pub fn deliver(&self, origin: &Origin, from: &str, text: &str) -> Result<usize, String> {
+        let session = origin::read(&self.shared.directory)
+            .resolve(origin)
+            .ok_or_else(|| {
+                format!(
+                    "{} is not open, so there is nowhere to say this",
+                    origin.label
+                )
+            })?;
+
+        let watchers = self.shared.watchers(&session);
+        if watchers == 0 {
+            return Err(format!(
+                "nobody is watching {}, so there is nobody to say this to",
+                origin.label
+            ));
+        }
+
+        self.shared.publish(Envelope {
+            session: Some(session),
+            frame: Frame::Message {
+                from: from.to_owned(),
+                text: text.to_owned(),
+            },
+        });
+        Ok(watchers)
     }
 
     /// Get a file sender for one attachment-capable gateway connection.

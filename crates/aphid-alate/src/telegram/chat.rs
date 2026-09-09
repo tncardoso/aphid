@@ -243,6 +243,12 @@ impl Chat {
                 self.failed(error).await;
             }
 
+            // Straight out, and not through `self.reply`: that buffer is only
+            // flushed by the end of a turn, and there is no turn here. A job
+            // wrote this in a session of its own and the text is all there is
+            // — the prompt it ran is what has to make the message make sense.
+            Frame::Message { text, .. } if mine => self.say(&text).await,
+
             // Only this session's. A notice from the daemon reaches every
             // client, and forwarding those would put every start-up problem in
             // every chat.

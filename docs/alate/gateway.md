@@ -66,6 +66,7 @@ and each request is about that one. `watch` is what changes it.
 | `turn_ended` | `usage`, `stop`, `error` | A turn is complete. |
 | `run_ended` | `stop`, `turns`, `error` | The run stopped. |
 | `notice` | `text` | Something a plugin wants seen. |
+| `message` | `from`, `text` | A message from another conversation, delivered into this one. `from` names the session that spoke. |
 | `prompt` | `text` | A prompt went to the agent. Echoed to everybody in that session. |
 | `heartbeat` | `at`, `note` | The alate woke on its own. |
 | `confirm` | `id`, `tool`, `summary`, `risk` | A tool waits for permission. The first answer decides. |

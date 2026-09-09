@@ -23,6 +23,8 @@ use croner::Cron;
 use croner::parser::{CronParser, Seconds};
 use serde::{Deserialize, Serialize};
 
+use crate::gateway::Origin;
+
 /// The format version written by this build.
 pub const VERSION: u32 = 1;
 
@@ -50,6 +52,13 @@ pub struct Entry {
     /// An entry from an older file, or one somebody wrote by hand, has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<DateTime<Local>>,
+    /// The conversation this job was scheduled in, and may write back to.
+    ///
+    /// A job runs where nobody is watching, so without this there is nowhere
+    /// for it to report to. Absent for a job scheduled somewhere that is not a
+    /// conversation anybody returns to, and for one written by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<Origin>,
 }
 
 /// The whole file.
@@ -163,7 +172,13 @@ impl Crontab {
     ///
     /// Fails when the name, the schedule or the prompt is not one a crontab may
     /// hold.
-    pub fn set(&mut self, name: &str, schedule: &str, prompt: &str) -> Result<Entry, String> {
+    pub fn set(
+        &mut self,
+        name: &str,
+        schedule: &str,
+        prompt: &str,
+        origin: Option<&Origin>,
+    ) -> Result<Entry, String> {
         let name = name.trim();
         crate::home::check_name(name).map_err(|error| error.to_string())?;
 
@@ -185,6 +200,9 @@ impl Crontab {
             // schedule that no longer exists.
             last: None,
             since: Some(Local::now()),
+            // A rewrite answers wherever it was rewritten, which is the
+            // conversation whose person is asking for it now.
+            origin: origin.cloned(),
         };
         self.entries.retain(|held| held.name != name);
         self.entries.push(entry.clone());
@@ -272,12 +290,20 @@ impl Crontab {
             let meaning = parse(&entry.schedule)
                 .map(|cron| cron.describe())
                 .unwrap_or_default();
+            // Where it answers, so the model knows the capability exists while
+            // it is still writing the job rather than only once the job runs.
+            let answers = entry
+                .origin
+                .as_ref()
+                .map(|origin| format!(" — answers in {}", origin.label))
+                .unwrap_or_default();
             text.push_str(&format!(
-                "{} — {} ({}) — {}\n",
+                "{} — {} ({}) — {}{}\n",
                 entry.name,
                 entry.schedule,
                 meaning.trim().trim_end_matches('.'),
-                entry.prompt
+                entry.prompt,
+                answers
             ));
         }
         text.push_str("</scheduled_jobs>");
@@ -350,8 +376,13 @@ pub struct CronParams {
 }
 
 /// `cron` — schedule a prompt, change one, or remove one.
+///
+/// `origin` is the conversation this tool is being called in, and is written
+/// onto every job it schedules. It comes from the session and not from the
+/// arguments: the model does not know which conversation it is in, and asking
+/// it to name one would be asking it to guess.
 #[must_use]
-pub fn cron_tool(crontab: Shared) -> impl ToolHandler {
+pub fn cron_tool(crontab: Shared, origin: Option<Origin>) -> impl ToolHandler {
     let schema = serde_json::json!({
         "type": "object",
         "properties": {
@@ -374,12 +405,19 @@ pub fn cron_tool(crontab: Shared) -> impl ToolHandler {
         "required": ["name"],
         "additionalProperties": false
     });
-    let description = "Schedule a prompt to run later, again and again. It runs in a session of \
-                       its own, which starts empty and will not remember what you are doing now \
-                       — so put everything it needs in the prompt. Your memory is shared with \
-                       it, so a job can write facts you will recall afterwards. Use `off` as the \
-                       schedule to remove a job."
+    let mut description = "Schedule a prompt to run later, again and again. It runs in a session \
+                           of its own, which starts empty and will not remember what you are \
+                           doing now — so put everything it needs in the prompt. Your memory is \
+                           shared with it, so a job can write facts you will recall afterwards. \
+                           Use `off` as the schedule to remove a job."
         .to_owned();
+    if let Some(origin) = &origin {
+        description.push_str(&format!(
+            " A job scheduled here can write back into this conversation ({}) with \
+             `send_message`, so tell it in the prompt what is worth reporting.",
+            origin.label
+        ));
+    }
 
     tool_fn(
         "cron",
@@ -387,6 +425,7 @@ pub fn cron_tool(crontab: Shared) -> impl ToolHandler {
         schema,
         move |params: CronParams, _cx| {
             let crontab = crontab.clone();
+            let origin = origin.clone();
             async move {
                 let schedule = params.schedule.unwrap_or_default();
                 let mut crontab = lock(&crontab);
@@ -408,6 +447,7 @@ pub fn cron_tool(crontab: Shared) -> impl ToolHandler {
                     &params.name,
                     &schedule,
                     params.prompt.as_deref().unwrap_or_default(),
+                    origin.as_ref(),
                 ) {
                     Ok(entry) => entry,
                     Err(error) => return ToolOutcome::error(error),
@@ -437,16 +477,33 @@ pub fn cron_tool(crontab: Shared) -> impl ToolHandler {
 ///
 /// It subscribes to no hooks: the crontab is read by the daemon loop, not by
 /// anything inside a run.
+///
+/// Mounted twice, and for two reasons. The daemon mounts one with no origin and
+/// no scope, which every session sees. A session that is a conversation mounts
+/// another carrying its own origin, scoped to itself — a scoped tool shadows a
+/// global one of the same name for that agent alone, so each conversation
+/// schedules jobs that answer back to it, and nobody else's changes.
 pub struct CronComponent {
     crontab: Shared,
+    /// The conversation jobs scheduled through this one will answer in.
+    origin: Option<Origin>,
+    /// The session this tool belongs to, or `None` for the daemon's global one.
+    scope: Option<String>,
     tools: Arc<Toolbox>,
 }
 
 impl CronComponent {
     #[must_use]
-    pub fn new(crontab: Shared, composition: &Composition) -> Self {
+    pub fn new(
+        crontab: Shared,
+        origin: Option<Origin>,
+        scope: Option<String>,
+        composition: &Composition,
+    ) -> Self {
         Self {
             crontab,
+            origin,
+            scope,
             tools: Arc::clone(&composition.tools),
         }
     }
@@ -458,8 +515,11 @@ impl Component for CronComponent {
     }
 
     fn apply(&self, ctx: &Context) -> Result<(), String> {
-        self.tools
-            .contribute(ctx, Arc::new(cron_tool(self.crontab.clone())));
+        let tool = Arc::new(cron_tool(self.crontab.clone(), self.origin.clone()));
+        match &self.scope {
+            Some(scope) => self.tools.contribute_scoped(ctx, scope.clone(), tool),
+            None => self.tools.contribute(ctx, tool),
+        }
         Ok(())
     }
 }

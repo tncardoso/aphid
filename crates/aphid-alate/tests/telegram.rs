@@ -432,7 +432,19 @@ async fn another_session_is_not_this_chat_s_business() {
 async fn a_chat_that_is_not_allowed_is_told_its_id_once() {
     let temp = Temp::new("telegram-refused");
     let (api, feed) = Fake::new();
-    let (_server, mut events, bridge) = bridge(&temp, allowed(), api.clone());
+    let (server, mut events, bridge) = bridge(&temp, allowed(), api.clone());
+
+    // The allowed chat attaches when the bridge starts, so that one connection
+    // is expected. Everything after it is what this test is about.
+    let opened = events.recv().await.expect("the allowed chat attaches");
+    let Event::Opened { connection } = opened else {
+        panic!("expected an attach, got {opened:?}");
+    };
+    assert_eq!(
+        server.channel(connection).as_deref(),
+        Some(&format!("telegram: {MINE}")[..])
+    );
+
     feed.send(json!([
         message(1, THEIRS, "let me in"),
         message(2, THEIRS, "let me in again"),
@@ -1088,6 +1100,94 @@ async fn a_file_that_is_not_audio_is_ignored() {
         api.calls("sendMessage").is_empty(),
         "{:?}",
         api.calls("sendMessage")
+    );
+
+    bridge.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_allowed_chat_has_a_conversation_before_anybody_writes() {
+    // So that a job at three in the morning has somewhere to report to. A chat
+    // that only attaches when somebody writes to it is unreachable all night.
+    let temp = Temp::new("telegram-eager");
+    let (api, _feed) = Fake::new();
+    let (server, mut events, bridge) = bridge(&temp, allowed(), api.clone());
+
+    let Event::Opened { connection } = event(&mut events).await else {
+        panic!("the allowed chat attaches on its own");
+    };
+    assert_eq!(
+        server.channel(connection).as_deref(),
+        Some(&format!("telegram: {MINE}")[..])
+    );
+
+    bridge.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_job_speaking_from_its_own_session_reaches_the_chat() {
+    let temp = Temp::new("telegram-message");
+    let (api, feed) = Fake::new();
+    let (server, mut events, bridge) = bridge(&temp, allowed(), api.clone());
+
+    // One message in, only to know when the chat has taken the greeting in:
+    // the greeting goes down one connection and a session's frames go to
+    // everybody watching it, so their order on the wire is not fixed, and a
+    // frame that arrives first is dropped for belonging to no session yet. The
+    // held prompt below is sent only once the chat knows which session is its
+    // own, so waiting for it is waiting for exactly that.
+    feed.send(json!([message(1, MINE, "hello")])).expect("feed");
+    let Event::Opened { connection } = event(&mut events).await else {
+        panic!("attached");
+    };
+    greet(&server, connection);
+    event(&mut events).await;
+
+    // A frame from a job's session, delivered into this conversation.
+    server.send(Envelope::from(
+        SESSION,
+        Frame::Message {
+            from: "cron: morning-review".to_owned(),
+            text: "the build passed".to_owned(),
+        },
+    ));
+
+    // Straight out, with no turn to end and nothing added to it.
+    let said = api.nth("sendMessage", 0).await;
+    assert_eq!(said["chat_id"], MINE);
+    assert_eq!(text(&said), "the build passed");
+
+    bridge.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_job_speaking_into_another_conversation_is_not_this_chat_s() {
+    let temp = Temp::new("telegram-message-other");
+    let (api, feed) = Fake::new();
+    let (server, mut events, bridge) = bridge(&temp, allowed(), api.clone());
+
+    // As above: the held prompt is the point at which the chat is watching, so
+    // what follows is dropped for being another conversation's rather than for
+    // arriving early.
+    feed.send(json!([message(1, MINE, "hello")])).expect("feed");
+    let Event::Opened { connection } = event(&mut events).await else {
+        panic!("attached");
+    };
+    greet(&server, connection);
+    event(&mut events).await;
+
+    server.send(Envelope::from(
+        "s-2",
+        Frame::Message {
+            from: "cron: nightly".to_owned(),
+            text: "not for you".to_owned(),
+        },
+    ));
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        api.calls("sendMessage").is_empty(),
+        "a job reported into somebody else's conversation and this chat said it"
     );
 
     bridge.abort();

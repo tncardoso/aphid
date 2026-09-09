@@ -580,6 +580,12 @@ impl Model {
                         }
                     }
                     Frame::Prompt { text } => view.push(Entry::User(text)),
+                    // Not behind `show_log`, unlike a notice: this is somebody
+                    // else's conversation speaking to this one on purpose, and
+                    // hiding it would lose the only thing a job ever says.
+                    Frame::Message { from, text } => {
+                        view.push(Entry::Notice(format!("{from}: {text}")));
+                    }
                     Frame::Notice { text } if show_log => view.push(Entry::Notice(text)),
                     // A frame this build has no name for. A daemon one version
                     // ahead is not a reason to stop drawing.

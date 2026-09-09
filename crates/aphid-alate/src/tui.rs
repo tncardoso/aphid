@@ -493,6 +493,12 @@ impl App {
                         }
                     }
                     Wire::Prompt { text } => view.push_user(text),
+                    // Not behind `show_log`, unlike a notice: this is somebody
+                    // else's conversation speaking to this one on purpose, and
+                    // hiding it would lose the only thing a job ever says.
+                    Wire::Message { from, text } => {
+                        view.push_notice(format!("{from}: {text}"));
+                    }
                     Wire::Notice { text } => {
                         if !show_log {
                             return Cmd::none();

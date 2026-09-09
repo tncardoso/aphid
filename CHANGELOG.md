@@ -4,6 +4,23 @@
 
 ### Added
 
+- **A scheduled job can answer in the conversation that scheduled it.** A job
+  ran in a session of its own, said what it found, and nobody heard it: nothing
+  was watching that session, and the job had no way to reach anything that was.
+  A job now records the conversation it was written in and gets a
+  `send_message` tool that says one thing there — a Telegram chat, a colony
+  channel, a terminal, the resident conversation. The conversation is found by
+  its id while it is open and by its name after that, so a chat that reconnects
+  and an alate that was restarted are both still reachable. A message that has
+  nowhere to go is reported to the job rather than swallowed. Refer to the
+  Cron section of the Alate page.
+
+- **The Telegram bot attaches its chats when the alate starts.** Every chat on
+  the allow list has a conversation from the moment the alate is up, instead of
+  only after somebody writes to it. That is what gives a job at three in the
+  morning a chat to report into. A conversation for each allowed chat now shows
+  in `/sessions` from the start.
+
 - **The Telegram bot can receive files from the agent.** When you ask an
   alate to send a file in a Telegram chat, it can attach a file from an allowed
   workspace path as a document. The permission policy still controls each send.
