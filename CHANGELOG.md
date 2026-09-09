@@ -16,6 +16,14 @@
   one time into the cache of the machine. This is behind a build feature,
   `voice`, and a `voice` block in `alate.json`. Refer to the Telegram page.
 
+### Fixed
+
+- **A scheduled job waits for its time.** A job you gave the alate ran as soon
+  as you wrote it, if the time it names had already gone past since the alate
+  started — a job written at eight in the evening for nine in the morning ran
+  immediately. A new job now counts from the moment you write it, which is what
+  the `cron` tool said it would do all along.
+
 ### Changed
 
 - The graphical interface is now a build feature, `gui`, on by default. A

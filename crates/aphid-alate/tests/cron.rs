@@ -297,3 +297,96 @@ fn an_overdue_job_fires_at_once() {
     let fired = crontab.due(Local::now());
     assert_eq!(fired.len(), 1, "an overdue job should fire at once");
 }
+
+/// A daemon that has been up for thirteen hours.
+///
+/// Long enough that the occurrence twelve hours back — the other side of
+/// [`daily_in_twelve_hours`] — falls inside the window, whatever minute of the
+/// hour the suite runs at.
+fn started_thirteen_hours_ago() -> chrono::DateTime<Local> {
+    Local::now() - chrono::Duration::hours(13)
+}
+
+#[test]
+fn a_job_written_after_the_daemon_started_waits_for_its_schedule() {
+    // The occurrence twelve hours ago belongs to a job that did not exist
+    // then. A job is measured from when it was written, not from when the
+    // daemon came up, so nothing is due yet.
+    let temp = Temp::new("cron");
+    let (mut crontab, _) = Crontab::open_at(&temp.path("cron.json"), started_thirteen_hours_ago());
+
+    let entry = crontab
+        .set("morning", &daily_in_twelve_hours(), "Wake.")
+        .expect("set");
+    let promised = crontab
+        .next_for(&entry, Local::now())
+        .expect("an occurrence");
+
+    assert!(
+        crontab.due(Local::now()).is_empty(),
+        "a job just written must wait for {promised}, not fire at once"
+    );
+}
+
+#[test]
+fn a_job_written_after_the_daemon_started_still_fires_when_it_is_due() {
+    // The other half: waiting is not the same as never running.
+    let temp = Temp::new("cron");
+    let (mut crontab, _) = Crontab::open_at(&temp.path("cron.json"), started_thirteen_hours_ago());
+
+    let entry = crontab
+        .set("morning", &daily_in_twelve_hours(), "Wake.")
+        .expect("set");
+    let promised = crontab
+        .next_for(&entry, Local::now())
+        .expect("an occurrence");
+
+    let fired = crontab.due(promised);
+    assert_eq!(fired.len(), 1, "the job should run at {promised}");
+    assert_eq!(fired[0].name, "morning");
+}
+
+#[test]
+fn a_rewritten_job_waits_for_its_new_schedule() {
+    // Rewriting clears `last`, and the entry must then measure from the
+    // rewrite rather than falling back to the start of the daemon.
+    let temp = Temp::new("cron");
+    let (mut crontab, _) = Crontab::open_at(&temp.path("cron.json"), started_thirteen_hours_ago());
+
+    let entry = crontab
+        .set("job", &daily_in_twelve_hours(), "First.")
+        .expect("set");
+    let promised = crontab
+        .next_for(&entry, Local::now())
+        .expect("an occurrence");
+    assert_eq!(crontab.due(promised).len(), 1);
+
+    crontab
+        .set("job", &daily_in_twelve_hours(), "Second.")
+        .expect("set");
+    assert!(
+        crontab.due(Local::now()).is_empty(),
+        "a rewritten job must wait as a new one does"
+    );
+}
+
+#[test]
+fn an_entry_from_an_older_file_measures_from_the_open() {
+    // A crontab written by an older aphid, or by hand, says nothing about when
+    // its jobs were written. Those fall back to the open, which is what a
+    // daemon that restarts gives them: one catch-up run, and no more.
+    let temp = Temp::new("cron");
+    let path = temp.write(
+        "cron.json",
+        &format!(
+            r#"{{"version":1,"entries":[
+                {{"name":"morning","schedule":"{}","prompt":"Wake."}}
+            ]}}"#,
+            daily_in_twelve_hours()
+        ),
+    );
+
+    let (mut crontab, problems) = Crontab::open_at(&path, started_thirteen_hours_ago());
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(crontab.due(Local::now()).len(), 1);
+}
