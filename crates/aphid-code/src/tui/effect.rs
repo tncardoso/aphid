@@ -30,6 +30,14 @@ pub enum Effect {
     ClearTranscript,
     /// Run a `!` command in the workspace root.
     Bang(String),
+    /// Ask the file index for the paths that match `query`.
+    ///
+    /// Sent on every keystroke the file list takes, the empty one it opens on
+    /// included. The index is opened the first time one of these arrives, so a
+    /// session that never types `@` never reads the tree.
+    SearchFiles {
+        query: String,
+    },
     /// Put the selected text on the clipboard.
     Copy(String),
     /// Ask a process to stop.

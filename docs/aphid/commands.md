@@ -70,6 +70,30 @@ prefix.
 `/clear` and `/new` are the same command. The conversation is dropped and the
 system prompt is kept, so the agent still knows the project.
 
+## The file list
+
+Type `@` at the start of a word to open a list of every file in the workspace.
+Type any part of a path to cut the list down. The letters do not have to be
+next to each other, and a letter that is wrong is forgiven, so `@tuiapp` finds
+`crates/aphid-code/src/tui/app.rs`.
+
+| Key | Result |
+| --- | --- |
+| Arrow keys, or `Ctrl-P` and `Ctrl-N` | Move the cursor |
+| `Enter` | Write the path into the input, where the `@` was |
+| `Esc`, or `Ctrl-C` | Close the list, and keep the `@` |
+| `Backspace` | Take back one letter of the query, or close the list when there is none |
+| Space | Close the list, and type the space |
+
+The path that the list writes is relative to the workspace root, which is the
+path that the tools of the agent accept.
+
+An `@` inside a word is only a character: `you@example.com` opens no list.
+
+The file tree is read the first time that you press `@`, and a watcher keeps
+it correct after that. A file that you make while the terminal is open is in
+the list. A session that never presses `@` does not read the tree.
+
 ## `/ps`
 
 The list shows each command that runs now, and the last four commands that

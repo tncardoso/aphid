@@ -120,6 +120,13 @@ pub fn draw(app: &App, frame: &mut Frame<'_>, cache: &mut CodeCache) {
 
     // The textarea draws its own cursor cell during render; there is no
     // manual `set_cursor_position` to do here.
+    //
+    // The file list goes over the transcript and the box it is writing into,
+    // and under the modals: a question the agent is blocked on outranks a
+    // search the typist can start again.
+    if let Some(files) = &app.files {
+        files.render(frame, frame.area());
+    }
     if let Some(modal) = &app.modal {
         modal.render(frame, frame.area());
     }

@@ -101,6 +101,15 @@ pub enum Msg {
     Poll,
     /// What the process registry holds, in answer to a poll.
     Processes(Vec<exec::Process>),
+    /// What the file index answered, and the query it was asked.
+    ///
+    /// The query comes back so a late answer can be told from the current one:
+    /// a search runs off the loop, and two keystrokes in quick succession can
+    /// land out of order.
+    FileMatches {
+        query: String,
+        paths: Vec<String>,
+    },
     /// A `!` command finished.
     BangOutput {
         command: String,

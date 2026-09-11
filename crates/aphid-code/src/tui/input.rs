@@ -30,6 +30,8 @@ pub enum Action {
     CycleModel,
     /// Ctrl-T: show or hide reasoning.
     ToggleThinking,
+    /// `@` at the head of a word: open the list of the workspace's files.
+    OpenFiles,
 }
 
 /// A multi-line editor, backed by `ratatui-textarea`.
@@ -147,6 +149,38 @@ impl Input {
             .is_some_and(|line| line.starts_with('!'))
     }
 
+    /// The cursor is at the head of a word: nothing before it, or a space.
+    ///
+    /// What keeps `thiago@exemplo.com` from opening a list of files. An `@`
+    /// that follows a letter is part of what is being typed, and the only `@`
+    /// that opens anything is one that starts a word.
+    fn at_word_start(&self) -> bool {
+        let (row, column) = {
+            let cursor = self.textarea.cursor();
+            (cursor.0, cursor.1)
+        };
+        if column == 0 {
+            return true;
+        }
+        self.textarea
+            .lines()
+            .get(row)
+            .and_then(|line| line.chars().nth(column - 1))
+            .is_none_or(char::is_whitespace)
+    }
+
+    /// Take `back` characters off the left of the cursor and put `text` there.
+    ///
+    /// How the `@` that opened the file list becomes the path that was chosen.
+    /// The rest of the line is not touched, so a path lands in the middle of a
+    /// sentence as readily as at its end.
+    pub fn replace_trigger(&mut self, back: usize, text: &str) {
+        for _ in 0..back {
+            self.textarea.delete_char();
+        }
+        self.textarea.insert_str(text);
+    }
+
     /// Recompute the scroll window for a viewport of `height` screen rows.
     /// Call once per frame, after the textarea has been rendered into an
     /// area of that height, so the scrollbar matches what was actually drawn.
@@ -195,6 +229,14 @@ impl Input {
             KeyCode::Down if self.textarea.cursor().0 + 1 == self.line_count() => {
                 self.recall(1);
                 return Action::None;
+            }
+
+            // `@` opens the file list, and is typed as well: the caller draws
+            // the list over a box that reads `see @`, and an Esc leaves the
+            // character the user asked for rather than swallowing it.
+            KeyCode::Char('@') if !control && self.at_word_start() => {
+                self.textarea.insert_char('@');
+                return Action::OpenFiles;
             }
 
             KeyCode::Enter if shift => {
@@ -546,6 +588,55 @@ mod tests {
         typed(&mut input, "see: ");
         input.paste("one\r\ntwo\rthree");
         assert_eq!(input.text(), "see: one\ntwo\nthree");
+    }
+
+    #[test]
+    fn an_at_sign_that_opens_a_word_asks_for_the_file_list() {
+        let mut input = Input::default();
+        assert_eq!(input.handle(key(KeyCode::Char('@'))), Action::OpenFiles);
+        assert_eq!(input.text(), "@", "the character is typed as well");
+
+        typed(&mut input, "see ");
+        assert_eq!(
+            input.handle(key(KeyCode::Char('@'))),
+            Action::OpenFiles,
+            "an at sign after a space opens one too"
+        );
+        assert_eq!(input.text(), "@see @");
+    }
+
+    #[test]
+    fn an_at_sign_inside_a_word_is_only_a_character() {
+        let mut input = Input::default();
+        typed(&mut input, "thiago");
+        assert_eq!(
+            input.handle(key(KeyCode::Char('@'))),
+            Action::None,
+            "an address is not a file list"
+        );
+        typed(&mut input, "exemplo.com");
+        assert_eq!(input.text(), "thiago@exemplo.com");
+    }
+
+    #[test]
+    fn an_at_sign_opening_a_later_line_asks_for_the_list() {
+        let mut input = Input::default();
+        typed(&mut input, "one");
+        input.handle(shift_enter());
+        assert_eq!(input.handle(key(KeyCode::Char('@'))), Action::OpenFiles);
+        assert_eq!(input.text(), "one\n@");
+    }
+
+    #[test]
+    fn replacing_the_trigger_leaves_the_rest_of_the_line_alone() {
+        let mut input = Input::default();
+        typed(&mut input, "read @ please");
+        // Back to just after the `@`.
+        for _ in 0..7 {
+            input.handle(key(KeyCode::Left));
+        }
+        input.replace_trigger(1, "src/main.rs");
+        assert_eq!(input.text(), "read src/main.rs please");
     }
 
     #[test]

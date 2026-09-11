@@ -105,6 +105,11 @@ sha2 = "0.10"
 # and stay off: a colony is cleartext, and every one of them costs a cipher.
 # `os-rng` is what `Keys::generate` needs.
 nostr = { version = "0.45", features = ["os-rng"] }
+# The file index behind `@` in the terminal: the search engine of `fff`, which
+# keeps the tree in memory, follows it with a watcher, and matches a path that
+# was mistyped. Its default features are the ripgrep ones, and they are what
+# make the walk obey `.gitignore`, so they stay on.
+fff-search = "0.10"
 ratatui = "0.30"
 ratatui-textarea = "0.9"
 # `bundled` builds SQLite from source rather than hunting for a system one on

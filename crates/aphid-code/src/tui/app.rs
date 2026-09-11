@@ -31,6 +31,7 @@ use crate::tui::event::{UiComponent, UiConfirmer, UiSink, spawn_input_thread};
 use crate::tui::input::{Action, Input};
 use crate::tui::modal::{Confirm, Modal};
 use crate::tui::msg::Msg;
+use crate::tui::picker::{Picker, Row};
 use crate::tui::render;
 use crate::tui::runtime::{
     self, Answers, Cmd, Draw, Effects, Hub, Program, Subs, Timer, restore, setup,
@@ -61,12 +62,25 @@ const MOUSE_SCROLL_LINES: usize = 3;
 /// How many transcript lines PageUp and PageDown move.
 const PAGE_LINES: usize = 10;
 
+/// How many paths one search of the file index brings back.
+///
+/// The list shows twelve at a time, so this is four screens of scrolling. More
+/// than anybody reads before typing another letter to narrow it.
+const FILE_MATCHES: usize = 50;
+
 /// Everything the UI holds.
 pub struct App {
     pub scrollback: Scrollback,
     pub input: Input,
     pub status: Status,
     pub modal: Option<Modal>,
+    /// The list of the workspace's files, while `@` has one open.
+    ///
+    /// Separate from `modal` because it is a different kind of thing: a modal
+    /// is a fixed list the agent or a command put there, and this is an open
+    /// one the typist is narrowing. Drawn under the modals, so a question that
+    /// arrives mid-search still gets the front of the screen.
+    pub files: Option<Picker>,
     /// The plugin surfaces, for focus, events and rendering.
     pub surfaces: SurfaceLayer,
     /// The loaded plugins, for the commands they registered and `/plugins`.
@@ -139,6 +153,7 @@ impl App {
             input: Input::default(),
             status,
             modal: None,
+            files: None,
             surfaces: SurfaceLayer::default(),
             catalog: Catalog::new(),
             current: harness.agent.model().clone(),
@@ -173,6 +188,7 @@ impl App {
             input: Input::default(),
             status: Status::from_model(agent.model()),
             modal: None,
+            files: None,
             surfaces: SurfaceLayer::default(),
             catalog: Catalog::new(),
             current: agent.model().clone(),
@@ -359,7 +375,9 @@ impl App {
                 risk,
             } => {
                 // A question arriving over another modal replaces it: the agent
-                // is blocked on this one, and a picker is not.
+                // is blocked on this one, and a picker is not. The file list
+                // goes for the same reason, and its `@` stays in the box.
+                self.files = None;
                 self.modal = Some(Modal::Confirm(Confirm {
                     id,
                     tool,
@@ -372,6 +390,14 @@ impl App {
             Msg::Paste(text) => {
                 if self.modal.is_some() {
                     return Cmd::none();
+                }
+                // A path pasted into an open file list is what is being looked
+                // for, not what is being written.
+                if let Some(files) = &mut self.files {
+                    files.paste(&text);
+                    return Cmd::one(Effect::SearchFiles {
+                        query: files.query().to_owned(),
+                    });
                 }
                 match self.surfaces.focus() {
                     Some((plugin, name)) => Cmd::one(Effect::Surface {
@@ -395,6 +421,22 @@ impl App {
             Msg::Processes(rows) => {
                 if let Some(Modal::Processes { rows: shown, .. }) = &mut self.modal {
                     *shown = rows;
+                }
+                Cmd::none()
+            }
+            Msg::FileMatches { query, paths } => {
+                // An answer to a query that is no longer on screen is an answer
+                // to a keystroke two keystrokes ago. Drop it: the one for what
+                // is typed now is already on its way.
+                if let Some(files) = &mut self.files
+                    && files.query() == query
+                {
+                    files.set_rows(
+                        paths
+                            .into_iter()
+                            .map(|path| Row::new(path.clone(), path))
+                            .collect(),
+                    );
                 }
                 Cmd::none()
             }
@@ -784,10 +826,76 @@ impl App {
         cmd
     }
 
+    /// Handle a keypress the file list is claiming.
+    ///
+    /// It claims every one of them, the way the session list does: a picker is
+    /// a filter you type into, so a key that means nothing here means nothing
+    /// at all rather than reaching the input box behind it.
+    ///
+    /// Three keys close it and leave the `@` where it was typed, because all
+    /// three mean "never mind, I am writing prose": Esc, Ctrl-C, and a
+    /// Backspace with nothing left to take back. A space closes it too — a
+    /// path has no space in it, so a space is the end of the word.
+    fn key_in_files(&mut self, key: KeyEvent) -> Cmd<Effect> {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let Some(files) = &mut self.files else {
+            return Cmd::none();
+        };
+
+        match key.code {
+            KeyCode::Up => files.move_selection(-1),
+            KeyCode::Down => files.move_selection(1),
+            KeyCode::Char('p') if control => files.move_selection(-1),
+            KeyCode::Char('n') if control => files.move_selection(1),
+            KeyCode::Esc => self.files = None,
+            KeyCode::Char('c') if control => self.files = None,
+            KeyCode::Backspace => {
+                if files.query().is_empty() {
+                    self.files = None;
+                } else {
+                    files.backspace();
+                    return self.search_files();
+                }
+            }
+            KeyCode::Enter => {
+                let chosen = files.chosen().map(|row| row.key.clone());
+                self.files = None;
+                if let Some(path) = chosen {
+                    // One character back: the `@` is all that went into the
+                    // box, because the query was typed into the list instead.
+                    self.input.replace_trigger(1, &path);
+                }
+            }
+            KeyCode::Char(' ') => {
+                self.files = None;
+                self.input.replace_trigger(0, " ");
+            }
+            KeyCode::Char(c) if !control && !key.modifiers.contains(KeyModifiers::ALT) => {
+                files.type_char(c);
+                return self.search_files();
+            }
+            _ => {}
+        }
+        Cmd::none()
+    }
+
+    /// Ask the index for what the file list's query now says.
+    fn search_files(&mut self) -> Cmd<Effect> {
+        match &self.files {
+            Some(files) => Cmd::one(Effect::SearchFiles {
+                query: files.query().to_owned(),
+            }),
+            None => Cmd::none(),
+        }
+    }
+
     /// Handle one keypress.
     fn keyed(&mut self, key: KeyEvent) -> Cmd<Effect> {
         if self.modal.is_some() {
             return self.key_in_modal(key);
+        }
+        if self.files.is_some() {
+            return self.key_in_files(key);
         }
 
         // Anything typed puts the last word about a copy behind it.
@@ -845,6 +953,15 @@ impl App {
                 None => Cmd::none(),
             },
             Action::Submit(line) => self.submit(line),
+            // The list opens empty and is filled by the answer to this, so the
+            // first thing on screen is the head of the index rather than a
+            // blank box waiting for a letter.
+            Action::OpenFiles => {
+                self.files = Some(Picker::external("files"));
+                Cmd::one(Effect::SearchFiles {
+                    query: String::new(),
+                })
+            }
         }
     }
 
@@ -1101,6 +1218,7 @@ const HELP: &str = "\
   !cmd             run a shell command; its output goes to the transcript
 
 ── keys ──────────────────────────────────────────
+  @           lists the workspace's files, to write a path with
   Esc         clears a selection, cancels a run, or returns focus
   Ctrl-C      quits
   Ctrl-P      cycles model
@@ -1451,6 +1569,12 @@ pub(crate) struct Executor {
     processes: Arc<exec::Registry>,
     workspace: Workspace,
     answers: Answers<Decision>,
+    /// The workspace's files, read once and followed by a watcher.
+    ///
+    /// Built the first time `@` asks for it and kept for the rest of the
+    /// session. `Err` remembers that building it failed, so a tree that cannot
+    /// be read is not walked again at every keystroke.
+    files: Option<Result<Arc<crate::files::Index>, ()>>,
     /// The one thread that calls into a script. Nothing here waits on it: a
     /// job goes in and its answer comes back as a message.
     pub(crate) plugins: Option<PluginHub>,
@@ -1503,6 +1627,7 @@ impl Executor {
             processes: Arc::clone(&app.processes),
             workspace: app.workspace.clone(),
             answers: app.answers.clone(),
+            files: None,
             plugins: None,
             loader: None,
             hub,
@@ -1540,6 +1665,7 @@ impl Executor {
                     hub.send(Msg::BangOutput { command, output });
                 });
             }
+            Effect::SearchFiles { query } => self.search_files(query),
             Effect::Copy(text) => {
                 let lines = text.lines().count();
                 let outcome = clipboard::copy(&text);
@@ -1626,6 +1752,34 @@ impl Executor {
         if let Some(plugins) = &self.plugins {
             plugins.send(job);
         }
+    }
+
+    /// Answer one query from the file index, off the loop.
+    ///
+    /// `spawn_blocking` and not `spawn`: the search is synchronous and takes
+    /// the index's lock, which the background scan holds while it swaps in
+    /// what it found. Waiting for that on the runtime's own threads would stop
+    /// the screen with it.
+    fn search_files(&mut self, query: String) {
+        let index = self.files.get_or_insert_with(|| {
+            crate::files::Index::open(self.workspace.root())
+                .map(Arc::new)
+                .map_err(|error| {
+                    self.hub
+                        .send(Msg::Notice(format!("cannot read the file list: {error}")));
+                })
+        });
+        let Ok(index) = index else { return };
+
+        let index = Arc::clone(index);
+        let hub = self.hub.clone();
+        self.runtime.spawn_blocking(move || {
+            // `None` is an index that has not finished starting. Say nothing:
+            // the next keystroke asks again, and the list keeps its `…`.
+            if let Some(paths) = index.search(&query, FILE_MATCHES) {
+                hub.send(Msg::FileMatches { query, paths });
+            }
+        });
     }
 
     fn start_run(&mut self, prompt: String) {
@@ -1943,10 +2097,216 @@ mod tests {
             processes: Arc::new(exec::Registry::new()),
             workspace: Workspace::new(std::env::temp_dir()),
             answers: Answers::default(),
+            files: None,
             plugins: None,
             loader: None,
             hub,
         }
+    }
+
+    // ---- the file list ----------------------------------------------------
+
+    /// Open the list and fill it, the way the executor would.
+    fn open_files(app: &mut App, paths: &[&str]) -> Vec<Effect> {
+        let asked = press(app, KeyCode::Char('@'));
+        assert_eq!(
+            asked,
+            [Effect::SearchFiles {
+                query: String::new()
+            }],
+            "opening the list asks for the head of the index"
+        );
+        answer(app, "", paths);
+        asked
+    }
+
+    /// Hand the list what the index found for `query`.
+    fn answer(app: &mut App, query: &str, paths: &[&str]) {
+        app.update(Msg::FileMatches {
+            query: query.to_owned(),
+            paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+        });
+    }
+
+    fn shown(app: &App) -> Vec<String> {
+        app.files
+            .as_ref()
+            .expect("the list is open")
+            .shown()
+            .iter()
+            .map(|row| row.label.clone())
+            .collect()
+    }
+
+    #[test]
+    fn an_at_sign_opens_the_file_list_and_enter_writes_the_path() {
+        let agent = agent_with(vec![]);
+        let mut app = app_for(&agent);
+
+        open_files(&mut app, &["src/main.rs", "src/lib.rs"]);
+        assert_eq!(app.input.text(), "@", "the trigger is in the box");
+        assert_eq!(shown(&app), ["src/main.rs", "src/lib.rs"]);
+
+        press(&mut app, KeyCode::Enter);
+        assert!(app.files.is_none(), "choosing closes the list");
+        assert_eq!(
+            app.input.text(),
+            "src/main.rs",
+            "the path lands where the trigger was"
+        );
+    }
+
+    #[test]
+    fn typing_in_the_file_list_asks_the_index_again() {
+        let agent = agent_with(vec![]);
+        let mut app = app_for(&agent);
+        open_files(&mut app, &["src/main.rs"]);
+
+        let asked = press(&mut app, KeyCode::Char('l'));
+        assert_eq!(
+            asked,
+            [Effect::SearchFiles {
+                query: "l".to_owned()
+            }],
+            "every keystroke is a fresh search"
+        );
+        assert_eq!(app.input.text(), "@", "the query is not typed into the box");
+
+        answer(&mut app, "l", &["src/lib.rs"]);
+        assert_eq!(shown(&app), ["src/lib.rs"]);
+    }
+
+    #[test]
+    fn an_answer_to_an_old_query_is_dropped() {
+        let agent = agent_with(vec![]);
+        let mut app = app_for(&agent);
+        open_files(&mut app, &["src/main.rs"]);
+
+        press(&mut app, KeyCode::Char('l'));
+        // The answer to the empty query, arriving after the `l` was typed.
+        answer(&mut app, "", &["everything", "in", "the", "index"]);
+        assert_eq!(
+            shown(&app),
+            ["src/main.rs"],
+            "a late answer must not put back what was narrowed away"
+        );
+
+        answer(&mut app, "l", &["src/lib.rs"]);
+        assert_eq!(shown(&app), ["src/lib.rs"]);
+    }
+
+    #[test]
+    fn arrows_move_the_cursor_and_enter_takes_the_row_it_is_on() {
+        let agent = agent_with(vec![]);
+        let mut app = app_for(&agent);
+        open_files(&mut app, &["a.rs", "b.rs", "c.rs"]);
+
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.input.text(), "c.rs");
+    }
+
+    #[test]
+    fn escape_closes_the_list_and_leaves_the_trigger() {
+        let agent = agent_with(vec![]);
+        let mut app = app_for(&agent);
+        open_files(&mut app, &["src/main.rs"]);
+
+        press(&mut app, KeyCode::Esc);
+        assert!(app.files.is_none());
+        assert_eq!(
+            app.input.text(),
+            "@",
+            "the character the user typed is theirs to keep"
+        );
+    }
+
+    #[test]
+    fn backspace_widens_the_query_and_then_closes_the_list() {
+        let agent = agent_with(vec![]);
+        let mut app = app_for(&agent);
+        open_files(&mut app, &["src/main.rs"]);
+
+        press(&mut app, KeyCode::Char('m'));
+        let asked = press(&mut app, KeyCode::Backspace);
+        assert_eq!(
+            asked,
+            [Effect::SearchFiles {
+                query: String::new()
+            }],
+            "the query widens and is asked again"
+        );
+        assert!(app.files.is_some(), "there was still a letter to take back");
+
+        press(&mut app, KeyCode::Backspace);
+        assert!(app.files.is_none(), "nothing left to narrow, so it closes");
+        assert_eq!(app.input.text(), "@");
+    }
+
+    #[test]
+    fn a_space_ends_the_word_and_closes_the_list() {
+        let agent = agent_with(vec![]);
+        let mut app = app_for(&agent);
+        open_files(&mut app, &["src/main.rs"]);
+
+        press(&mut app, KeyCode::Char(' '));
+        assert!(app.files.is_none());
+        assert_eq!(app.input.text(), "@ ", "the space is typed like any other");
+    }
+
+    #[test]
+    fn a_path_lands_in_the_middle_of_a_sentence() {
+        let agent = agent_with(vec![]);
+        let mut app = app_for(&agent);
+        for c in "read ".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        open_files(&mut app, &["src/main.rs"]);
+        press(&mut app, KeyCode::Enter);
+
+        for c in " please".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert_eq!(app.input.text(), "read src/main.rs please");
+        assert_eq!(
+            type_line(&mut app, ""),
+            [Effect::StartRun("read src/main.rs please".to_owned())],
+            "and goes to the agent as an ordinary prompt"
+        );
+    }
+
+    #[test]
+    fn a_pasted_path_narrows_the_list_rather_than_the_box() {
+        let agent = agent_with(vec![]);
+        let mut app = app_for(&agent);
+        open_files(&mut app, &["src/main.rs"]);
+
+        let asked = app.update(Msg::Paste("src/lib".to_owned())).into_effects();
+        assert_eq!(
+            asked,
+            [Effect::SearchFiles {
+                query: "src/lib".to_owned()
+            }]
+        );
+        assert_eq!(app.input.text(), "@", "nothing was pasted into the box");
+    }
+
+    #[test]
+    fn a_question_from_the_agent_takes_the_screen_from_the_file_list() {
+        let agent = agent_with(vec![]);
+        let mut app = app_for(&agent);
+        open_files(&mut app, &["src/main.rs"]);
+
+        let (id, _waiting) = app.answers.open();
+        app.update(Msg::Confirm {
+            id,
+            tool: "write".to_owned(),
+            summary: "write src/main.rs".to_owned(),
+            risk: Risk::Mutate,
+        });
+        assert!(app.files.is_none(), "the search can be started again");
+        assert!(matches!(app.modal, Some(Modal::Confirm(_))));
     }
 
     #[test]
@@ -2826,6 +3186,62 @@ mod tests {
             command: command.clone(),
             output,
         });
+    }
+
+    /// The whole round trip for `@`, with the real index underneath.
+    ///
+    /// Everything above this is fed messages by hand; this is the one test
+    /// that presses the key, lets the executor read a tree off the disk, and
+    /// puts what came back into the list.
+    #[tokio::test]
+    async fn the_file_list_is_filled_by_the_index_on_disk() {
+        let workspace = temp_workspace();
+        std::fs::create_dir_all(workspace.root().join("src")).expect("create");
+        std::fs::write(workspace.root().join("src").join("main.rs"), "fn main() {}")
+            .expect("write");
+
+        let agent = agent_with(vec![Turn::text("unused")]);
+        let mut app = app_for(&agent);
+        app.workspace = workspace.clone();
+
+        let (hub, mut inbox) = crate::tui::runtime::channel();
+        let mut ex = executor(agent, hub);
+        ex.workspace = workspace;
+
+        // The scan runs in the background, so the first answer can be empty.
+        // Ask again, exactly as another keystroke would.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let found = loop {
+            assert!(Instant::now() < deadline, "the index never answered");
+            for effect in app
+                .update(Msg::Key(KeyEvent::new(
+                    KeyCode::Char('@'),
+                    KeyModifiers::NONE,
+                )))
+                .into_effects()
+            {
+                ex.perform(effect);
+            }
+            let msg = tokio::time::timeout(Duration::from_secs(5), inbox.recv())
+                .await
+                .expect("the search should report back")
+                .expect("a message");
+            app.update(msg);
+            let shown = shown(&app);
+            if !shown.is_empty() {
+                break shown;
+            }
+            app.files = None;
+            app.input.clear();
+        };
+
+        assert_eq!(found, ["src/main.rs"], "the tree came back as paths");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.input.text(),
+            "src/main.rs",
+            "and Enter wrote it over the trigger"
+        );
     }
 
     fn shell_outputs(app: &App) -> Vec<String> {

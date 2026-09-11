@@ -23,6 +23,7 @@ rhai = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }
 chrono.workspace = true
 compact_str.workspace = true
+fff-search.workspace = true
 gpui = { workspace = true, optional = true }
 gpui-component = { workspace = true, optional = true }
 ratatui.workspace = true

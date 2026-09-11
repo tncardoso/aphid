@@ -532,6 +532,9 @@ impl App {
         }
 
         match self.input.handle(key) {
+            // A colony has no workspace to list. The `@` has already been
+            // typed into the box, which is all it was ever going to be here.
+            Action::OpenFiles => Vec::new(),
             Action::Submit(line) => self.typed(&line),
             // A colony has no shell, so a `!` line goes into the chat as a
             // message, exactly as it did before `!` meant something to the

@@ -674,6 +674,55 @@ fn the_picker_lights_the_characters_the_query_matched() {
 }
 
 #[test]
+fn the_file_list_draws_the_paths_in_the_order_the_index_gave() {
+    let mut picker = Picker::external("files");
+    picker.set_rows(vec![
+        Row::new("a", "crates/aphid-code/src/tui/app.rs"),
+        Row::new("b", "crates/aphid-code/src/tui/picker.rs"),
+        Row::new("c", "crates/aphid-alate/src/tui.rs"),
+    ]);
+    // A query the picker's own matcher cannot see in any of those paths: the
+    // index matched it in spite of the slip, and the rows must survive here.
+    for c in "tuiapq".chars() {
+        picker.type_char(c);
+    }
+
+    let rendered = draw(90, 14, |frame| {
+        picker.render(frame, Rect::new(0, 0, 90, 14));
+    });
+    let joined = rendered.join("\n");
+
+    assert!(
+        joined.contains("> tuiapq"),
+        "the query is on screen: {joined}"
+    );
+    assert!(
+        joined.contains("▸ crates/aphid-code/src/tui/app.rs"),
+        "the index's first answer is under the cursor: {joined}"
+    );
+    assert!(
+        joined.contains("crates/aphid-alate/src/tui.rs"),
+        "and a row nothing here matched is still drawn: {joined}"
+    );
+}
+
+#[test]
+fn the_file_list_says_it_is_waiting_before_the_index_answers() {
+    let picker = Picker::external("files");
+
+    let rendered = draw(60, 10, |frame| {
+        picker.render(frame, Rect::new(0, 0, 60, 10));
+    });
+    let joined = rendered.join("\n");
+
+    assert!(joined.contains("files — type to filter"), "{joined}");
+    assert!(
+        joined.contains('…'),
+        "an empty list waiting on the scan says so: {joined}"
+    );
+}
+
+#[test]
 fn the_picker_marks_the_session_you_are_already_on() {
     let picker = Picker::new(
         "sessions",

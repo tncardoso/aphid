@@ -65,12 +65,27 @@ impl Row {
     }
 }
 
+/// Who decides which rows survive the query.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Filter {
+    /// The picker itself, with [`score`]. A caller hands over every row it has
+    /// and the typing does the rest.
+    Own,
+    /// Somebody else, before the rows arrived. The picker keeps them in the
+    /// order it was given and scores nothing.
+    ///
+    /// What a search engine needs: it has already ranked the answer, and a
+    /// second opinion here would only fight it.
+    External,
+}
+
 /// A list, a query that narrows it, and the row under the cursor.
 pub struct Picker {
     /// What the box is called, drawn in its border.
     title: String,
     rows: Vec<Row>,
     query: String,
+    filter: Filter,
     /// Indices into `rows`, best match first. The whole list, in its own order,
     /// while the query is empty.
     matches: Vec<usize>,
@@ -81,10 +96,25 @@ pub struct Picker {
 impl Picker {
     #[must_use]
     pub fn new(title: impl Into<String>, rows: Vec<Row>) -> Self {
+        Self::build(title, rows, Filter::Own)
+    }
+
+    /// A picker over rows somebody else has already narrowed and ordered.
+    ///
+    /// It opens empty: the rows are asked for elsewhere and arrive by
+    /// [`set_rows`](Self::set_rows), once for the empty query and again after
+    /// every keystroke.
+    #[must_use]
+    pub fn external(title: impl Into<String>) -> Self {
+        Self::build(title, Vec::new(), Filter::External)
+    }
+
+    fn build(title: impl Into<String>, rows: Vec<Row>, filter: Filter) -> Self {
         let mut picker = Self {
             title: title.into(),
             rows,
             query: String::new(),
+            filter,
             matches: Vec::new(),
             selected: 0,
         };
@@ -154,7 +184,7 @@ impl Picker {
 
     /// Score every row against the query and put the survivors in order.
     fn refilter(&mut self) {
-        if self.query.is_empty() {
+        if self.filter == Filter::External || self.query.is_empty() {
             self.matches = (0..self.rows.len()).collect();
             self.selected = 0;
             return;
@@ -243,7 +273,10 @@ impl Picker {
         };
 
         // Only the field the query actually matched is lit, so a hit in the
-        // detail does not paint the label as well.
+        // detail does not paint the label as well. A row that came from an
+        // external filter may light nothing: that filter can match what this
+        // one cannot, a mistyped letter above all, and a row that nothing here
+        // matches is simply drawn plain.
         let (label_hits, detail_hits) = match best(row, &self.query) {
             Some((_, Field::Label, hits)) => (hits, Vec::new()),
             Some((_, Field::Detail, hits)) => (Vec::new(), hits),
@@ -488,6 +521,35 @@ mod tests {
         picker.move_selection(-1);
         picker.set_rows(vec![Row::new("z", "only one")]);
         assert_eq!(picker.chosen().map(|row| row.key.as_str()), Some("z"));
+    }
+
+    #[test]
+    fn an_external_picker_keeps_the_order_it_was_given() {
+        let mut picker = Picker::external("files");
+        picker.set_rows(vec![
+            Row::new("z", "zzz.rs"),
+            Row::new("a", "aaa.rs"),
+            Row::new("m", "mmm.rs"),
+        ]);
+        for c in "aaa".chars() {
+            picker.type_char(c);
+        }
+        assert_eq!(
+            labels(&picker),
+            ["z", "a", "m"],
+            "the query narrows nothing here: somebody else already did"
+        );
+        assert_eq!(picker.chosen().map(|row| row.key.as_str()), Some("z"));
+    }
+
+    #[test]
+    fn an_external_picker_still_reports_what_was_typed() {
+        let mut picker = Picker::external("files");
+        for c in "tui/".chars() {
+            picker.type_char(c);
+        }
+        picker.backspace();
+        assert_eq!(picker.query(), "tui");
     }
 
     #[test]

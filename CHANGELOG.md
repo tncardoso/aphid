@@ -4,6 +4,17 @@
 
 ### Added
 
+- **`@` opens a list of the workspace's files in the aphid terminal.** Type `@`
+  at the start of a word and a list of every file in the workspace opens over
+  the screen. Type any part of a path to cut it down — the letters do not have
+  to be next to each other, and a mistyped one is forgiven. Move with the arrows
+  or Ctrl-P and Ctrl-N, and press Enter to write the path into the box where the
+  `@` was. Esc, a space, or a Backspace with nothing left to take back closes
+  the list and leaves what you typed. The list is powered by `fff`, which reads
+  the tree one time and then follows it, so it stays correct while you work and
+  a file you have just made is in it. The tree is read the first time you press
+  `@`, so a session that never uses it costs nothing.
+
 - **A scheduled job can answer in the conversation that scheduled it.** A job
   ran in a session of its own, said what it found, and nobody heard it: nothing
   was watching that session, and the job had no way to reach anything that was.
