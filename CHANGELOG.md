@@ -15,6 +15,21 @@
   a file you have just made is in it. The tree is read the first time you press
   `@`, so a session that never uses it costs nothing.
 
+- **A file can be sent with a message, and an image can be looked at.**
+  Choosing a file with `@` now asks a question: **Cite** writes its path into the
+  message, as before, and **Attach** sends the file with it. Enter takes the
+  marked answer and Cite is marked, so `@` then Enter then Enter still writes a
+  path. An attachment is written as `@path`, which is ordinary text: delete one
+  letter and the file is not sent, and Backspace on the marker removes the whole
+  of it in one keystroke. An image is sent directly after the words that name
+  it, so `compare @before.png with @after.png` arrives with each picture beside
+  its own mention. PNG, JPEG, GIF and WebP up to 10 MB, read when you attach the
+  file, so what you attached is what the model gets. A model that cannot look at
+  an image says so when you attach it, and again if you point the session at one
+  before sending — your line comes back into the box, nothing is lost. An
+  attached text file is sent as its content, capped like the `read` tool at 1000
+  lines or 64 KiB. Refer to the Commands page.
+
 - **A scheduled job can answer in the conversation that scheduled it.** A job
   ran in a session of its own, said what it found, and nobody heard it: nothing
   was watching that session, and the job had no way to reach anything that was.

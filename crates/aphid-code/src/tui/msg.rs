@@ -115,6 +115,15 @@ pub enum Msg {
         command: String,
         output: String,
     },
+    /// A file was read and is in the draft.
+    ///
+    /// The bytes are held until the message goes out, so what a user saw when
+    /// they attached it is what the model receives, whatever the file does
+    /// afterwards.
+    Attached {
+        path: String,
+        body: crate::attach::Body,
+    },
     /// What the last draw settled: how the pane was wrapped and where the
     /// panels put their clickable regions. The one road from the screen back
     /// into the model, and it is a message like everything else.

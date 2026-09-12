@@ -23,6 +23,7 @@
 //! # }
 //! ```
 
+pub mod attach;
 pub(crate) mod base64;
 pub mod context;
 pub mod events;

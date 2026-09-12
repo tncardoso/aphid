@@ -107,14 +107,22 @@ fn encode_message(
     let mut text = String::new();
     let mut reasoning = String::new();
     let mut tool_calls = Vec::new();
+    let mut images = 0usize;
 
     for block in message.content() {
         match block {
             ContentRef::Text(t) => text.push_str(t.text()),
             ContentRef::Thinking(t) => reasoning.push_str(t.text()),
             ContentRef::ToolCall(c) => tool_calls.push(c),
-            ContentRef::Image(_) => return Err(Error::UnsupportedContent("image")),
+            ContentRef::Image(_) => images += 1,
         }
+    }
+
+    // A picture belongs in a user message. Everywhere else the protocol has no
+    // place for one, and an endpoint answers with a 400 rather than ignoring
+    // it.
+    if images > 0 && message.role() != Role::User {
+        return Err(Error::UnsupportedContent("image"));
     }
 
     w.begin_object();
@@ -130,7 +138,13 @@ fn encode_message(
         }
         Role::User => {
             w.field_str("role", "user");
-            w.field_str("content", &text);
+            if images == 0 {
+                // A plain string, which is what almost every message is and
+                // what some models are happiest with.
+                w.field_str("content", &text);
+            } else {
+                encode_parts(w, message);
+            }
         }
         Role::Assistant => {
             w.field_str("role", "assistant");
@@ -174,6 +188,65 @@ fn encode_message(
     }
     w.end_object();
     Ok(())
+}
+
+/// Write a user message whose content is text and pictures interleaved.
+///
+/// The blocks come out in the order they were written, so a message that was
+/// cut around its attachments keeps every picture next to the words that name
+/// it. A run of text becomes one block, however many pieces it arrived in.
+fn encode_parts(w: &mut JsonWriter, message: MessageRef<'_>) {
+    w.key("content");
+    w.begin_array();
+
+    let mut run = String::new();
+    for block in message.content() {
+        match block {
+            ContentRef::Text(t) => run.push_str(t.text()),
+            ContentRef::Image(image) => {
+                flush_text(w, &mut run);
+                w.begin_object();
+                w.field_str("type", "image_url");
+                w.key("image_url");
+                w.begin_object();
+                w.field_str("url", &data_url(image.mime(), image.data()));
+                w.end_object();
+                w.end_object();
+            }
+            // Neither belongs in a user message. Whatever put one there, it is
+            // not content the model asked to read.
+            ContentRef::Thinking(t) => run.push_str(t.text()),
+            ContentRef::ToolCall(_) => {}
+        }
+    }
+    flush_text(w, &mut run);
+
+    w.end_array();
+}
+
+fn flush_text(w: &mut JsonWriter, run: &mut String) {
+    if run.is_empty() {
+        return;
+    }
+    w.begin_object();
+    w.field_str("type", "text");
+    w.field_str("text", run);
+    w.end_object();
+    run.clear();
+}
+
+/// The `data:` URL an image rides in.
+///
+/// The bytes travel inside the request body: no second request, and nothing
+/// left on somebody else's server. Base64 costs a third again the size, which
+/// is what the attachment cap is for.
+fn data_url(mime: &str, data: &[u8]) -> String {
+    use base64::Engine as _;
+
+    format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(data)
+    )
 }
 
 fn encode_tool(w: &mut JsonWriter, tool: &Tool, compat: &OpenAiCompletionsCompat) {

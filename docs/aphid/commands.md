@@ -80,7 +80,7 @@ next to each other, and a letter that is wrong is forgiven, so `@tuiapp` finds
 | Key | Result |
 | --- | --- |
 | Arrow keys, or `Ctrl-P` and `Ctrl-N` | Move the cursor |
-| `Enter` | Write the path into the input, where the `@` was |
+| `Enter` | Choose the file, and open the question below |
 | `Esc`, or `Ctrl-C` | Close the list, and keep the `@` |
 | `Backspace` | Take back one letter of the query, or close the list when there is none |
 | Space | Close the list, and type the space |
@@ -93,6 +93,62 @@ An `@` inside a word is only a character: `you@example.com` opens no list.
 The file tree is read the first time that you press `@`, and a watcher keeps
 it correct after that. A file that you make while the terminal is open is in
 the list. A session that never presses `@` does not read the tree.
+
+### Cite or Attach
+
+`Enter` on a file opens a question with two answers:
+
+| Answer | Result |
+| --- | --- |
+| Cite | Write the path into the message. This is text, and nothing more. |
+| Attach | Send the file with the message. The path is written with an `@` in front of it. |
+
+| Key | Result |
+| --- | --- |
+| `Enter` | Take the answer that is marked. Cite is marked when the question opens. |
+| `c` | Cite. |
+| `a` | Attach. |
+| Arrow keys | Move the mark. |
+| `Esc` | Close the question, and keep the `@` in the box. |
+
+Press `Enter` two times to write a path, which is the quickest way: the first
+`Enter` chooses the file, and the second one cites it.
+
+### Attachments
+
+A marker is an `@` and a path, and it is ordinary text. `@src/main.rs` is a
+marker; `src/main.rs` is a citation. Both can be in the same message, and a
+marker can be in the middle of a sentence:
+
+```
+compare @shots/before.png with @shots/after.png
+```
+
+The words of a marker become the reference of the file. The image is sent
+directly after the words that name it.
+
+An attached text file is sent as its content, wrapped in `<file path="…">`.
+The cap is the cap of the `read` tool: 1000 lines or 64 KiB, whichever comes
+first. The text says when the file is longer than that.
+
+An attached image is sent as an image. Aphid reads PNG, JPEG, GIF and WebP, and
+refuses a file above 10 MB. The bytes decide the format, not the file name. The
+model must accept images: aphid refuses an image for a model that cannot look at
+one, and the message says which model to choose with `/model`.
+
+A marker breaks when its text changes. Take one letter away and the file is not
+sent with the message. `Backspace` and `Delete` remove the whole marker at one
+keystroke when the cursor is on it or next to it, so a broken marker is rare.
+Type the marker again and the file is attached again, as long as the message is
+not sent yet. Thus an edit does not lose the work of reading the file.
+
+`Esc` on a line that is not running clears the line and the files it named.
+
+A file is read when you attach it, not when the message goes out. What you saw
+in the message is what the model receives, even if the file changes after that.
+
+A file is read when you attach it, not when the message goes out. What you saw
+in the message is what the model receives, even if the file changes after that.
 
 ## `/ps`
 

@@ -18,6 +18,8 @@ use ratatui::crossterm::event::{
 };
 use ratatui::layout::Rect;
 
+use aphid_core::InputModalities;
+
 use crate::harness::{self, Harness, HarnessOptions};
 use crate::model::{Catalog, ResolveError, clamp_thinking};
 use crate::plugins::permissions::{Decision, PermissionGate, Permissions};
@@ -81,6 +83,13 @@ pub struct App {
     /// one the typist is narrowing. Drawn under the modals, so a question that
     /// arrives mid-search still gets the front of the screen.
     pub files: Option<Picker>,
+    /// The files this draft names, by path, as they were read.
+    ///
+    /// Filled when a file is attached, kept for as long as the draft is, and
+    /// dropped when the message goes out or the box is cleared. What is sent is
+    /// each marker still in the text, looked up here: the text says what, this
+    /// says what the bytes are.
+    attached: crate::attach::Store,
     /// The plugin surfaces, for focus, events and rendering.
     pub surfaces: SurfaceLayer,
     /// The loaded plugins, for the commands they registered and `/plugins`.
@@ -115,7 +124,7 @@ pub struct App {
     pub(crate) session: Option<Arc<SessionComponent>>,
     /// Waiting for the agent, in the order it arrived. A queue and not one slot
     /// because a plugin can send while the user types, and neither should lose.
-    queued: VecDeque<String>,
+    queued: VecDeque<crate::attach::Prompt>,
     /// Every command the runtime has started, for `/ps`.
     processes: Arc<exec::Registry>,
     /// Where `!` commands run.
@@ -154,6 +163,7 @@ impl App {
             status,
             modal: None,
             files: None,
+            attached: crate::attach::Store::new(),
             surfaces: SurfaceLayer::default(),
             catalog: Catalog::new(),
             current: harness.agent.model().clone(),
@@ -189,6 +199,7 @@ impl App {
             status: Status::from_model(agent.model()),
             modal: None,
             files: None,
+            attached: crate::attach::Store::new(),
             surfaces: SurfaceLayer::default(),
             catalog: Catalog::new(),
             current: agent.model().clone(),
@@ -366,8 +377,9 @@ impl App {
             // command set: a plugin has no business running `/quit`.
             Msg::Prompt(text) => {
                 self.scrollback.push_user(text.clone());
-                self.enqueue(text)
+                self.enqueue(crate::attach::Prompt::text(text))
             }
+            Msg::Attached { path, body } => self.received(path, body),
             Msg::Confirm {
                 id,
                 tool,
@@ -488,7 +500,7 @@ impl App {
                         }
                         SurfaceAction::Prompt(text) => {
                             self.scrollback.push_user(text.clone());
-                            cmd.extend(self.enqueue(text));
+                            cmd.extend(self.enqueue(crate::attach::Prompt::text(text)));
                         }
                         // A surface talking to itself. It goes back round the
                         // same way anything else reaches a surface, so there
@@ -542,12 +554,12 @@ impl App {
     /// The next prompt waiting to be sent, if any.
     #[must_use]
     pub fn queued(&self) -> Option<&str> {
-        self.queued.front().map(String::as_str)
+        self.queued.front().map(crate::attach::Prompt::line)
     }
 
     /// Put a prompt at the back of the queue, and start it when nothing else
     /// is running.
-    fn enqueue(&mut self, prompt: String) -> Cmd<Effect> {
+    fn enqueue(&mut self, prompt: crate::attach::Prompt) -> Cmd<Effect> {
         self.queued.push_back(prompt);
         self.start_queued()
     }
@@ -798,6 +810,9 @@ impl App {
                     });
                 }
             }
+            // Claimed in `keyed` before this is reached, because answering it
+            // writes into the box rather than answering the agent.
+            Modal::FileAction { .. } => {}
         }
         Cmd::none()
     }
@@ -821,6 +836,17 @@ impl App {
         let mut cmd = self.notice(format!("── switched to {} ──", model.id));
         if let Some(note) = note {
             cmd.extend(self.notice(note));
+        }
+        // A draft that names a picture the new model cannot see is a send that
+        // is going to be refused. Saying so here is saying it while the choice
+        // is still the user's; the send is refused later, and neither blocks.
+        if !model.input.contains(InputModalities::IMAGE)
+            && let Some(path) = self.draft_image()
+        {
+            cmd.extend(self.notice(format!(
+                "{} cannot take images, and the draft names {path}",
+                model.id
+            )));
         }
         cmd.push(Effect::SetModel(Box::new(model)));
         cmd
@@ -861,9 +887,10 @@ impl App {
                 let chosen = files.chosen().map(|row| row.key.clone());
                 self.files = None;
                 if let Some(path) = chosen {
-                    // One character back: the `@` is all that went into the
-                    // box, because the query was typed into the list instead.
-                    self.input.replace_trigger(1, &path);
+                    // The `@` stays in the box until the question is answered:
+                    // both answers replace it, one with the path and one with
+                    // the path and a marker.
+                    self.modal = Some(Modal::FileAction { path, selected: 0 });
                 }
             }
             KeyCode::Char(' ') => {
@@ -889,8 +916,81 @@ impl App {
         }
     }
 
+    /// The two answers a chosen file offers.
+    ///
+    /// Nothing is written until one is given: Cite writes the path where the
+    /// `@` was, and Attach writes `@` and the path and asks for the bytes,
+    /// which arrive as a message of their own.
+    fn key_in_file_action(&mut self, key: KeyEvent) -> Cmd<Effect> {
+        let attaches = match key.code {
+            KeyCode::Up => {
+                if let Some(modal) = &mut self.modal {
+                    modal.move_selection(-1);
+                }
+                return Cmd::none();
+            }
+            KeyCode::Down => {
+                if let Some(modal) = &mut self.modal {
+                    modal.move_selection(1);
+                }
+                return Cmd::none();
+            }
+            // The cursor opens on Cite, so the `Enter` that follows the `@`
+            // and the file list is the `Enter` that cites, which is what a user
+            // already types.
+            KeyCode::Enter => match &self.modal {
+                Some(modal) => modal.attaches(),
+                None => return Cmd::none(),
+            },
+            KeyCode::Char('a' | 'A') => true,
+            KeyCode::Char('c' | 'C') => false,
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.modal = None;
+                return Cmd::none();
+            }
+            _ => return Cmd::none(),
+        };
+
+        let Some(Modal::FileAction { path, .. }) = self.modal.take() else {
+            return Cmd::none();
+        };
+        // One character back: the `@` is all that went into the box, because
+        // the query was typed into the list instead.
+        if attaches {
+            self.input.replace_trigger(1, &format!("@{path}"));
+            return Cmd::one(Effect::AttachFile { path });
+        }
+        self.input.replace_trigger(1, &path);
+        Cmd::none()
+    }
+
+    /// A Backspace or Delete that lands on a marker of the draft.
+    ///
+    /// `None` for anything else, and for a key that sits on ordinary text,
+    /// which is then the editor's to take.
+    fn keyed_at_marker(&mut self, key: KeyEvent) -> Option<Cmd<Effect>> {
+        let back = match key.code {
+            KeyCode::Backspace => true,
+            KeyCode::Delete => false,
+            _ => return None,
+        };
+        // The common case, and it costs nothing: no file is attached, so no
+        // key can land on a marker.
+        if self.attached.is_empty() {
+            return None;
+        }
+        let (row, col) = self.input.cursor();
+        let line = self.input.line(row).to_owned();
+        let (from, to) = crate::attach::mention_at(&line, col, &self.attached, back)?;
+        self.input.remove_range(row, from, to);
+        Some(Cmd::none())
+    }
+
     /// Handle one keypress.
     fn keyed(&mut self, key: KeyEvent) -> Cmd<Effect> {
+        if matches!(self.modal, Some(Modal::FileAction { .. })) {
+            return self.key_in_file_action(key);
+        }
         if self.modal.is_some() {
             return self.key_in_modal(key);
         }
@@ -917,6 +1017,13 @@ impl App {
             return Cmd::none();
         }
 
+        // A marker is text, and a key that would take one letter of it takes
+        // the whole marker: what is left of half a marker would send nothing
+        // while looking as though it sent something.
+        if let Some(cmd) = self.keyed_at_marker(key) {
+            return cmd;
+        }
+
         match self.input.handle(key) {
             Action::None => Cmd::none(),
             Action::Quit => {
@@ -929,7 +1036,10 @@ impl App {
                     cmd.extend(self.notice("── cancelled ──"));
                     cmd
                 } else {
+                    // The line and the files it named go together: the store
+                    // is only ever the answer to the text.
                     self.input.clear();
+                    self.attached.clear();
                     Cmd::none()
                 }
             }
@@ -965,14 +1075,85 @@ impl App {
         }
     }
 
+    /// A file that was read, on its way into the draft.
+    ///
+    /// An image the model cannot take is refused here and in `submit`. This is
+    /// the moment the user chose the file, so this is where saying so is worth
+    /// the most; the marker goes with it, because a marker that sends nothing
+    /// looks exactly like one that does.
+    fn received(&mut self, path: String, body: crate::attach::Body) -> Cmd<Effect> {
+        if let Some(refusal) = self.refuses_body(&body) {
+            self.input.remove_mention(&path);
+            return self.notice(refusal);
+        }
+        self.attached.insert(path, body);
+        Cmd::none()
+    }
+
+    /// Why the model cannot take this file, if it cannot.
+    fn refuses_body(&self, body: &crate::attach::Body) -> Option<String> {
+        let crate::attach::Body::Image { .. } = body else {
+            return None;
+        };
+        if self.current.input.contains(InputModalities::IMAGE) {
+            return None;
+        }
+        Some(format!(
+            "{} cannot take images. Switch with /model, and attach it again.",
+            self.current.id
+        ))
+    }
+
     /// A finished line: a command, or a prompt for the agent.
     pub(crate) fn submit(&mut self, line: String) -> Cmd<Effect> {
         if let Some((name, rest)) = split_command(&line) {
             let (name, rest) = (name.to_owned(), rest.to_owned());
             return self.command(&name, &rest);
         }
-        self.scrollback.push_user(line.clone());
-        self.enqueue(line)
+
+        let prompt = crate::attach::compose(&line, &self.attached);
+        if let Some(refusal) = self.refuses_prompt(&prompt) {
+            // Nothing is lost: the box was cleared before the line arrived
+            // here, so the line goes back into it, and the draft's files stay
+            // where they are until it is sent.
+            self.input.set_text(&line);
+            return self.notice(refusal);
+        }
+
+        self.attached.clear();
+        self.scrollback.push_user(line);
+        self.enqueue(prompt)
+    }
+
+    /// Why the model that is pointed at cannot take this prompt, if it cannot.
+    fn refuses_prompt(&self, prompt: &crate::attach::Prompt) -> Option<String> {
+        let images = prompt
+            .parts()
+            .iter()
+            .filter(|part| matches!(part, crate::attach::Part::Image { .. }))
+            .count();
+        if images == 0 || self.current.input.contains(InputModalities::IMAGE) {
+            return None;
+        }
+        Some(format!(
+            "{} cannot take images. The draft has {images}; switch with /model, \
+             or take the marker out.",
+            self.current.id
+        ))
+    }
+
+    /// The first file of the draft that the model cannot take, if there is one.
+    fn draft_image(&self) -> Option<String> {
+        let text = self.input.text();
+        crate::attach::search(&text, &self.attached)
+            .into_iter()
+            .find(|mention| {
+                matches!(
+                    self.attached.get(&mention.path),
+                    Some(crate::attach::Body::Image { .. })
+                )
+            })
+            .map(|mention| mention.path)
     }
 
     /// Run a slash command.
@@ -1666,6 +1847,21 @@ impl Executor {
                 });
             }
             Effect::SearchFiles { query } => self.search_files(query),
+            Effect::AttachFile { path } => {
+                let workspace = self.workspace.clone();
+                let hub = self.hub.clone();
+                // A whole file is read, so this is not work for the thread
+                // that draws the prompt.
+                self.runtime
+                    .spawn_blocking(move || match crate::attach::read(&workspace, &path) {
+                        Ok(body) => {
+                            hub.send(Msg::Attached { path, body });
+                        }
+                        Err(error) => {
+                            hub.send(Msg::Notice(error));
+                        }
+                    });
+            }
             Effect::Copy(text) => {
                 let lines = text.lines().count();
                 let outcome = clipboard::copy(&text);
@@ -1782,7 +1978,7 @@ impl Executor {
         });
     }
 
-    fn start_run(&mut self, prompt: String) {
+    fn start_run(&mut self, prompt: crate::attach::Prompt) {
         let Some(mut agent) = self.idle.lock().ok().and_then(|mut idle| idle.take()) else {
             // Still away with the last run. The queue is pumped again when it
             // reports back, so the prompt is not lost.
@@ -1794,7 +1990,9 @@ impl Executor {
         }
 
         let work = self.runtime.spawn(async move {
-            let outcome = agent.prompt(&prompt).await;
+            // The parts borrow the prompt, which lives until the run ends.
+            let inputs = prompt.inputs();
+            let outcome = agent.prompt_parts(&inputs).await;
             (agent, outcome)
         });
 
@@ -2039,6 +2237,11 @@ mod tests {
         app
     }
 
+    /// A prompt of text alone, which is what a typed line makes.
+    fn prompt(line: &str) -> crate::attach::Prompt {
+        crate::attach::Prompt::text(line)
+    }
+
     /// Type a line and press Enter, collecting everything it asked for.
     fn type_line(app: &mut App, line: &str) -> Vec<Effect> {
         let mut effects = Vec::new();
@@ -2046,6 +2249,15 @@ mod tests {
             effects.extend(press(app, KeyCode::Char(c)));
         }
         effects.extend(press(app, KeyCode::Enter));
+        effects
+    }
+
+    /// Type a line without ending it, for a test that has more to do first.
+    fn typed(app: &mut App, text: &str) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        for c in text.chars() {
+            effects.extend(press(app, KeyCode::Char(c)));
+        }
         effects
     }
 
@@ -2139,7 +2351,7 @@ mod tests {
     }
 
     #[test]
-    fn an_at_sign_opens_the_file_list_and_enter_writes_the_path() {
+    fn an_at_sign_opens_the_file_list_and_enter_opens_the_question() {
         let agent = agent_with(vec![]);
         let mut app = app_for(&agent);
 
@@ -2149,11 +2361,102 @@ mod tests {
 
         press(&mut app, KeyCode::Enter);
         assert!(app.files.is_none(), "choosing closes the list");
+        assert!(
+            matches!(app.modal, Some(Modal::FileAction { .. })),
+            "and opens the question of what the file is for"
+        );
         assert_eq!(
             app.input.text(),
-            "src/main.rs",
-            "the path lands where the trigger was"
+            "@",
+            "the trigger waits for the answer, so either one can replace it"
         );
+    }
+
+    #[test]
+    fn enter_in_the_question_writes_the_path_and_asks_for_nothing() {
+        let agent = agent_with(vec![]);
+        let mut app = app_for(&agent);
+
+        open_files(&mut app, &["src/main.rs"]);
+        press(&mut app, KeyCode::Enter);
+        let asked = press(&mut app, KeyCode::Enter);
+
+        assert!(app.modal.is_none(), "answering closes the question");
+        assert_eq!(app.input.text(), "src/main.rs");
+        assert_eq!(asked, [], "a citation is only text");
+        assert!(app.attached.is_empty(), "and nothing was read");
+    }
+
+    #[test]
+    fn a_in_the_question_writes_the_marker_and_asks_for_the_file() {
+        let agent = agent_with(vec![]);
+        let mut app = app_for(&agent);
+
+        open_files(&mut app, &["src/main.rs"]);
+        press(&mut app, KeyCode::Enter);
+        let asked = press(&mut app, KeyCode::Char('a'));
+
+        assert_eq!(
+            app.input.text(),
+            "@src/main.rs",
+            "the marker is the path with an at sign in front of it"
+        );
+        assert_eq!(
+            asked,
+            [Effect::AttachFile {
+                path: "src/main.rs".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn arrows_in_the_question_move_the_cursor_and_enter_takes_the_row() {
+        let agent = agent_with(vec![]);
+        let mut app = app_for(&agent);
+
+        open_files(&mut app, &["src/main.rs"]);
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Down);
+        let asked = press(&mut app, KeyCode::Enter);
+
+        assert_eq!(
+            asked,
+            [Effect::AttachFile {
+                path: "src/main.rs".to_owned()
+            }],
+            "Attach is the second row"
+        );
+        assert_eq!(app.input.text(), "@src/main.rs");
+    }
+
+    #[test]
+    fn escape_closes_the_question_and_leaves_the_trigger() {
+        let agent = agent_with(vec![]);
+        let mut app = app_for(&agent);
+
+        open_files(&mut app, &["src/main.rs"]);
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Esc);
+
+        assert!(app.modal.is_none());
+        assert_eq!(
+            app.input.text(),
+            "@",
+            "the character goes back to being one"
+        );
+    }
+
+    #[test]
+    fn an_at_sign_opens_the_file_list_and_a_citation_lands_where_it_stood() {
+        let agent = agent_with(vec![]);
+        let mut app = app_for(&agent);
+
+        open_files(&mut app, &["src/main.rs", "src/lib.rs"]);
+        assert_eq!(shown(&app), ["src/main.rs", "src/lib.rs"]);
+
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.input.text(), "src/main.rs");
     }
 
     #[test]
@@ -2203,6 +2506,7 @@ mod tests {
 
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
         press(&mut app, KeyCode::Enter);
         assert_eq!(app.input.text(), "c.rs");
     }
@@ -2264,6 +2568,7 @@ mod tests {
         }
         open_files(&mut app, &["src/main.rs"]);
         press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Enter);
 
         for c in " please".chars() {
             press(&mut app, KeyCode::Char(c));
@@ -2271,7 +2576,7 @@ mod tests {
         assert_eq!(app.input.text(), "read src/main.rs please");
         assert_eq!(
             type_line(&mut app, ""),
-            [Effect::StartRun("read src/main.rs please".to_owned())],
+            [Effect::StartRun(prompt("read src/main.rs please"))],
             "and goes to the agent as an ordinary prompt"
         );
     }
@@ -2309,6 +2614,290 @@ mod tests {
         assert!(matches!(app.modal, Some(Modal::Confirm(_))));
     }
 
+    // ---- attachments ------------------------------------------------------
+
+    /// An agent whose model takes pictures.
+    fn vision_agent(turns: Vec<Turn>) -> Agent {
+        let mut model = deepseek::flash();
+        model.input = InputModalities::TEXT | InputModalities::IMAGE;
+        let (backend, _script) = scripted(turns);
+        Agent::builder()
+            .model(model)
+            .system("terse")
+            .stream_fn(backend)
+            .build()
+    }
+
+    fn image() -> crate::attach::Body {
+        crate::attach::Body::Image {
+            data: std::sync::Arc::from(&[1u8, 2, 3][..]),
+            mime: "image/png",
+        }
+    }
+
+    fn file_text(content: &str) -> crate::attach::Body {
+        crate::attach::Body::Text {
+            content: content.to_owned(),
+            truncated: false,
+        }
+    }
+
+    /// Attach a file the way the interface does, and hand back what the
+    /// question asked for.
+    ///
+    /// `Enter` on the list opens the question and `a` answers it; the bytes come
+    /// back as a message of their own, which is the executor's half.
+    fn attach(app: &mut App, path: &str, body: crate::attach::Body) -> Vec<Effect> {
+        open_files(app, &[path]);
+        press(app, KeyCode::Enter);
+        let asked = press(app, KeyCode::Char('a'));
+        app.update(Msg::Attached {
+            path: path.to_owned(),
+            body,
+        });
+        asked
+    }
+
+    /// The first run one of these effects would start.
+    fn started(effects: &[Effect]) -> &crate::attach::Prompt {
+        let [Effect::StartRun(prompt)] = effects else {
+            panic!("one run, and nothing else: {effects:?}");
+        };
+        prompt
+    }
+
+    #[test]
+    fn a_marker_and_its_file_go_out_with_the_message() {
+        let agent = vision_agent(vec![]);
+        let mut app = app_for(&agent);
+
+        typed(&mut app, "look at ");
+        let asked = attach(&mut app, "shots/old.png", image());
+        assert_eq!(
+            asked,
+            [Effect::AttachFile {
+                path: "shots/old.png".to_owned()
+            }],
+            "attaching asks the executor for the file"
+        );
+        assert_eq!(app.input.text(), "look at @shots/old.png");
+
+        let effects = press(&mut app, KeyCode::Enter);
+        let prompt = started(&effects);
+        assert_eq!(prompt.line(), "look at @shots/old.png");
+        assert_eq!(
+            prompt.parts(),
+            [
+                crate::attach::Part::Text("look at @shots/old.png".to_owned()),
+                crate::attach::Part::Image {
+                    data: std::sync::Arc::from(&[1u8, 2, 3][..]),
+                    mime: "image/png",
+                },
+            ],
+            "the picture follows the words that name it"
+        );
+        assert!(app.attached.is_empty(), "the draft went with the message");
+    }
+
+    #[test]
+    fn a_text_file_follows_its_marker_as_its_own_part() {
+        let agent = vision_agent(vec![]);
+        let mut app = app_for(&agent);
+
+        attach(&mut app, "src/main.rs", file_text("<file/>"));
+        let effects = press(&mut app, KeyCode::Enter);
+
+        assert_eq!(
+            started(&effects).parts(),
+            [
+                crate::attach::Part::Text("@src/main.rs".to_owned()),
+                crate::attach::Part::Text("<file/>".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_marker_the_draft_does_not_hold_is_only_words() {
+        let agent = vision_agent(vec![]);
+        let mut app = app_for(&agent);
+
+        // Typed by hand: the `@` opens the list, and Esc hands it back.
+        typed(&mut app, "look at ");
+        press(&mut app, KeyCode::Char('@'));
+        press(&mut app, KeyCode::Esc);
+        typed(&mut app, "shots/old.png");
+
+        let effects = press(&mut app, KeyCode::Enter);
+        assert!(
+            matches!(started(&effects).parts(), [crate::attach::Part::Text(_)]),
+            "nothing was read, so nothing rides along"
+        );
+    }
+
+    #[test]
+    fn backspace_at_a_marker_takes_the_whole_of_it() {
+        let agent = vision_agent(vec![]);
+        let mut app = app_for(&agent);
+
+        typed(&mut app, "look at ");
+        attach(&mut app, "shots/old.png", image());
+        assert_eq!(app.input.text(), "look at @shots/old.png");
+
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(
+            app.input.text(),
+            "look at ",
+            "one key, and the whole marker is gone"
+        );
+
+        // And from the middle of it, which is where a typist would be.
+        attach(&mut app, "shots/old.png", image());
+        for _ in 0..5 {
+            press(&mut app, KeyCode::Left);
+        }
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.input.text(), "look at ");
+    }
+
+    #[test]
+    fn a_marker_broken_by_typing_is_not_sent() {
+        let agent = vision_agent(vec![]);
+        let mut app = app_for(&agent);
+
+        attach(&mut app, "shots/old.png", image());
+        for _ in 0..5 {
+            press(&mut app, KeyCode::Left);
+        }
+        typed(&mut app, "x");
+
+        let effects = press(&mut app, KeyCode::Enter);
+        assert!(
+            matches!(started(&effects).parts(), [crate::attach::Part::Text(_)]),
+            "the text stopped naming the file, so the file stays home"
+        );
+    }
+
+    #[test]
+    fn a_marker_taken_back_and_typed_again_still_carries_its_file() {
+        let agent = vision_agent(vec![]);
+        let mut app = app_for(&agent);
+
+        typed(&mut app, "look at ");
+        attach(&mut app, "shots/old.png", image());
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.input.text(), "look at ");
+
+        // Typed back by hand, and the store still holds the bytes.
+        press(&mut app, KeyCode::Char('@'));
+        press(&mut app, KeyCode::Esc);
+        typed(&mut app, "shots/old.png");
+
+        let effects = press(&mut app, KeyCode::Enter);
+        assert_eq!(started(&effects).parts().len(), 2, "the picture came back");
+    }
+
+    #[test]
+    fn esc_on_an_idle_box_drops_the_line_and_the_draft() {
+        let agent = vision_agent(vec![]);
+        let mut app = app_for(&agent);
+
+        attach(&mut app, "shots/old.png", image());
+        press(&mut app, KeyCode::Esc);
+
+        assert_eq!(app.input.text(), "");
+        assert!(app.attached.is_empty());
+    }
+
+    #[test]
+    fn a_command_leaves_the_draft_alone() {
+        let agent = vision_agent(vec![]);
+        let mut app = app_for(&agent);
+
+        attach(&mut app, "shots/old.png", image());
+        // The marker goes, the bytes stay: this is the state a command can be
+        // typed in with a file still waiting behind it.
+        press(&mut app, KeyCode::Backspace);
+        type_line(&mut app, "/tools");
+
+        assert!(app.attached.contains_key("shots/old.png"));
+        assert_eq!(app.queued(), None, "a command is not a prompt");
+    }
+
+    #[test]
+    fn attaching_an_image_to_a_model_without_vision_is_refused() {
+        let agent = agent_with(vec![]);
+        let mut app = app_for(&agent);
+
+        attach(&mut app, "shots/old.png", image());
+
+        assert!(app.attached.is_empty(), "the file was not taken");
+        assert_eq!(
+            app.input.text(),
+            "",
+            "and the marker goes with it: a marker that sends nothing is a lie"
+        );
+        assert!(
+            notice_lines(&app)
+                .iter()
+                .any(|line| line.contains("cannot take images")),
+            "and it says why: {:?}",
+            notice_lines(&app)
+        );
+    }
+
+    #[test]
+    fn switching_to_a_model_without_vision_warns_but_keeps_the_draft() {
+        let agent = vision_agent(vec![]);
+        let mut app = app_for(&agent);
+        attach(&mut app, "shots/old.png", image());
+
+        let cmd = app.switch_model(deepseek::flash());
+
+        assert!(
+            notice_lines(&app)
+                .iter()
+                .any(|line| line.contains("cannot take images")),
+            "the warning comes when the choice is made"
+        );
+        assert!(
+            cmd.effects()
+                .iter()
+                .any(|effect| matches!(effect, Effect::SetModel(_))),
+            "and the switch still happens"
+        );
+        assert!(app.attached.contains_key("shots/old.png"));
+    }
+
+    #[test]
+    fn sending_an_image_to_a_model_without_vision_keeps_the_line() {
+        let agent = vision_agent(vec![]);
+        let mut app = app_for(&agent);
+
+        typed(&mut app, "look at ");
+        attach(&mut app, "shots/old.png", image());
+        app.switch_model(deepseek::flash());
+
+        let asked = press(&mut app, KeyCode::Enter);
+
+        assert_eq!(asked, [], "nothing was spent on a request that would fail");
+        assert_eq!(
+            app.input.text(),
+            "look at @shots/old.png",
+            "the line came back into the box"
+        );
+        assert!(
+            app.attached.contains_key("shots/old.png"),
+            "and so did the file"
+        );
+        assert!(
+            notice_lines(&app)
+                .iter()
+                .any(|line| line.contains("cannot take images")),
+            "and it says why: {:?}",
+            notice_lines(&app)
+        );
+    }
+
     #[test]
     fn a_typed_line_asks_for_a_run_and_nothing_else() {
         let agent = agent_with(vec![Turn::text("hello back")]);
@@ -2316,7 +2905,7 @@ mod tests {
 
         assert_eq!(
             type_line(&mut app, "hello"),
-            [Effect::StartRun("hello".to_owned())]
+            [Effect::StartRun(prompt("hello"))]
         );
         assert!(app.status.running, "the status line says so at once");
         assert_eq!(app.queued(), None, "it went, so it is not still waiting");
@@ -2358,7 +2947,7 @@ mod tests {
 
         // This is deliberately outside `runtime.enter()`. It is the context
         // in which the graphical interface submits a line.
-        ex.perform(Effect::StartRun("hello".to_owned()));
+        ex.perform(Effect::StartRun(prompt("hello")));
 
         let ended = runtime.block_on(async {
             tokio::time::timeout(Duration::from_secs(5), inbox.recv())
@@ -2392,7 +2981,7 @@ mod tests {
         let asked = type_line(&mut app, "two");
         assert_eq!(
             asked,
-            [Effect::StartRun("two".to_owned())],
+            [Effect::StartRun(prompt("two"))],
             "the second line asks for a run"
         );
         for effect in asked {
@@ -2413,7 +3002,7 @@ mod tests {
 
         assert_eq!(
             type_line(&mut app, "one"),
-            [Effect::StartRun("one".to_owned())]
+            [Effect::StartRun(prompt("one"))]
         );
 
         // The agent is away, so this only queues.
@@ -2427,7 +3016,7 @@ mod tests {
             turns: 1,
             error: None,
         });
-        assert_eq!(cmd.effects(), [Effect::StartRun("two".to_owned())]);
+        assert_eq!(cmd.effects(), [Effect::StartRun(prompt("two"))]);
         assert!(!app.status.queued);
     }
 
@@ -2462,7 +3051,7 @@ mod tests {
                 turns: 1,
                 error: None,
             });
-            assert_eq!(cmd.effects(), [Effect::StartRun(expected.to_owned())]);
+            assert_eq!(cmd.effects(), [Effect::StartRun(prompt(expected))]);
         }
         assert_eq!(app.queued(), None, "the queue is drained in order");
     }
@@ -3237,10 +3826,11 @@ mod tests {
 
         assert_eq!(found, ["src/main.rs"], "the tree came back as paths");
         press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Enter);
         assert_eq!(
             app.input.text(),
             "src/main.rs",
-            "and Enter wrote it over the trigger"
+            "and the citation was written over the trigger"
         );
     }
 
@@ -3532,7 +4122,9 @@ fn apply(ctx) {
         let event = receiver.try_recv().expect("the prompt was sent");
         assert_eq!(
             app.update(event).into_effects(),
-            [Effect::StartRun("Say hello to Ana".to_owned())]
+            [Effect::StartRun(crate::attach::Prompt::text(
+                "Say hello to Ana"
+            ))]
         );
     }
 

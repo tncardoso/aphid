@@ -4,6 +4,7 @@
 //! test reads what a keypress decided without an agent, a plugin host or a
 //! terminal anywhere near it.
 
+use crate::attach;
 use crate::scripting::SurfaceEvent;
 use aphid_core::{Model, ThinkingLevel};
 
@@ -16,7 +17,10 @@ pub enum Effect {
     /// Send this prompt to the agent. The executor takes the idle agent, runs
     /// it on a task of its own, and reports back with
     /// [`Msg::RunEnded`](crate::tui::msg::Msg::RunEnded).
-    StartRun(String),
+    ///
+    /// A prompt is more than a line: it carries the files its markers named,
+    /// already cut into the parts the model reads. See [`crate::attach`].
+    StartRun(attach::Prompt),
     /// Stop whatever the agent is doing.
     Cancel,
     /// Point the agent at another model, credentials and all.
@@ -37,6 +41,13 @@ pub enum Effect {
     /// session that never types `@` never reads the tree.
     SearchFiles {
         query: String,
+    },
+    /// Read a file and put it in the draft, off the loop.
+    ///
+    /// Asked for when the file list's dialog answers `Attach`. The marker is
+    /// already in the box by then; this is what fills in the bytes it names.
+    AttachFile {
+        path: String,
     },
     /// Put the selected text on the clipboard.
     Copy(String),

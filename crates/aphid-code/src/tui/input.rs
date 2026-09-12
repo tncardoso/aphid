@@ -3,7 +3,7 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Style};
 use ratatui::widgets::{Block, Borders, Padding};
-use ratatui_textarea::TextArea;
+use ratatui_textarea::{CursorMove, TextArea};
 
 use super::logo::COLOR as BANNER;
 
@@ -204,9 +204,63 @@ impl Input {
         self.textarea.insert_str(text);
     }
 
-    fn set_text(&mut self, text: &str) {
+    /// Put `text` in the box, replacing what is there.
+    ///
+    /// What a message refused at the last moment goes back through: the box is
+    /// cleared before the line is handed over, so nothing else can put it back.
+    pub(crate) fn set_text(&mut self, text: &str) {
         self.textarea.clear();
         self.textarea.insert_str(text);
+    }
+
+    /// The cursor, as a line and a column of characters.
+    #[must_use]
+    pub fn cursor(&self) -> (usize, usize) {
+        let cursor = self.textarea.cursor();
+        (cursor.0, cursor.1)
+    }
+
+    /// The line the cursor is on, for a caller that has to read it.
+    #[must_use]
+    pub fn line(&self, row: usize) -> &str {
+        self.textarea
+            .lines()
+            .get(row)
+            .map(String::as_str)
+            .unwrap_or_default()
+    }
+
+    /// Take the characters in `[from, to)` off the line at `row`.
+    ///
+    /// How one key takes a whole marker: the cursor is put at its head and the
+    /// run is deleted from there, which is a single edit as far as the undo
+    /// history is concerned.
+    pub(crate) fn remove_range(&mut self, row: usize, from: usize, to: usize) {
+        if to <= from {
+            return;
+        }
+        self.textarea
+            .move_cursor(CursorMove::Jump(row as u16, from as u16));
+        self.textarea.delete_str(to - from);
+    }
+
+    /// Take a marker `@path` out of the box, wherever it is.
+    ///
+    /// What an attach the model cannot take leaves behind: the marker named a
+    /// file that is not going to be sent, and a marker that sends nothing is
+    /// worse than no marker at all.
+    pub(crate) fn remove_mention(&mut self, path: &str) -> bool {
+        let marker = format!("@{path}");
+        for row in 0..self.textarea.lines().len() {
+            let Some(at) = self.line(row).find(&marker) else {
+                continue;
+            };
+            let from = self.line(row)[..at].chars().count();
+            let to = from + marker.chars().count();
+            self.remove_range(row, from, to);
+            return true;
+        }
+        false
     }
 
     pub fn handle(&mut self, key: KeyEvent) -> Action {

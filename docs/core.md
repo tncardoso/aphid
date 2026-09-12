@@ -71,6 +71,26 @@ A model gives the name of a profile, and then each behaviour that is different
 from that profile. Thus a correction is usually one line. Refer to
 [The catalogue](#the-catalogue).
 
+### Images
+
+A user message can carry images. The content of the message becomes an array of
+blocks, and each image is a `data:` URL:
+
+```json
+{"role":"user","content":[
+  {"type":"text","text":"what is wrong with this window"},
+  {"type":"image_url","image_url":{"url":"data:image/png;base64,iVBOR…"}}
+]}
+```
+
+The blocks keep the order in which they were written, so an image stands next to
+the words that name it. A message without an image keeps the plain string form,
+because some models copy an array back to you.
+
+A system message, an assistant message and a tool result cannot carry an image.
+The protocol has no place for one, and an endpoint answers with a 400. Aphid
+refuses such a message before it sends it.
+
 ## Thinking levels
 
 Aphid has one ladder of levels for each model that can reason:

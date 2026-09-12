@@ -23,6 +23,16 @@ pub enum Modal {
         selected: usize,
     },
     Confirm(Confirm),
+    /// The question a chosen file opens: write its path into the message, or
+    /// send the file with it.
+    ///
+    /// Cite is selected when it opens, so the `Enter` that follows the `@` and
+    /// the file list is the `Enter` that cites, which is what aphid did before
+    /// there was a question at all.
+    FileAction {
+        path: String,
+        selected: usize,
+    },
     /// The process list holds a snapshot, refreshed on the poll tick. Reading
     /// the registry takes a lock, and a lock has no business being taken while
     /// a frame is drawn.
@@ -48,6 +58,7 @@ impl Modal {
     pub fn move_selection(&mut self, delta: isize) {
         let (len, selected) = match self {
             Modal::Models { models, selected } => (models.len(), selected),
+            Modal::FileAction { selected, .. } => (FILE_ANSWERS, selected),
             // Only the running ones can be selected: a finished process is a
             // report, with nothing left to do to it.
             Modal::Processes { rows, selected } => (running(rows).len(), selected),
@@ -64,8 +75,14 @@ impl Modal {
     pub fn selected_model(&self) -> Option<&Model> {
         match self {
             Modal::Models { models, selected } => models.get(*selected),
-            Modal::Confirm(_) | Modal::Processes { .. } => None,
+            Modal::Confirm(_) | Modal::Processes { .. } | Modal::FileAction { .. } => None,
         }
+    }
+
+    /// Which answer the cursor is on: `false` for Cite, `true` for Attach.
+    #[must_use]
+    pub fn attaches(&self) -> bool {
+        matches!(self, Modal::FileAction { selected, .. } if *selected == ATTACH)
     }
 
     /// The running process under the cursor, if this is the process list.
@@ -85,11 +102,64 @@ impl Modal {
         match self {
             Modal::Models { models, selected } => render_models(frame, area, models, *selected),
             Modal::Confirm(confirm) => render_confirm(frame, area, confirm),
+            Modal::FileAction { path, selected } => {
+                render_file_action(frame, area, path, *selected);
+            }
             Modal::Processes { rows, selected } => {
                 render_processes(frame, area, rows, *selected);
             }
         }
     }
+}
+
+/// How many answers the file dialog offers.
+const FILE_ANSWERS: usize = 2;
+/// The row Attach is on.
+const ATTACH: usize = 1;
+
+/// What a chosen file can do: be named, or be sent.
+fn render_file_action(frame: &mut Frame<'_>, area: Rect, path: &str, selected: usize) {
+    let width = area.width.saturating_sub(8).min(72);
+    let rows = [
+        ("Cite", "write the path into the message"),
+        ("Attach", "send the file with the message"),
+    ];
+
+    let title = one_line(path, (width as usize).saturating_sub(4));
+    let lines: Vec<Line<'_>> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, (name, what))| {
+            let chosen = index == selected;
+            let style = if chosen {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            Line::from(vec![
+                Span::styled(
+                    format!("{} {name:<7}", if chosen { "▸" } else { " " }),
+                    style,
+                ),
+                Span::styled((*what).to_owned(), Style::default().fg(Color::DarkGray)),
+            ])
+        })
+        .collect();
+
+    let cell = centred(area, width, lines.len() as u16 + 2);
+    frame.render_widget(Clear, cell);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" {title} — c or a, Enter for the one marked "))
+                .border_style(Style::default().fg(Color::Cyan)),
+        ),
+        cell,
+    );
 }
 
 /// The running ones, in the order they started.

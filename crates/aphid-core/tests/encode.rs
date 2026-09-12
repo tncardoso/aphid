@@ -168,7 +168,7 @@ fn an_endpoint_that_wants_the_developer_role_gets_it() {
 }
 
 #[test]
-fn images_are_rejected_rather_than_silently_dropped() {
+fn an_image_rides_with_the_text_of_a_user_message() {
     let mut t = Transcript::new();
     t.push_user_parts(&[
         ContentInput::Text("what is this"),
@@ -177,8 +177,67 @@ fn images_are_rejected_rather_than_silently_dropped() {
             mime: "image/png",
         },
     ]);
+    let json = body(&t, &[], &SimpleStreamOptions::default());
+
+    let content = json["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 2);
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[0]["text"], "what is this");
+    assert_eq!(content[1]["type"], "image_url");
+    assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AQID");
+}
+
+#[test]
+fn a_picture_stays_next_to_the_words_that_name_it() {
+    let mut t = Transcript::new();
+    t.push_user_parts(&[
+        ContentInput::Text("compare @a.png"),
+        ContentInput::Image {
+            data: &[1],
+            mime: "image/png",
+        },
+        ContentInput::Text(" with @b.png"),
+        ContentInput::Image {
+            data: &[2],
+            mime: "image/png",
+        },
+    ]);
+    let json = body(&t, &[], &SimpleStreamOptions::default());
+
+    let content = json["messages"][0]["content"].as_array().unwrap();
+    let kinds: Vec<&str> = content
+        .iter()
+        .map(|block| block["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["text", "image_url", "text", "image_url"]);
+    assert_eq!(content[2]["text"], " with @b.png");
+}
+
+#[test]
+fn a_message_without_an_image_keeps_the_plain_string_form() {
+    let mut t = Transcript::new();
+    t.push_user("just words");
+    let json = body(&t, &[], &SimpleStreamOptions::default());
+
+    assert_eq!(json["messages"][0]["content"], "just words");
+}
+
+#[test]
+fn an_image_outside_a_user_message_is_still_refused() {
+    let mut t = Transcript::new();
+    t.push_system("You are terse.");
+    let mut assistant = MessageBuffer::new(AssistantMeta::new(
+        Api::OpenAiCompletions,
+        ProviderId::DEEPSEEK,
+        "deepseek-v4-flash",
+    ));
+    assistant.push_image(&[1, 2, 3], "image/png");
+    let text = assistant.begin_text();
+    assistant.push_delta(text, "here");
+    t.commit(assistant);
+
     let error = encode_request(&deepseek::flash(), &t, &[], &SimpleStreamOptions::default())
-        .expect_err("this protocol cannot carry images");
+        .expect_err("an assistant message cannot carry a picture");
     assert!(matches!(error, Error::UnsupportedContent("image")));
 }
 
