@@ -585,6 +585,52 @@ The `crates/aphid-code/examples/plugins` directory holds plugins that work:
 | `wordcount.rhai` | Adds a `wordcount` tool |
 | `review.rhai` | Adds a `/review` command |
 | `panel.rhai` | Adds an interactive right-hand side panel |
+| `herdr.rhai` | Reports the session to [Herdr](#herdr), so its sidebar shows the pane as working, blocked or idle |
+
+## Herdr
+
+[Herdr](https://herdr.dev) is a terminal multiplexer for coding agents. It
+reads the state of the agents it knows and shows it in a sidebar. Aphid is not
+one of them, so `crates/aphid-code/examples/plugins/herdr.rhai` reports the
+state itself, with `herdr pane report-agent`. Refer to
+[Herdr integrations](https://herdr.dev/docs/integrations/) for the contract this
+follows.
+
+Copy the file to `~/.aphid/plugins/herdr.rhai`, or to
+`.aphid/plugins/herdr.rhai` in the workspace you use. The plugin reports
+nothing when aphid does not run inside herdr.
+
+| State | When |
+| --- | --- |
+| idle | The session is open, and a run has finished |
+| working | A run is in progress. The line under it names the tool that is running |
+| blocked | A tool needs permission. The line under it is the question |
+
+A plugin in your home directory also reports from a headless session. The
+report is taken back when the session ends, and a herdr row for a session that
+has ended does not stay behind.
+
+Settings go in `.aphid/plugins/herdr.json`, or in your home directory.
+
+| Setting | Default | Result |
+| --- | --- | --- |
+| `enabled` | `true` | `false` makes the plugin do nothing |
+| `pane` | the pane herdr started | Report about another pane |
+| `bin` | `HERDR_BIN_PATH`, then `herdr` | Use a different herdr binary |
+| `source` | `custom:aphid` | The authority the report is filed under. Keep it stable: a report is taken back by the source that made it |
+| `agent` | `aphid` | The label in the sidebar |
+| `message` | `true` | Send the line under the state |
+| `tools` | `true` | Name the tool while working |
+| `heartbeat` | `60` | Seconds between repeats of the last report. This covers a herdr server that restarts and forgets. `0` switches it off |
+| `notify` | `true` | Show a herdr notice when a run ends |
+| `verbose` | `false` | Log every report and every failure |
+
+One report costs one `herdr` call, and the plugin makes a call only when the
+state or the line under it changes. A run of twenty tool calls is a handful of
+calls, not twenty.
+
+A report is display only. It does not make the pane an agent that other panes
+can prompt: `herdr agent prompt aphid` does not find it.
 
 ## The web chat
 

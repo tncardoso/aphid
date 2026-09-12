@@ -59,6 +59,17 @@
   one time into the cache of the machine. This is behind a build feature,
   `voice`, and a `voice` block in `alate.json`. Refer to the Telegram page.
 
+- **A session tells Herdr what it is doing.** [Herdr](https://herdr.dev) is a
+  terminal workspace manager that shows the state of the agents in its panes in
+  a sidebar. Aphid is not one of the agents Herdr knows, so a plugin reports the
+  state in its place: the pane reads `working` while a run goes on, `blocked`
+  with the question that waits for your answer, and `idle` when the session is
+  ready for you. The plugin is
+  `crates/aphid-code/examples/plugins/herdr.rhai`. Copy it to
+  `~/.aphid/plugins/herdr.rhai`, or to `.aphid/plugins/herdr.rhai` in a
+  workspace. It does nothing when aphid runs outside Herdr. Refer to the Plugins
+  page.
+
 ### Changed
 
 - **`/sessions` in the alate terminal opens a list you can filter.** Type any
