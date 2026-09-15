@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-14
+
 ### Added
 
 - **`@` opens a list of the workspace's files in the aphid terminal.** Type `@`
@@ -70,73 +72,6 @@
   workspace. It does nothing when aphid runs outside Herdr. Refer to the Plugins
   page.
 
-### Changed
-
-- **`/sessions` in the alate terminal opens a list you can filter.** Type any
-  part of an id, a kind or a date and the list cuts down to what matches; the
-  characters do not have to be next to each other. Move with the arrows and
-  press Enter to look at the conversation under the cursor. `/session <id>`
-  still works as before.
-
-- **A session list holds the 20 most recent stored conversations.** Every
-  conversation that runs now is still named. An older one on disk is still
-  there, and `/session <id>` opens it.
-
-### Fixed
-
-- **A scheduled job waits for its time.** A job you gave the alate ran as soon
-  as you wrote it, if the time it names had already gone past since the alate
-  started — a job written at eight in the evening for nine in the morning ran
-  immediately. A new job now counts from the moment you write it, which is what
-  the `cron` tool said it would do all along.
-
-### Changed
-
-- The graphical interface is now a build feature, `gui`, on by default. A
-  build that turns it off keeps the whole terminal agent and stops compiling
-  the window library, which is most of the build. `aphid gui` stays in
-  `--help` either way: without the feature it says which build has a window
-  instead of answering that the command does not exist.
-- In the graphical interface, the buttons, the session list, the model list
-  and the process list are drawn by the component library. They take the
-  keyboard as well as the pointer, and a session row now refuses the click
-  while a run is going instead of dimming and taking it anyway.
-- **The graphical interfaces are rebuilt on a component library.** The text
-  box now composes: a dead key makes `á` where it used to type `´a`, and so do
-  the input methods of the system. Markdown, code highlighting and the
-  transcript are drawn by that library as well, and the transcript now measures
-  and draws only the messages on screen instead of the whole conversation on
-  every frame.
-- **Remote images in the graphical interface load straight away.** They used to
-  wait for you to select them. The Markdown view that replaces the old one has
-  no way to hold them back.
-- A plugin surface's `mouse` message now carries `host`, which is `"terminal"`
-  or `"gui"`. A row and a column are cells of a terminal, so a window sends
-  zero for them; a panel that lines a table up by counting characters can read
-  `host` and draw the other way.
-- Selecting a model in the graphical interface no longer goes through a key
-  that nobody pressed. It names the model.
-- **Plugin surfaces are now written as three parts.** A surface declares
-  `init` for what its model starts as, `update(state, msg)` for how a message
-  changes it, and `view(state)` for what it looks like. The old `render` and
-  `on_event` are refused at load, with a message saying what to rename. A
-  surface can also ask for the background tick with `tick: true`, send itself a
-  message with `send`, and send text to the model with `prompt_with`.
-- A surface keeps its own model, reachable from the rest of the plugin with
-  `surface_state(name)`. A tool that fills a panel no longer shares one map
-  with every other part of the plugin.
-- In the terminal, a permission question that nobody answers refuses the tool
-  call after five minutes, as it already did for an alate. A run left waiting
-  on a prompt no longer holds for the rest of the day.
-- Quitting the terminal while a permission question is on screen refuses the
-  call immediately, instead of leaving it to time out.
-- Sessions are now stored in one place shared by every project:
-  `~/.aphid/sessions` (or `$APHID_HOME/sessions`), as files named
-  `<project>-<id>.jsonl`. Sessions saved under a workspace's own `.aphid`
-  are no longer listed or resumed.
-
-### Added
-
 - **`aphid alate gui` opens a window on a running alate.** It is a console that
   drops from the top of the screen, or a column against its right edge, and it
   shows what the agent is doing between prompts. It is a gateway client and
@@ -194,7 +129,68 @@
   wins over its default. A panel no longer has to write
   `if "open" in s { s.open } else { false }` for each of its keys.
 
+### Changed
+
+- **`/sessions` in the alate terminal opens a list you can filter.** Type any
+  part of an id, a kind or a date and the list cuts down to what matches; the
+  characters do not have to be next to each other. Move with the arrows and
+  press Enter to look at the conversation under the cursor. `/session <id>`
+  still works as before.
+
+- **A session list holds the 20 most recent stored conversations.** Every
+  conversation that runs now is still named. An older one on disk is still
+  there, and `/session <id>` opens it.
+
+- The graphical interface is now a build feature, `gui`, on by default. A
+  build that turns it off keeps the whole terminal agent and stops compiling
+  the window library, which is most of the build. `aphid gui` stays in
+  `--help` either way: without the feature it says which build has a window
+  instead of answering that the command does not exist.
+- In the graphical interface, the buttons, the session list, the model list
+  and the process list are drawn by the component library. They take the
+  keyboard as well as the pointer, and a session row now refuses the click
+  while a run is going instead of dimming and taking it anyway.
+- **The graphical interfaces are rebuilt on a component library.** The text
+  box now composes: a dead key makes `á` where it used to type `´a`, and so do
+  the input methods of the system. Markdown, code highlighting and the
+  transcript are drawn by that library as well, and the transcript now measures
+  and draws only the messages on screen instead of the whole conversation on
+  every frame.
+- **Remote images in the graphical interface load straight away.** They used to
+  wait for you to select them. The Markdown view that replaces the old one has
+  no way to hold them back.
+- A plugin surface's `mouse` message now carries `host`, which is `"terminal"`
+  or `"gui"`. A row and a column are cells of a terminal, so a window sends
+  zero for them; a panel that lines a table up by counting characters can read
+  `host` and draw the other way.
+- Selecting a model in the graphical interface no longer goes through a key
+  that nobody pressed. It names the model.
+- **Plugin surfaces are now written as three parts.** A surface declares
+  `init` for what its model starts as, `update(state, msg)` for how a message
+  changes it, and `view(state)` for what it looks like. The old `render` and
+  `on_event` are refused at load, with a message saying what to rename. A
+  surface can also ask for the background tick with `tick: true`, send itself a
+  message with `send`, and send text to the model with `prompt_with`.
+- A surface keeps its own model, reachable from the rest of the plugin with
+  `surface_state(name)`. A tool that fills a panel no longer shares one map
+  with every other part of the plugin.
+- In the terminal, a permission question that nobody answers refuses the tool
+  call after five minutes, as it already did for an alate. A run left waiting
+  on a prompt no longer holds for the rest of the day.
+- Quitting the terminal while a permission question is on screen refuses the
+  call immediately, instead of leaving it to time out.
+- Sessions are now stored in one place shared by every project:
+  `~/.aphid/sessions` (or `$APHID_HOME/sessions`), as files named
+  `<project>-<id>.jsonl`. Sessions saved under a workspace's own `.aphid`
+  are no longer listed or resumed.
+
 ### Fixed
+
+- **A scheduled job waits for its time.** A job you gave the alate ran as soon
+  as you wrote it, if the time it names had already gone past since the alate
+  started — a job written at eight in the evening for nine in the morning ran
+  immediately. A new job now counts from the moment you write it, which is what
+  the `cron` tool said it would do all along.
 
 - **An alate's sessions no longer see one another's runs.** Each session
   mounted its components on the one composition the daemon shares, and a
@@ -311,6 +307,7 @@
 [kac]: https://keepachangelog.com/en/1.1.0/
 [semver]: https://semver.org/spec/v2.0.0.html
 [releasing]: https://aphid.embornal.com/docs/releasing.html
-[Unreleased]: https://github.com/tncardoso/aphid/compare/v0.2.0...main
+[Unreleased]: https://github.com/tncardoso/aphid/compare/v0.3.0...main
+[0.3.0]: https://github.com/tncardoso/aphid/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/tncardoso/aphid/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/tncardoso/aphid/releases/tag/v0.1.0

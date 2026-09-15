@@ -145,7 +145,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "aphid-agent"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aphid-core",
  "compact_str",
@@ -159,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "aphid-ai"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aphid-agent",
  "aphid-alate",
@@ -174,7 +174,7 @@ dependencies = [
 
 [[package]]
 name = "aphid-alate"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aphid-agent",
  "aphid-code",
@@ -216,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "aphid-code"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aphid-agent",
  "aphid-core",
@@ -236,7 +236,7 @@ dependencies = [
 
 [[package]]
 name = "aphid-colony"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aphid-code",
  "aphid-core",
@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "aphid-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -273,7 +273,7 @@ dependencies = [
 
 [[package]]
 name = "aphid-nostr"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "nostr",
  "serde",
