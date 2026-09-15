@@ -9,9 +9,11 @@ ci = "github"
 installers = ["shell"]
 # No Windows target: `aphid alate` wants Unix sockets, and a release with a
 # binary that cannot run the daemon is worse than no binary at all.
+# No x86_64 Apple target either: the `voice` feature reaches an ONNX runtime,
+# and `ort` publishes no prebuilt binary for an Intel Mac. Building one from
+# source in a release job costs more than the machines it would serve.
 targets = [
     "x86_64-unknown-linux-gnu",
-    "x86_64-apple-darwin",
     "aarch64-apple-darwin",
 ]
 # The installer writes here, and APHID_AI_INSTALL_DIR moves it. The names of
@@ -26,3 +28,9 @@ cargo-auditable = true
 all-features = true
 # A pull request plans the release and builds nothing.
 pr-run-mode = "plan"
+# Steps that run in the build job before dist builds anything. This is where
+# the Linux libraries the graphical companion links against are installed:
+# `[dist.dependencies.apt]` would be the declarative way to ask for them, but
+# it writes an `apt-get install` with no `--yes`, and that one aborts on a
+# runner with no terminal.
+github-build-setup = "build-setup.yml"
