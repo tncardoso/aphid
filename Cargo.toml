@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 # GPUI follows the current stable compiler. Keep the workspace on the same
 # supported floor so the command-line and graphical applications ship together.
@@ -29,12 +29,12 @@ categories = ["command-line-utilities", "development-tools"]
 base64 = "0.22"
 # The crates of this workspace. Each one carries a version as well as a path:
 # a path alone is enough to build, and not enough to publish.
-aphid-agent = { version = "0.3.0", path = "crates/aphid-agent" }
-aphid-alate = { version = "0.3.0", path = "crates/aphid-alate" }
-aphid-code = { version = "0.3.0", path = "crates/aphid-code" }
-aphid-colony = { version = "0.3.0", path = "crates/aphid-colony" }
-aphid-core = { version = "0.3.0", path = "crates/aphid-core" }
-aphid-nostr = { version = "0.3.0", path = "crates/aphid-nostr" }
+aphid-agent = { version = "0.3.1", path = "crates/aphid-agent" }
+aphid-alate = { version = "0.3.1", path = "crates/aphid-alate" }
+aphid-code = { version = "0.3.1", path = "crates/aphid-code" }
+aphid-colony = { version = "0.3.1", path = "crates/aphid-colony" }
+aphid-core = { version = "0.3.1", path = "crates/aphid-core" }
+aphid-nostr = { version = "0.3.1", path = "crates/aphid-nostr" }
 
 clap = { version = "4.5", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }

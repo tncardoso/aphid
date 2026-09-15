@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-15
+
+### Fixed
+
+- **The release carries its binaries again.** The build of 0.3.0 made none:
+  on Linux the linker went looking for `libxkbcommon`, which the graphical
+  interface reaches and the release runner did not have, and the job stopped
+  there. The runner now installs the same libraries every check already
+  installs, so the archives and the installer are back.
+
+### Removed
+
+- **No prebuilt binary for an Intel Mac.** The speech to text the alate does
+  reads an ONNX runtime, and the runtime publishes nothing for
+  `x86_64-apple-darwin`. A Mac with Apple silicon is unaffected; an Intel one
+  builds from source, with `cargo install aphid-ai`.
+
 ## [0.3.0] - 2026-09-14
 
 ### Added
@@ -307,7 +324,8 @@
 [kac]: https://keepachangelog.com/en/1.1.0/
 [semver]: https://semver.org/spec/v2.0.0.html
 [releasing]: https://aphid.embornal.com/docs/releasing.html
-[Unreleased]: https://github.com/tncardoso/aphid/compare/v0.3.0...main
+[Unreleased]: https://github.com/tncardoso/aphid/compare/v0.3.1...main
+[0.3.1]: https://github.com/tncardoso/aphid/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/tncardoso/aphid/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/tncardoso/aphid/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/tncardoso/aphid/releases/tag/v0.1.0
