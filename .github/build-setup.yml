@@ -1,0 +1,14 @@
+# Injected into the build job of `release.yml` by `dist generate`, from the
+# `github-build-setup` key of `dist-workspace.toml`. It is a list of steps and
+# not a workflow, so it lives one directory above `workflows/`: GitHub reads
+# every file in that one as a workflow, and this is not one — it failed to
+# parse, on every push, while it was in there.
+#
+# The libraries are the ones `ci.yml` installs: GPUI links against xkbcommon,
+# and without them the release build dies at `unable to find library
+# -lxkbcommon`.
+- name: Install Linux GUI dependencies
+  if: runner.os == 'Linux'
+  run: |
+    sudo apt-get update
+    sudo apt-get install --yes libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev

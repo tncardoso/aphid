@@ -1,9 +1,0 @@
-# Injected into the build job of `release.yml` by `dist generate`, from the
-# `github-build-setup` key of `dist-workspace.toml`. The same libraries that
-# `ci.yml` installs: GPUI links against xkbcommon, and without them the
-# release build dies with `unable to find library -lxkbcommon`.
-- name: Install Linux GUI dependencies
-  if: runner.os == 'Linux'
-  run: |
-    sudo apt-get update
-    sudo apt-get install --yes libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev

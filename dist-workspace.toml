@@ -33,7 +33,7 @@ pr-run-mode = "plan"
 # `[dist.dependencies.apt]` would be the declarative way to ask for them, but
 # it writes an `apt-get install` with no `--yes`, and that one aborts on a
 # runner with no terminal.
-github-build-setup = "build-setup.yml"
+github-build-setup = "../build-setup.yml"
 # The Linux runner dist picks on its own is Ubuntu 22.04, for the old glibc a
 # binary built there still runs against. The ONNX runtime behind the `voice`
 # feature is built against a newer one — it calls `__isoc23_strtol` and its

@@ -24,6 +24,15 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.event.release.tag_name }}
 
+      # `cargo publish` verifies each tarball by building it, and the binary
+      # of aphid-ai has a window by default. Without these the verification
+      # dies at `unable to find library -lxcb`. They are the same three that
+      # ci.yml installs.
+      - name: Install Linux GUI dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
+
       - uses: dtolnay/rust-toolchain@stable
 
       # A tag that says one version and a manifest that says another would put
