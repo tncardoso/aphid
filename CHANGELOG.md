@@ -12,6 +12,14 @@
   there. The runner now installs the same libraries every check already
   installs, so the archives and the installer are back.
 
+### Changed
+
+- **The Linux binary now asks for glibc 2.39.** It is built on Ubuntu 24.04,
+  because the ONNX runtime the speech to text reads is itself built against a
+  glibc of that age and will not link against an older one. A distribution
+  older than Ubuntu 24.04 or Fedora 40 builds from source, with
+  `cargo install aphid-ai`.
+
 ### Removed
 
 - **No prebuilt binary for an Intel Mac.** The speech to text the alate does
