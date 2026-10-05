@@ -19,6 +19,9 @@ pub enum Status {
     Running,
     /// Asked to stop, not yet reaped.
     Killing,
+    /// The shell ended, but something it started in the background still holds
+    /// its output. The run has returned; the process list still owns the rest.
+    Detached,
     Exited(i32),
     /// Died from a signal, which has no exit code to report.
     Signalled,
@@ -35,7 +38,7 @@ impl Status {
     /// Whether this is a state rather than an ending.
     #[must_use]
     pub fn running(&self) -> bool {
-        matches!(self, Status::Running | Status::Killing)
+        matches!(self, Status::Running | Status::Killing | Status::Detached)
     }
 }
 
@@ -170,6 +173,20 @@ impl Registry {
         let mut inner = self.lock();
         if let Some(process) = inner.processes.iter_mut().find(|p| p.id == id) {
             process.pid = pid;
+        }
+    }
+
+    /// Note that the shell ended but left something behind on its pipes.
+    ///
+    /// A process asked to stop in the meantime stays `Killing`: the flag is set,
+    /// and whoever reads the pipes now acts on it.
+    pub(crate) fn detach(&self, id: u32, bytes: u64) {
+        let mut inner = self.lock();
+        if let Some(process) = inner.processes.iter_mut().find(|p| p.id == id) {
+            if process.status == Status::Running {
+                process.status = Status::Detached;
+            }
+            process.bytes = bytes;
         }
     }
 

@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::process::Child;
 
 /// How long a command has to finish after being asked politely.
-const GRACE: Duration = Duration::from_millis(500);
+pub(crate) const GRACE: Duration = Duration::from_millis(500);
 
 /// Stop the command's whole process group: term, then kill.
 ///
@@ -52,7 +52,7 @@ pub(crate) async fn terminate(child: &mut Child, _pid: Option<u32>) {
 /// `child.kill()` might still recover from; a group that is already gone
 /// counts as delivered, not as failure.
 #[cfg(unix)]
-fn signal(group: u32, signal: libc::c_int) -> bool {
+pub(crate) fn signal(group: u32, signal: libc::c_int) -> bool {
     // SAFETY: `kill(2)` only reads its arguments and reports through errno; a
     // negative pid addresses the whole process group rather than one process.
     let result = unsafe { libc::kill(-(group as libc::pid_t), signal) };

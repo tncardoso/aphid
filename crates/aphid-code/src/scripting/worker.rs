@@ -203,7 +203,7 @@ fn exec(
         Status::Killed | Status::Killing => Err(format!("`{command}` was stopped")),
         Status::Cancelled => Err(format!("`{command}` was cancelled")),
         Status::Failed(error) => Err(error),
-        Status::Running => Err(format!("`{command}` never finished")),
+        Status::Running | Status::Detached => Err(format!("`{command}` never finished")),
     }
 }
 

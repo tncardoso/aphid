@@ -161,6 +161,12 @@ Press the arrow keys to select a command that runs now, and press `k` to stop
 it. This stops the command and each command that it started. Press `Esc` to
 close the list.
 
+A command can start a process in the background, for example `server &`. If
+that process keeps the output of the command, the command shows `↻ bg` after
+its shell stops. The agent does not wait for this process. The list keeps the
+line until the process stops. Press `k` to stop the process and each process in
+its group.
+
 The list opens while the agent runs also, which is when there is most to see.
 The other commands wait for the run, because they speak to the agent; this one
 does not.

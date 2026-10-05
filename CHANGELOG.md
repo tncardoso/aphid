@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **A command that starts a background process no longer freezes the agent.**
+  A command such as `server &` let the server keep the output of the shell, and
+  aphid waited for that output to end. The agent stopped, and neither the
+  timeout, `Esc` nor `k` in `/ps` could stop it. Now aphid returns 250 ms after
+  the shell stops, and tells the model to send the output of a background
+  process to a file. This applies to the `bash` tool, to plugin `exec` and to
+  `!` commands. The background process continues to run.
+
+### Added
+
+- **`/ps` shows a background process that a command left.** Its line shows
+  `↻ bg` until the process stops, and `k` stops it and its group.
+
 ## [0.3.1] - 2026-09-15
 
 ### Fixed

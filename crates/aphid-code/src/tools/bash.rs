@@ -134,7 +134,8 @@ async fn execute(
                 full_output_path,
             );
         }
-        Status::Running => {}
+        // States, not endings: `run` returns only once it has an ending.
+        Status::Running | Status::Detached => {}
     }
 
     if text.is_empty() {

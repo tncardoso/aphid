@@ -322,3 +322,212 @@ async fn a_backgrounded_command_that_redirects_its_output_does_not_hold_the_run(
         .await;
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+/// Whether a pid still names a live process.
+async fn alive(pid: u32) -> bool {
+    tokio::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .expect("kill -0")
+        .success()
+}
+
+async fn stop(pid: u32) {
+    let _ = tokio::process::Command::new("kill")
+        .arg(pid.to_string())
+        .status()
+        .await;
+}
+
+#[tokio::test]
+async fn a_backgrounded_command_that_keeps_the_pipes_does_not_hold_the_run() {
+    // The background sleep inherits both pipes, so they never reach their end
+    // while it lives. Waiting for that end froze the agent.
+    let processes = Arc::new(Registry::new());
+    let collected = Collected::default();
+    let status = tokio::time::timeout(
+        Duration::from_secs(5),
+        exec::run(
+            &processes,
+            Spec::new("test", "sleep 20 & echo $!; echo done"),
+            None,
+            collected.sink(),
+        ),
+    )
+    .await
+    .expect("the run should not wait for the background process");
+
+    assert_eq!(status, Status::Exited(0));
+    let pid: u32 = collected
+        .on(Stream::Stdout)
+        .lines()
+        .next()
+        .expect("a pid")
+        .parse()
+        .expect("a pid");
+    assert!(collected.on(Stream::Stdout).contains("done"));
+    assert!(collected.on(Stream::Stderr).contains("[aphid]"));
+    stop(pid).await;
+}
+
+/// The status of the only process, once `done` accepts it, or after 5 s.
+async fn settles(processes: &Registry, done: impl Fn(&Status) -> bool) -> Status {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let status = processes.snapshot()[0].status.clone();
+        if done(&status) || std::time::Instant::now() > deadline {
+            return status;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_background_process_keeps_running_and_writing_after_the_run() {
+    // Closing the pipes would kill it with SIGPIPE on its next tick.
+    let processes = Arc::new(Registry::new());
+    let collected = Collected::default();
+    let status = exec::run(
+        &processes,
+        Spec::new(
+            "test",
+            "(for i in 1 2 3 4 5 6 7 8; do echo tick; sleep 0.1; done) & echo $!",
+        ),
+        None,
+        collected.sink(),
+    )
+    .await;
+
+    assert_eq!(status, Status::Exited(0));
+    assert_eq!(processes.snapshot()[0].status, Status::Detached);
+    let pid: u32 = collected
+        .on(Stream::Stdout)
+        .lines()
+        .next()
+        .expect("a pid")
+        .parse()
+        .expect("a pid");
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(alive(pid).await, "the background process died with the run");
+
+    // It ends by itself, and the record ends with the shell's own status.
+    assert_eq!(
+        settles(&processes, |status| !status.running()).await,
+        Status::Exited(0)
+    );
+    assert!(processes.snapshot()[0].bytes > 20);
+}
+
+#[tokio::test]
+async fn killing_a_detached_process_stops_its_group() {
+    let processes = Arc::new(Registry::new());
+    let collected = Collected::default();
+    let status = exec::run(
+        &processes,
+        Spec::new("test", "sleep 30 & echo $!"),
+        None,
+        collected.sink(),
+    )
+    .await;
+    assert_eq!(status, Status::Exited(0));
+    let pid: u32 = collected
+        .on(Stream::Stdout)
+        .lines()
+        .next()
+        .expect("a pid")
+        .parse()
+        .expect("a pid");
+
+    let id = processes.snapshot()[0].id;
+    processes.kill(id);
+
+    assert_eq!(
+        settles(&processes, |status| !status.running()).await,
+        Status::Killed
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    if alive(pid).await {
+        stop(pid).await;
+        panic!("the background process {pid} outlived the kill");
+    }
+}
+
+#[tokio::test]
+async fn cancelling_while_the_pipes_drain_stops_the_run() {
+    let processes = Arc::new(Registry::new());
+    let collected = Collected::default();
+
+    let handle = AgentHandle::default();
+    let cx = ToolCx::for_handle(&handle);
+    let canceller = handle.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        canceller.cancel();
+    });
+
+    // The shell ends at once; the cancel lands while the run still waits for
+    // the pipes the sleep holds.
+    let status = exec::run(
+        &processes,
+        Spec::new("test", "sleep 30 & echo $!"),
+        Some(&cx),
+        collected.sink(),
+    )
+    .await;
+    assert_eq!(status, Status::Cancelled);
+
+    assert_eq!(
+        settles(&processes, |status| !status.running()).await,
+        Status::Cancelled
+    );
+    let pid: u32 = collected
+        .on(Stream::Stdout)
+        .lines()
+        .next()
+        .expect("a pid")
+        .parse()
+        .expect("a pid");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    if alive(pid).await {
+        stop(pid).await;
+        panic!("the background process {pid} outlived the cancel");
+    }
+}
+
+#[test]
+fn a_detached_process_is_read_while_the_runtime_is_idle() {
+    // The plugin worker drives a current-thread runtime only while a command
+    // runs. A reader parked in that runtime would leave a background process
+    // blocked on a full pipe; this one writes far more than a pipe holds.
+    let directory = std::env::temp_dir().join(format!("aphid-idle-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).expect("scratch directory");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+
+    let processes = Arc::new(Registry::new());
+    let status = runtime.block_on(exec::run(
+        &processes,
+        Spec::new(
+            "plugin",
+            "(sleep 0.3; head -c 1000000 /dev/zero | tr '\\0' x; echo; touch finished) &",
+        )
+        .cwd(Some(directory.clone())),
+        None,
+        discard(),
+    ));
+    assert_eq!(status, Status::Exited(0));
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !directory.join("finished").exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let finished = directory.join("finished").exists();
+    let _ = std::fs::remove_dir_all(&directory);
+    assert!(finished, "the background process blocked on a full pipe");
+}

@@ -2187,7 +2187,7 @@ async fn run_bang(
         exec::Status::Cancelled => output.push_str("\n[cancelled]"),
         exec::Status::Killed | exec::Status::Killing => output.push_str("\n[killed]"),
         exec::Status::Failed(error) => output.push_str(&format!("\n[{error}]")),
-        exec::Status::Running => {}
+        exec::Status::Running | exec::Status::Detached => {}
     }
     if output.is_empty() {
         output.push_str("[no output]");

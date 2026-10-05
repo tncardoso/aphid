@@ -272,6 +272,11 @@ plugin as the source of its commands. You can stop a command from that list; the
 `exec` reads the output while the command runs. Thus a command that writes many
 lines continues correctly.
 
+`exec` returns 250 ms after the shell stops, also when a process that the
+command started in the background keeps the output. `exec` does not return the
+output of that process. To keep it, send it to a file:
+`exec("server > server.log 2>&1 &")`. `/ps` shows the process with `↻ bg`.
+
 ## Settings and memory
 
 `config()` returns the settings of the plugin. Write them here:

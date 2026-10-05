@@ -321,6 +321,7 @@ fn state(status: &Status) -> (String, Color) {
     match status {
         Status::Running => (String::new(), Color::Reset),
         Status::Killing => ("stopping…".to_owned(), Color::Yellow),
+        Status::Detached => ("↻ bg".to_owned(), Color::Yellow),
         Status::Exited(0) => ("✓".to_owned(), Color::Green),
         Status::Exited(code) => (format!("✗ {code}"), Color::Red),
         Status::Signalled => ("signal".to_owned(), Color::Red),
