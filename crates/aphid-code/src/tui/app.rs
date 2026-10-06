@@ -1486,7 +1486,7 @@ fn parse_thinking(raw: &str) -> Result<Option<ThinkingLevel>, String> {
 /// Fails when the terminal cannot be put into raw mode or drawn to.
 pub async fn run(
     mut options: HarnessOptions,
-    resume: Option<PathBuf>,
+    resume: Option<session::Resume>,
     confirm: bool,
 ) -> std::io::Result<()> {
     // Checked before anything is created, so a piped invocation gets advice
@@ -1585,7 +1585,7 @@ pub async fn run(
         workspace.root(),
         &cwd,
         Some(&model_id),
-        resume.as_deref(),
+        resume.as_ref(),
         Arc::clone(&options.composition.transcript),
     )?;
     // Mounted rather than pushed in a particular place: it subscribes when it
@@ -1655,21 +1655,11 @@ pub async fn run(
     }
     if let Some(transcript) = resumed {
         app.replay(&transcript);
-        let restored = transcript;
         // Splice the loaded conversation in after the freshly built system
         // prompt, so resuming picks up today's project context.
-        let target = harness.agent.transcript_mut();
-        let keep: Vec<_> = (0..restored.len())
-            .filter(|index| {
-                restored
-                    .get(*index)
-                    .is_some_and(|m| m.role() != aphid_core::Role::System)
-            })
-            .filter_map(|index| restored.id_at(index))
-            .collect();
-        restored.compact_into(&keep, target);
+        let restored = session::splice(&mut harness.agent, &transcript, app.session.as_deref());
         app.scrollback
-            .push_notice(format!("── resumed {} messages ──", keep.len()));
+            .push_notice(format!("── resumed {restored} messages ──"));
     }
     app.scrollback.push_notice(format!(
         "aphid · {} · {} — /help for commands",

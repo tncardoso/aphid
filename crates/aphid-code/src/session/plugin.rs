@@ -46,6 +46,29 @@ impl SessionComponent {
         self.store.lock().ok().map(|store| store.id().to_owned())
     }
 
+    /// Run `f` on the store, the file this component writes.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the lock was poisoned by a panic in another writer.
+    pub fn with_store<T>(&self, f: impl FnOnce(&mut SessionStore) -> T) -> Result<T, String> {
+        let mut store = self
+            .store
+            .lock()
+            .map_err(|_| "the session store is poisoned".to_owned())?;
+        Ok(f(&mut store))
+    }
+
+    /// Write to another session file from now on. Returns the one written
+    /// before.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the lock was poisoned.
+    pub fn switch(&self, store: SessionStore) -> Result<SessionStore, String> {
+        self.with_store(|current| std::mem::replace(current, store))
+    }
+
     /// Which session this component writes for, so an alate that hosts several
     /// keeps each transcript to its own conversation. Must be called before the
     /// component is mounted; `None` (the default) hears every transcript.

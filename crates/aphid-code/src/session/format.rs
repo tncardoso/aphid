@@ -23,8 +23,32 @@ pub enum Line {
     /// Boxed only to keep the variants a similar size; there is exactly one
     /// header per file, so the indirection costs nothing that matters.
     Session(Box<Header>),
-    /// Everything after it.
+    /// One message, a node of the session's tree.
     Message(Box<Record>),
+    /// Where the conversation continues from now on: written when the reader
+    /// jumps to another branch, or forks one. The last `Head` or `Message` in
+    /// the file is where a resumed session picks up.
+    Head(HeadRecord),
+    /// A name for the branch that starts at `node`. The last one wins.
+    Label(LabelRecord),
+}
+
+/// A move of the session's head, without a message.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HeadRecord {
+    /// The node the next message hangs from. `None` is the root: the next
+    /// message starts a new tree in the same file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    pub ts: Timestamp,
+}
+
+/// A name given to a branch.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LabelRecord {
+    pub node: String,
+    pub text: String,
+    pub ts: Timestamp,
 }
 
 /// What a session is about.
@@ -41,6 +65,14 @@ pub struct Header {
 /// One message.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Record {
+    /// This node's id in the session's tree. Files written before sessions
+    /// were trees have none: their messages are a line, and reading gives each
+    /// its position as an id (see [`super::store::read`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// The node this one follows. `None` with an `id` is a root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
     pub role: Role,
     pub ts: Timestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -124,6 +156,8 @@ pub enum Block {
 #[must_use]
 pub fn record(message: &MessageRef<'_>) -> Record {
     Record {
+        id: None,
+        parent: None,
         role: message.role(),
         ts: message.timestamp(),
         assistant: message.assistant().map(|meta| AssistantRecord {

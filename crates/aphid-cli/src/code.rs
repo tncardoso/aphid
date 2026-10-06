@@ -250,8 +250,8 @@ pub async fn run(args: Args) -> ExitCode {
         }
         for summary in sessions {
             println!(
-                "{}  {:>4} messages  {}",
-                summary.header.id, summary.messages, summary.header.cwd
+                "{}  {:>4} messages  {}  {}",
+                summary.header.id, summary.messages, summary.header.cwd, summary.title
             );
         }
         return ExitCode::SUCCESS;
@@ -369,7 +369,7 @@ pub async fn run(args: Args) -> ExitCode {
                 workspace.root(),
                 &options.cwd,
                 Some(&model_id),
-                resume.as_deref(),
+                resume.as_ref(),
                 std::sync::Arc::clone(&options.composition.transcript),
             ) {
                 Ok(attached) => attached,
@@ -378,12 +378,16 @@ pub async fn run(args: Args) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            if let Err(error) = options.composition.mount(store, serde_json::Value::Null) {
+            if let Err(error) = options
+                .composition
+                .mount(store.clone(), serde_json::Value::Null)
+            {
                 eprintln!("aphid: could not record the session: {error}");
                 return ExitCode::FAILURE;
             }
 
-            let (_harness, outcome) = headless::run(options, &prompt, args.quiet, resumed).await;
+            let (_harness, outcome) =
+                headless::run(options, &prompt, args.quiet, resumed, Some(store)).await;
             if outcome.is_failure() {
                 ExitCode::FAILURE
             } else {
@@ -539,7 +543,7 @@ fn api_key(model: &aphid_core::Model) -> Result<String, String> {
 fn resolve_resume(
     cwd: &std::path::Path,
     resume: Option<&Option<String>>,
-) -> Result<Option<PathBuf>, String> {
+) -> Result<Option<session::Resume>, String> {
     let Some(request) = resume else {
         return Ok(None);
     };
@@ -551,7 +555,14 @@ fn resolve_resume(
         None => session::newest_for(&directory, cwd)
             .ok_or_else(|| format!("no session for {} yet", cwd.display()))?,
     };
-    Ok(Some(found.path))
+    let at = request
+        .as_deref()
+        .and_then(|id| session::split_address(id).1)
+        .map(ToOwned::to_owned);
+    Ok(Some(session::Resume {
+        path: found.path,
+        at,
+    }))
 }
 
 #[cfg(test)]

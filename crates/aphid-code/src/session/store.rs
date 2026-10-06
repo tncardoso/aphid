@@ -1,12 +1,14 @@
 //! Writing and reading session files.
 
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use aphid_core::{Timestamp, Transcript};
 
-use super::format::{self, Header, Line, Record};
+use super::format::{self, HeadRecord, Header, LabelRecord, Line, Record};
+use super::tree::Tree;
 
 /// `$APHID_HOME/sessions`, or `~/.aphid/sessions` — one directory, shared by
 /// every project on the machine.
@@ -46,17 +48,27 @@ pub fn list_for(dir: &Path, root: &Path) -> Vec<Summary> {
         .collect()
 }
 
-/// An append-only session file.
+/// An append-only session file, holding a tree of messages.
 ///
-/// Holds a watermark of how many messages have been written, so [`flush`] only
-/// ever appends what is new.
+/// Every message is a node with an id and a parent, so a session can branch:
+/// a fork writes the new branch's messages with the fork point as their parent,
+/// and nothing already written changes.
+///
+/// The store maps each message of the agent's transcript to the node it was
+/// written as, so [`flush`] only ever appends what is new, and a checkout knows
+/// which part of the transcript it can keep.
 ///
 /// [`flush`]: SessionStore::flush
 pub struct SessionStore {
     path: PathBuf,
     id: String,
     file: File,
-    written: usize,
+    /// The node each message of the agent's transcript was written as, by
+    /// index. `None` for one that is not in the file: the system prompt built
+    /// fresh for a resumed session, say.
+    line: Vec<Option<String>>,
+    /// The node the next message hangs from. `None` starts a new root.
+    tip: Option<String>,
 }
 
 impl SessionStore {
@@ -76,47 +88,69 @@ impl SessionStore {
         let id = new_id(started);
         let path = dir.join(format!("{}-{id}.jsonl", slug(root)));
 
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .create_new(true)
             .append(true)
             .open(&path)?;
-        let header = Line::Session(Box::new(Header {
+        let mut store = Self {
+            path,
             id: id.clone(),
+            file,
+            line: Vec::new(),
+            tip: None,
+        };
+        store.write(&Line::Session(Box::new(Header {
+            id,
             cwd: cwd.display().to_string(),
             started,
             model: model.map(ToOwned::to_owned),
-        }));
-        writeln!(file, "{}", serde_json::to_string(&header)?)?;
-        file.flush()?;
-
-        Ok(Self {
-            path,
-            id,
-            file,
-            written: 0,
-        })
+        })))?;
+        Ok(store)
     }
 
-    /// Reopen an existing session for appending, and replay it into `transcript`.
+    /// Reopen an existing session for appending, and replay one branch of it
+    /// into `transcript`.
+    ///
+    /// The branch is the path from the root to `at`, a node id or a prefix of
+    /// one. Without `at` it is the session's head: where it was left.
     ///
     /// # Errors
     ///
-    /// Fails when the file cannot be read or reopened for appending.
-    pub fn resume(path: &Path, transcript: &mut Transcript) -> std::io::Result<(Self, Header)> {
-        let (header, records) = read(path)?;
-        for record in &records {
+    /// Fails when the file cannot be read or reopened for appending, or when
+    /// `at` names no node.
+    pub fn resume(
+        path: &Path,
+        at: Option<&str>,
+        transcript: &mut Transcript,
+    ) -> std::io::Result<(Self, Header)> {
+        let contents = read(path)?;
+        let target = match at {
+            Some(at) => Some(contents.resolve(at).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("{} has no message {at}", path.display()),
+                )
+            })?),
+            None => contents.head.clone(),
+        };
+
+        let mut line = Vec::new();
+        for index in contents.path_to(target.as_deref()) {
+            let record = &contents.records[index];
             format::replay(transcript, record);
+            line.push(record.id.clone());
         }
 
         let file = OpenOptions::new().append(true).open(path)?;
         Ok((
             Self {
                 path: path.to_path_buf(),
-                id: header.id.clone(),
+                id: contents.header.id.clone(),
                 file,
-                written: transcript.len(),
+                line,
+                tip: target,
             },
-            header,
+            contents.header,
         ))
     }
 
@@ -126,24 +160,96 @@ impl SessionStore {
     ///
     /// Fails on a write error.
     pub fn flush(&mut self, transcript: &Transcript) -> std::io::Result<()> {
-        // A transcript that shrank — `/clear`, or a rebuild by `set_system` —
-        // is a different conversation. Rewinding rather than appending keeps the
-        // file honest instead of interleaving two histories.
-        if transcript.len() < self.written {
-            self.written = transcript.len();
-            return Ok(());
+        // A transcript that shrank without a checkout is a rewind all the same:
+        // what follows hangs from the last message that is still there, and the
+        // file says so, rather than interleaving two histories.
+        if transcript.len() < self.line.len() {
+            self.rewind(transcript.len());
+            self.mark_head()?;
         }
 
-        for index in self.written..transcript.len() {
+        for index in self.line.len()..transcript.len() {
             let Some(message) = transcript.get(index) else {
                 continue;
             };
-            let line = Line::Message(Box::new(format::record(&message)));
-            writeln!(self.file, "{}", serde_json::to_string(&line)?)?;
+            let id = new_node_id();
+            let mut record = format::record(&message);
+            record.id = Some(id.clone());
+            record.parent = self.tip.take();
+            self.write(&Line::Message(Box::new(record)))?;
+            self.line.push(Some(id.clone()));
+            self.tip = Some(id);
         }
-        self.file.flush()?;
-        self.written = transcript.len();
         Ok(())
+    }
+
+    /// Where `node` sits in the agent's transcript, when it is on the branch
+    /// being written.
+    #[must_use]
+    pub fn position(&self, node: &str) -> Option<usize> {
+        self.line.iter().position(|id| id.as_deref() == Some(node))
+    }
+
+    /// Keep the first `keep` messages of the branch and continue from the last
+    /// of them. The transcript has to be cut to the same length.
+    pub fn rewind(&mut self, keep: usize) {
+        self.line.truncate(keep);
+        self.tip = self.line.last().cloned().flatten();
+    }
+
+    /// Replace the map from the transcript to the file, after the transcript
+    /// was rebuilt: `line` holds a node per message, and `tip` is where the
+    /// next message hangs.
+    pub fn adopt(&mut self, line: Vec<Option<String>>, tip: Option<String>) {
+        self.line = line;
+        self.tip = tip;
+    }
+
+    /// The node each message of the agent's transcript was written as.
+    #[must_use]
+    pub fn line(&self) -> &[Option<String>] {
+        &self.line
+    }
+
+    /// The node the next message hangs from.
+    #[must_use]
+    pub fn tip(&self) -> Option<&str> {
+        self.tip.as_deref()
+    }
+
+    /// Record in the file that the session continues from the tip, so a
+    /// resume comes back to it.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a write error.
+    pub fn mark_head(&mut self) -> std::io::Result<()> {
+        self.write(&Line::Head(HeadRecord {
+            at: self.tip.clone(),
+            ts: chrono::Utc::now(),
+        }))
+    }
+
+    /// Name the branch that starts at `node`.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a write error.
+    pub fn label(&mut self, node: &str, text: &str) -> std::io::Result<()> {
+        self.write(&Line::Label(LabelRecord {
+            node: node.to_owned(),
+            text: text.to_owned(),
+            ts: chrono::Utc::now(),
+        }))
+    }
+
+    /// Everything in the file now, including what other writers appended.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file cannot be read.
+    pub fn contents(&self) -> std::io::Result<Contents> {
+        read(&self.path)
     }
 
     #[must_use]
@@ -155,6 +261,19 @@ impl SessionStore {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Write one line with one `write` call.
+    ///
+    /// The file is opened to append, so the kernel puts each write at the end
+    /// on its own. Two writers on one session (a fork kept open next to the
+    /// conversation it came from) therefore never tear each other's lines,
+    /// and need no lock.
+    fn write(&mut self, line: &Line) -> std::io::Result<()> {
+        let mut text = serde_json::to_string(line)?;
+        text.push('\n');
+        self.file.write_all(text.as_bytes())?;
+        self.file.flush()
+    }
 }
 
 /// What a session file says about itself, without replaying it.
@@ -162,7 +281,10 @@ impl SessionStore {
 pub struct Summary {
     pub path: PathBuf,
     pub header: Header,
+    /// How many messages the file holds, on every branch.
     pub messages: usize,
+    /// The name of the session: its label, or its first prompt.
+    pub title: String,
 }
 
 /// Every readable session in `dir`, newest first.
@@ -177,11 +299,12 @@ pub fn list(dir: &Path) -> Vec<Summary> {
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
         .filter_map(|path| {
-            let (header, records) = read(&path).ok()?;
+            let tree = Tree::read(&path).ok()?;
             Some(Summary {
+                messages: tree.nodes.len(),
+                title: tree.title(),
+                header: tree.header,
                 path,
-                header,
-                messages: records.len(),
             })
         })
         .collect();
@@ -200,8 +323,12 @@ pub fn newest_for(dir: &Path, cwd: &Path) -> Option<Summary> {
 }
 
 /// Find a session by id, or by a prefix of one.
+///
+/// An address of one message, `<session>:<node>`, finds its session; the
+/// node is for [`split_address`] to take apart.
 #[must_use]
 pub fn resolve(dir: &Path, id: &str) -> Option<Summary> {
+    let (id, _) = split_address(id);
     let sessions = list(dir);
     sessions
         .iter()
@@ -214,14 +341,110 @@ pub fn resolve(dir: &Path, id: &str) -> Option<Summary> {
         .cloned()
 }
 
-/// Read a session file into its header and records.
+/// Take `<session>:<node>` apart. A session id has no `:`, so a bare id comes
+/// back with no node.
+#[must_use]
+pub fn split_address(address: &str) -> (&str, Option<&str>) {
+    match address.split_once(':') {
+        Some((session, node)) if !node.is_empty() => (session, Some(node)),
+        Some((session, _)) => (session, None),
+        None => (address, None),
+    }
+}
+
+/// Everything a session file holds, in the order it was written.
+#[derive(Clone, Debug)]
+pub struct Contents {
+    pub header: Header,
+    /// Every message, each with an id: a file from before sessions were trees
+    /// is given ids by position, each message the child of the one before.
+    pub records: Vec<Record>,
+    /// Where the session continues: the last node a `Head` line or a message
+    /// named.
+    pub head: Option<String>,
+    /// The last name given to each branch, by the node it starts at.
+    pub labels: HashMap<String, String>,
+    index: HashMap<String, usize>,
+}
+
+impl Contents {
+    /// The record with this id.
+    #[must_use]
+    pub fn get(&self, id: &str) -> Option<&Record> {
+        self.index.get(id).map(|index| &self.records[*index])
+    }
+
+    /// The full id of the node `id` names, exactly or by a prefix.
+    #[must_use]
+    pub fn resolve(&self, id: &str) -> Option<String> {
+        if self.index.contains_key(id) {
+            return Some(id.to_owned());
+        }
+        self.records
+            .iter()
+            .filter_map(|record| record.id.as_deref())
+            .find(|candidate| candidate.starts_with(id))
+            .map(ToOwned::to_owned)
+    }
+
+    /// The records from the root to `at`, by index. Empty for `None`.
+    #[must_use]
+    pub fn path_to(&self, at: Option<&str>) -> Vec<usize> {
+        let mut path = Vec::new();
+        let mut next = at.and_then(|id| self.index.get(id).copied());
+        while let Some(index) = next {
+            // A file edited by hand could hold a cycle; a path is never longer
+            // than the file.
+            if path.len() > self.records.len() {
+                break;
+            }
+            path.push(index);
+            next = self.records[index]
+                .parent
+                .as_deref()
+                .and_then(|parent| self.index.get(parent).copied());
+        }
+        path.reverse();
+        path
+    }
+
+    /// The newest message under `id`, which is a leaf: a message is always
+    /// written after its parent, so the newest one has no children yet.
+    #[must_use]
+    pub fn newest_leaf_under(&self, id: &str) -> Option<String> {
+        let start = *self.index.get(id)?;
+        let mut under = vec![false; self.records.len()];
+        under[start] = true;
+        let mut newest = start;
+        for (index, record) in self.records.iter().enumerate().skip(start + 1) {
+            let parent = record
+                .parent
+                .as_deref()
+                .and_then(|parent| self.index.get(parent));
+            if parent.is_some_and(|parent| under[*parent]) {
+                under[index] = true;
+                newest = index;
+            }
+        }
+        self.records[newest].id.clone()
+    }
+}
+
+/// Read a session file into its header and messages.
 ///
 /// Unparseable lines are skipped rather than failing the load: a session
 /// truncated by a crash should still open.
-pub(super) fn read(path: &Path) -> std::io::Result<(Header, Vec<Record>)> {
+///
+/// # Errors
+///
+/// Fails when the file cannot be read or has no header.
+pub fn read(path: &Path) -> std::io::Result<Contents> {
     let file = File::open(path)?;
     let mut header = None;
-    let mut records = Vec::new();
+    let mut records: Vec<Record> = Vec::new();
+    let mut head = None;
+    let mut labels = HashMap::new();
+    let mut index = HashMap::new();
 
     for line in BufReader::new(file).lines() {
         let line = line?;
@@ -230,7 +453,23 @@ pub(super) fn read(path: &Path) -> std::io::Result<(Header, Vec<Record>)> {
         }
         match serde_json::from_str::<Line>(&line) {
             Ok(Line::Session(found)) => header = Some(*found),
-            Ok(Line::Message(record)) => records.push(*record),
+            Ok(Line::Message(record)) => {
+                let mut record = *record;
+                if record.id.is_none() {
+                    // Written before sessions were trees: a line, in order.
+                    record.id = Some(records.len().to_string());
+                    record.parent = records.last().and_then(|last| last.id.clone());
+                }
+                head.clone_from(&record.id);
+                if let Some(id) = &record.id {
+                    index.insert(id.clone(), records.len());
+                }
+                records.push(record);
+            }
+            Ok(Line::Head(moved)) => head = moved.at,
+            Ok(Line::Label(label)) => {
+                labels.insert(label.node, label.text);
+            }
             Err(_) => continue,
         }
     }
@@ -241,7 +480,13 @@ pub(super) fn read(path: &Path) -> std::io::Result<(Header, Vec<Record>)> {
             format!("{} has no session header", path.display()),
         )
     })?;
-    Ok((header, records))
+    Ok(Contents {
+        header,
+        records,
+        head,
+        labels,
+        index,
+    })
 }
 
 /// A sortable, unique-enough id: a timestamp plus a counter.
@@ -256,4 +501,23 @@ fn new_id(now: Timestamp) -> String {
         now.format("%Y%m%dT%H%M%S"),
         COUNTER.fetch_add(1, Ordering::Relaxed) & 0xffff
     )
+}
+
+/// Eight random hex digits: the id of one message.
+///
+/// Random rather than counted, so two writers on one file need not agree on
+/// the next number. Within one session a clash is a one-in-four-billion chance
+/// per pair of messages.
+fn new_node_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u64(COUNTER.fetch_add(1, Ordering::Relaxed));
+    hasher.write_u32(std::process::id());
+    if let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        hasher.write_u128(now.as_nanos());
+    }
+    format!("{:08x}", hasher.finish() as u32)
 }

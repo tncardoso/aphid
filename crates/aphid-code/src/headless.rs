@@ -201,6 +201,7 @@ pub async fn run(
     prompt: &str,
     quiet: bool,
     resumed: Option<Transcript>,
+    session: Option<Arc<session::SessionComponent>>,
 ) -> (Harness, RunOutcome) {
     let printer = Arc::new(Printer::new(quiet));
     options
@@ -244,7 +245,7 @@ pub async fn run(
 
     let mut harness = harness::build(options);
     if let Some(transcript) = resumed {
-        let restored = session::splice(&mut harness.agent, &transcript);
+        let restored = session::splice(&mut harness.agent, &transcript, session.as_deref());
         eprintln!("aphid: resumed {restored} messages");
     }
     for note in &harness.notes {

@@ -170,7 +170,7 @@ impl Drop for Backend {
 
 async fn bootstrap(
     mut options: HarnessOptions,
-    resume: Option<PathBuf>,
+    resume: Option<session::Resume>,
     confirm: bool,
 ) -> Result<(Backend, tokio::sync::mpsc::UnboundedReceiver<Msg>), String> {
     let (events, receiver) = channel();
@@ -242,7 +242,7 @@ async fn bootstrap(
         workspace.root(),
         &cwd,
         Some(&model_id),
-        resume.as_deref(),
+        resume.as_ref(),
         Arc::clone(&options.composition.transcript),
     )
     .map_err(|error| error.to_string())?;
@@ -299,7 +299,7 @@ async fn bootstrap(
     }
     if let Some(restored) = resumed {
         app.replay(&restored);
-        let restored_count = session::splice(&mut harness.agent, &restored);
+        let restored_count = session::splice(&mut harness.agent, &restored, app.session.as_deref());
         app.scrollback
             .push_notice(format!("── resumed {restored_count} messages ──"));
     }
@@ -509,7 +509,7 @@ impl DesktopView {
         self.fingerprints = fresh;
     }
 
-    fn open_session(&mut self, resume: Option<PathBuf>, cx: &mut Context<Self>) {
+    fn open_session(&mut self, resume: Option<session::Resume>, cx: &mut Context<Self>) {
         if self.backend.app.status.running || self.switching_session {
             return;
         }
@@ -795,7 +795,7 @@ impl DesktopView {
                             // used to dim and take it anyway.
                             .disabled(disabled)
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.open_session(Some(path.clone()), cx);
+                                this.open_session(Some(session::Resume::head(path.clone())), cx);
                             }))
                             .child(
                                 div().child(summary.header.id.clone()).child(
@@ -1464,7 +1464,7 @@ fn fingerprint(entry: &Entry, tool_open: bool, thinking_open: bool) -> u64 {
 ///
 /// Returns an error when the async runtime, application window, or session
 /// cannot start.
-pub fn run(options: Options, resume: Option<PathBuf>, confirm: bool) -> Result<(), String> {
+pub fn run(options: Options, resume: Option<session::Resume>, confirm: bool) -> Result<(), String> {
     let workspace = options.workspace.clone();
     let config = GuiConfig::capture(&options);
     let runtime = tokio::runtime::Builder::new_multi_thread()
