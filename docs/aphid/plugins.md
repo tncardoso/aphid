@@ -170,7 +170,9 @@ write it back over each other.
 - `agent/turn-end`: `cx`, then `stop_reason`, `tool_calls`, `input`, `output`,
   `error`
 - `agent/run-end`: `cx`, then `stop`, `turns`, `input`, `output`, `error`
-- `code/session-start` and `code/session-end`: `id`, `path`, `reason`, `restored`
+- `code/session-start` and `code/session-end`: `id`, `path`, `reason`, `restored`.
+  `reason` is `new`, `resume` or `end`, or `switch` when the user moves to a
+  different session file. A jump or a fork in the same file sends no event.
 - `code/permission`: `tool`, `summary`, `risk`
 - `code/file-change`: `path`, `kind`, `before`, `after`
 - `code/system-prompt`: the prompt as text

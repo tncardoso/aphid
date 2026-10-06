@@ -12,10 +12,13 @@ Type `/help` to see the list in the terminal.
 | --- | --- |
 | `/model [name]` | Change the model, or open the picker when you give no name. |
 | `/think <level>` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`. |
-| `/clear`, `/new` | Start a new conversation. The system prompt stays. |
+| `/clear`, `/new` | Start a new session, in a new file. The system prompt stays. The old session does not change. |
+| `/tree`, `/sessions` | Show the sessions of the workspace and their branches. See [The session tree](#the-session-tree). |
+| `/fork` | Show the session tree, to start a branch. |
+| `/rename <name>` | Give a name to the branch that this session is on. |
 | `/tools` | List the tools that are registered. |
 | `/ps` | Show what the runtime runs now, and what it ran before. |
-| `/session` | Show where this session is written. |
+| `/session` | Show the session identifier, the message that the session continues from, and the file. |
 | `/plugins` | List the plugins that loaded, and the commands they added. |
 | `/skills` | List the skills that the model can open. |
 | `/help` | Print the list. |
@@ -27,6 +30,7 @@ Type `/help` to see the list in the terminal.
 | `Ctrl-C` | Quit. |
 | `Ctrl-P` | Change to the next model. |
 | `Ctrl-T` | Show the reasoning. |
+| `Ctrl-O` | Show the session tree. |
 | `PageUp`, `PageDown` | Scroll. |
 | `Enter` | Send the message. |
 | `Shift-Enter` | Make a new line in the same message. |
@@ -51,6 +55,28 @@ A paste does not send the message: press `Enter` when the message is complete.
 
 `Up` on the first line shows the message you sent before. `Down` comes back to
 what you were writing, which is kept while you look.
+
+## The session tree
+
+`/tree` shows each session of the workspace on one line. The current session
+is open. Under an open session, each prompt is on one line, and the answer to
+it is after it in grey. A conversation that has no branches is a flat list.
+Where a conversation branches, each branch is indented under the turn that it
+starts from. `●` marks the turn that the session continues from.
+
+| Key | Effect |
+| --- | --- |
+| `↑` `↓` | Move the cursor. `k` and `j` do the same. |
+| `→` `←` | Open or close the session under the cursor. |
+| `Enter` | On a session, continue it. On a prompt, jump to the newest branch under it. |
+| `e` | Start a branch before the prompt, and put the prompt in the input box to edit it. |
+| `f` | Start a branch after the answer to the prompt. |
+| `r` | Write `/rename ` in the input box, to give a name to the current branch. |
+| `/` | Type a filter. The filter finds prompts, answers and names. |
+| `Esc` | Close the tree. |
+
+While the agent works, you can look at the tree, but you cannot jump or fork.
+Stop the run with `Esc`, or wait until it ends.
 
 ## Shell commands
 

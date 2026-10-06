@@ -61,6 +61,9 @@ Each line goes to the agent, unless it begins with `/`.
 | --- | --- |
 | `/sessions` | Open the list of conversations and pick one. It holds the open ones and the 20 most recent stored ones. |
 | `/session <id>` | Look at one of them. A shortened id is enough. |
+| `/tree` | Ask for the branches. The **⑂** button shows them. |
+| `/fork <id>:<message>` | Continue the branch at that message in a new conversation, and look at it. |
+| `/rename <id>:<message> <name>` | Give a name to the branch that holds that message. |
 | `/new` | Start another conversation. |
 | `/log` | Show or hide notices, heartbeats and session events. |
 | `/clear` | Clear what is on screen. The memory does not change. |
@@ -70,6 +73,11 @@ Each line goes to the agent, unless it begins with `/`.
 | `Enter` | Send. |
 | `Shift-Enter` | Break the line instead. |
 | `Esc` | Close the list or the question on screen; otherwise stop the run; otherwise collapse the console. |
+
+The **⑂** button in the bar shows the branches of the conversation on screen,
+on the same canvas as [`aphid gui`](../../getting-started.md). Right-click a
+card to look at its branch, to continue it in a new conversation, or to rename
+it.
 
 The text box composes: a dead key makes `á`, and so do the input methods of the
 system.

@@ -87,9 +87,23 @@ To open the graphical user interface, run:
 $ aphid gui
 ```
 
-The left drawer lists the sessions of the current workspace. Use its button
-to reduce the drawer to an icon rail. Select a saved session to continue it.
-You cannot change the session while the agent is working.
+The left drawer lists the sessions of the current workspace, with the name of
+each. Use its button to reduce the drawer to an icon rail. Select a saved
+session to continue it. **New chat** starts a new session.
+
+The **Tree** button in the header (or `Ctrl-O`) shows the branches of the
+session on a canvas. Each card is one turn: a prompt and its answer. The first
+prompt is at the top, and the branches go down side by side.
+
+- Drag the background to move the canvas. Scroll to zoom.
+- Click a card to read the full turn.
+- Right-click a card to jump to its branch, fork after its answer, edit and
+  send its prompt again, or rename its branch.
+
+In the conversation, put the pointer on a prompt or on a final answer. A fork
+control shows: **edit** on a prompt, **fork after** on an answer.
+
+You cannot change the session or its branch while the agent is working.
 
 To run one prompt and print the result, give the prompt on the command line:
 

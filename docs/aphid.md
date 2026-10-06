@@ -64,6 +64,45 @@ $ aphid --resume 20260810T012035-0000    # continue the session with this identi
 The identifier is optional. If you give no identifier, aphid continues the most
 recent session for the current directory.
 
+### The session tree
+
+A session is a tree of messages. Each message records its identifier and the
+identifier of the message before it. Thus you can go back to a message and
+continue from it on a new branch. The file keeps all the branches.
+
+- To start a branch at a prompt, *edit* the prompt. The new branch starts
+  before the prompt, and aphid puts the prompt text in the input box. Change
+  the text, and send it.
+- To start a branch after an answer, *fork* at the answer. The next prompt
+  that you send starts the new branch. You can fork only at an answer that
+  ends its turn. A fork between a tool call and its result is not possible.
+- To go back to a branch, *jump* to one of its prompts. Aphid continues the
+  newest branch under that prompt.
+- To give a branch a name, *rename* it. The name of the first branch is the
+  name of the session.
+
+Aphid records each jump and each fork as a `head` line in the file. `--resume`
+continues the session where you left it.
+
+Each message has an identifier of eight hexadecimal digits. The address of a
+message is `<session>:<message>`. To continue a session at one message, give
+its address:
+
+```console
+$ aphid --resume 20260810T012035-0000:3f9a01c2
+```
+
+The start of a message identifier is sufficient. Files that aphid wrote before
+it recorded trees are one branch: each message follows the message before it.
+
+In the terminal user interface, `/tree` (or `Ctrl-O`) shows the sessions of
+the workspace and their branches. See [Commands](aphid/commands.md#the-session-tree).
+In the graphical user interface, the **Tree** button shows the branches of the
+session on a canvas. See [Getting started](getting-started.md).
+
+`/clear` and `/new` start a new session in a new file. The old session does not
+change.
+
 ## Permissions
 
 `--confirm` makes aphid ask you before it runs a command that changes the
@@ -118,7 +157,7 @@ not fetched until you select its load control.
 | `--think <LEVEL>` | Set the quantity of reasoning. |
 | `--system <TEXT>` | Replace the standard instructions. |
 | `--append-system <TEXT>` | Add text to the instructions. |
-| `--resume [<ID>]` | Continue a saved session. |
+| `--resume [<ID>]` | Continue a saved session. `<ID>:<MESSAGE>` continues it at that message. |
 | `--sessions` | Print the saved sessions for this workspace, and exit. |
 | `--confirm` | Ask before each command that changes the workspace. |
 | `--no-context` | Do not read `AGENTS.md` files or skills. |

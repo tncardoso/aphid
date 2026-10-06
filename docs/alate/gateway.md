@@ -37,8 +37,11 @@ field can be absent, and a client that does not send it is listed as `attached`.
 | `cancel` | | Stop the run in flight. |
 | `answer` | `id`, `decision` | Answer a `confirm`. `allow`, `allow_always` or `deny`. |
 | `attachment_result` | `id`, `error` (optional) | Confirm an attachment, or report why the gateway could not send it. |
-| `watch` | `id` | Look at a different session, and replay it. |
+| `watch` | `id` | Look at a different session, and replay it. With `<session>:<message>`, replay the newest branch under that message. |
 | `sessions` | | Ask what sessions there are. |
+| `tree` | | Ask for the sessions and their branches. |
+| `fork` | `id` | Start a branch at `<session>:<message>`, in a new session. The connection then watches the new session. |
+| `rename` | `id`, `text` | Give the name `text` to the branch that holds `<session>:<message>`. |
 | `new` | | Open another session on this connection. |
 
 A request needs no session on it. A connection has one session that it watches,
@@ -59,6 +62,8 @@ one.
 | `sessions` | `live`, `stored` | The answer to `sessions`, to the connection that asked. `live` holds every session that is open; `stored` holds the 20 most recent on disk. |
 | `history_start` | `id` | A replay starts. What is drawn for this session is old. |
 | `history_end` | `id` | The replay is complete. What comes now is live. |
+| `tree` | `sessions` | The answer to `tree`, to the connection that asked. Each item has `id`, `live` and `view`: the turns of the session and how they branch. |
+| `prefill` | `text` | A prompt for the input box of this client. A `fork` at a prompt sends it. |
 | `turn_started` | | A turn started. |
 | `text` | `text` | Text from the model. |
 | `thinking` | `text` | Reasoning from the model. |
@@ -89,10 +94,25 @@ There is no store of recent frames. What a client missed is in the transcript,
 which is what `watch` reads — so what it gets back cannot disagree with what
 happened.
 
-Five kinds are not replayed: `confirm`, `hello`, `sessions`, `history_start` and
-`history_end`. A question that was answered an hour ago must not open a window
-over the new client, and the other four are addressed to one connection and not
-to a conversation.
+Seven kinds are not replayed: `confirm`, `hello`, `sessions`, `tree`,
+`prefill`, `history_start` and `history_end`. A question that was answered an
+hour ago must not open a window over the new client, and the other six are
+addressed to one connection and not to a conversation.
+
+## Branches
+
+A session is a tree of messages, as in [aphid](../aphid.md#the-session-tree).
+The address of a message is `<session>:<message>`.
+
+`fork` opens a new session that continues the branch at that message. At a
+prompt, the branch starts before the prompt, and the daemon sends the prompt
+back in a `prefill` frame. At an answer that ends its turn, the branch starts
+after the answer. The new session writes to the same file as the session it
+came from. Its id is the address it started at. If the source session runs
+now, the daemon refuses the fork.
+
+`watch` with an address shows a branch, but it does not continue it. To
+continue a branch, fork it.
 
 ## The log
 

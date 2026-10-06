@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- **The first prompt after `/clear` is kept.** `/clear` and `/new` now start a
+  new session file. Before, they went on in the same file, and the first prompt
+  after them was not saved.
 - **A command that starts a background process no longer freezes the agent.**
   A command such as `server &` let the server keep the output of the shell, and
   aphid waited for that output to end. The agent stopped, and neither the
@@ -14,6 +17,22 @@
 
 ### Added
 
+- **Sessions are trees.** You can go back to any prompt or answer and
+  continue from it on a new branch. The session file keeps every branch, and
+  `--resume` continues where you left off. `--resume <id>:<message>` continues
+  at one message.
+- **`/tree` shows the sessions and their branches** in the terminal (also
+  `Ctrl-O`). `Enter` jumps to a branch, `e` edits a prompt on a new branch, `f`
+  starts a branch after an answer. `/fork` opens the same view.
+- **`/rename <name>` names the branch you are on.** The name of the first
+  branch is the name of the session, and the session lists show it.
+- **`aphid gui` shows the branches on a canvas.** The **Tree** button (or
+  `Ctrl-O`) draws one card per turn. Drag to move, scroll to zoom, click a card
+  to read it, and right-click it to jump, fork, edit the prompt or rename the
+  branch. Prompts and answers in the conversation have a fork control too.
+- **An alate can fork its conversations.** `/tree`, `/fork` and `/rename` work
+  in `aphid alate attach`, and the **⑂** button in the alate window shows the
+  same canvas. A fork opens a new conversation on that branch.
 - **`/ps` shows a background process that a command left.** Its line shows
   `↻ bg` until the process stops, and `k` stops it and its group.
 

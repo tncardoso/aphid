@@ -69,6 +69,9 @@ connects and closes, and thus it leaves no conversation behind it.
 | --- | --- |
 | `/sessions` | Open the list of conversations and pick one. |
 | `/session <id>` | Look at one of them. A shortened id is enough. |
+| `/tree` | Show the conversations and their branches. `Ctrl-O` does the same. |
+| `/fork <id>:<message>` | Continue the branch at that message in a new conversation, and look at it. |
+| `/rename <id>:<message> <name>` | Give a name to the branch that holds that message. |
 | `/new` | Start another conversation in this terminal. |
 | `/log` | Show or hide notices, heartbeats and jobs. |
 | `/clear` | Clear the screen. The memory does not change. |
@@ -89,6 +92,12 @@ In the `/sessions` list the keys are different:
 | `↑` `↓` | Move the cursor. `Ctrl-P` and `Ctrl-N` do the same. |
 | `Enter` | Look at the conversation under the cursor. |
 | `Esc` | Close the list. Nothing changes. `Ctrl-C` does the same. |
+
+In the `/tree` view, the keys are those of the
+[aphid session tree](../../aphid/commands.md#the-session-tree), with two
+differences. `Enter` on a prompt shows that branch, but it does not continue
+it. `e` and `f` open a new conversation for the branch, and the terminal looks
+at it.
 
 Each other line goes to the agent.
 
