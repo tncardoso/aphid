@@ -122,6 +122,8 @@ pub struct App {
     /// Whether any plugin has a panel at all.
     pub(crate) plugins_draw: bool,
     pub(crate) session: Option<Arc<SessionComponent>>,
+    /// `/tree` asked for the sessions, and the tree opens when they arrive.
+    awaiting_sessions: bool,
     /// Waiting for the agent, in the order it arrived. A queue and not one slot
     /// because a plugin can send while the user types, and neither should lose.
     queued: VecDeque<crate::attach::Prompt>,
@@ -178,6 +180,7 @@ impl App {
             composition: None,
             registries: None,
             session: None,
+            awaiting_sessions: false,
             queued: VecDeque::new(),
             processes: Arc::clone(processes),
             workspace: harness.workspace.clone(),
@@ -214,6 +217,7 @@ impl App {
             composition: None,
             registries: None,
             session: None,
+            awaiting_sessions: false,
             queued: VecDeque::new(),
             processes: Arc::new(exec::Registry::new()),
             workspace: Workspace::new(std::env::temp_dir()),
@@ -230,49 +234,8 @@ impl App {
     /// Replay a resumed transcript into the scrollback, so the pane shows the
     /// conversation you are continuing rather than starting blank.
     pub(crate) fn replay(&mut self, transcript: &Transcript) {
-        use aphid_core::{ContentRef, Role};
-
-        for message in transcript.iter() {
-            match message.role() {
-                Role::System => {}
-                Role::User => {
-                    let text: String = message.content().filter_map(|c| c.text()).collect();
-                    if !text.is_empty() {
-                        self.scrollback.push_user(text);
-                    }
-                }
-                Role::Assistant => {
-                    for content in message.content() {
-                        match content {
-                            ContentRef::Text(text) => self.scrollback.push_text(text.text()),
-                            ContentRef::Thinking(thinking) => {
-                                self.scrollback.push_thinking(thinking.text());
-                            }
-                            ContentRef::ToolCall(call) => {
-                                self.scrollback.push_tool_call(
-                                    call.id(),
-                                    call.name(),
-                                    call.arguments_raw(),
-                                );
-                            }
-                            ContentRef::Image(_) => {}
-                        }
-                    }
-                }
-                Role::ToolResult => {
-                    let Some(meta) = message.tool_result() else {
-                        continue;
-                    };
-                    let text: String = message.content().filter_map(|c| c.text()).collect();
-                    self.scrollback.finish_tool(
-                        &meta.tool_call_id,
-                        &text,
-                        meta.is_error,
-                        meta.details.clone(),
-                    );
-                }
-            }
-        }
+        self.scrollback
+            .replay(&crate::tui::scrollback::replayed(transcript));
     }
 
     /// Apply one event. Returns true when the screen needs repainting.
@@ -358,7 +321,48 @@ impl App {
             Msg::RunEnded { .. } => {
                 self.status.download.clear();
                 self.status.running = false;
-                self.start_queued()
+                let mut cmd = self.start_queued();
+                // An open tree shows the turn the run just added.
+                if let Some(Modal::Sessions(tree)) = &mut self.modal {
+                    tree.running = false;
+                    cmd.push(Effect::ListSessions);
+                }
+                cmd
+            }
+            Msg::Sessions(sessions) => {
+                let current = self.session.as_ref().and_then(|session| session.path());
+                match &mut self.modal {
+                    Some(Modal::Sessions(tree)) => tree.update(sessions),
+                    _ if self.awaiting_sessions => {
+                        self.files = None;
+                        let mut tree =
+                            crate::tui::tree::SessionTree::new(sessions, current.as_deref());
+                        tree.running = self.status.running;
+                        self.modal = Some(Modal::Sessions(tree));
+                    }
+                    _ => {}
+                }
+                self.awaiting_sessions = false;
+                Cmd::none()
+            }
+            Msg::CheckedOut {
+                label,
+                history,
+                prefill,
+                notice,
+            } => {
+                if matches!(self.modal, Some(Modal::Sessions(_))) {
+                    self.modal = None;
+                }
+                self.selection = None;
+                self.scrollback.clear();
+                self.scrollback.replay(&history);
+                self.status.last = None;
+                self.session_label = label;
+                if let Some(prefill) = prefill {
+                    self.input.set_text(&prefill);
+                }
+                self.notice(notice)
             }
             Msg::RunFailed(reason) => {
                 self.status.download.clear();
@@ -813,8 +817,50 @@ impl App {
             // Claimed in `keyed` before this is reached, because answering it
             // writes into the box rather than answering the agent.
             Modal::FileAction { .. } => {}
+            Modal::Sessions(tree) => {
+                use crate::session::Move;
+                use crate::tui::tree::TreeAction;
+                return match tree.handle(key) {
+                    TreeAction::None => Cmd::none(),
+                    TreeAction::Close => {
+                        self.modal = None;
+                        Cmd::none()
+                    }
+                    TreeAction::Open { path } => self.checkout(path, None, Move::Jump),
+                    TreeAction::Jump { path, node } => self.checkout(path, Some(node), Move::Jump),
+                    TreeAction::Fork { path, node } => self.checkout(path, Some(node), Move::Fork),
+                    TreeAction::Rename { path } => {
+                        let current = self.session.as_ref().and_then(|session| session.path());
+                        if current.as_deref() != Some(path.as_path()) {
+                            return self.notice("open that session first, then name its branch");
+                        }
+                        self.modal = None;
+                        self.input.set_text("/rename ");
+                        Cmd::none()
+                    }
+                };
+            }
         }
         Cmd::none()
+    }
+
+    /// Ask for the sessions; the tree opens when they arrive.
+    fn open_sessions(&mut self) -> Cmd<Effect> {
+        self.awaiting_sessions = true;
+        Cmd::one(Effect::ListSessions)
+    }
+
+    /// Move the session, unless a run is going: the agent is away with it.
+    fn checkout(
+        &mut self,
+        path: PathBuf,
+        node: Option<String>,
+        how: crate::session::Move,
+    ) -> Cmd<Effect> {
+        if self.status.running {
+            return self.notice(RUN_GOING);
+        }
+        Cmd::one(Effect::Checkout { path, node, how })
     }
 
     /// Point the session at another model.
@@ -1063,6 +1109,7 @@ impl App {
                 None => Cmd::none(),
             },
             Action::Submit(line) => self.submit(line),
+            Action::OpenSessions => self.open_sessions(),
             // The list opens empty and is filled by the answer to this, so the
             // first thing on screen is the head of the index rather than a
             // blank box waiting for a letter.
@@ -1171,11 +1218,18 @@ impl App {
                 Cmd::one(Effect::SnapshotProcesses)
             }
             "clear" | "new" => {
-                self.scrollback.clear();
-                self.status.last = None;
-                let mut cmd = Cmd::one(Effect::ClearTranscript);
-                cmd.extend(self.notice("── new session ──"));
-                cmd
+                if self.status.running {
+                    return self.notice(RUN_GOING);
+                }
+                Cmd::one(Effect::NewSession)
+            }
+            "tree" | "sessions" | "fork" => self.open_sessions(),
+            "rename" if rest.trim().is_empty() => self.notice("usage: /rename <name>"),
+            "rename" => {
+                if self.status.running {
+                    return self.notice(RUN_GOING);
+                }
+                Cmd::one(Effect::Rename(rest.trim().to_owned()))
             }
             "model" if rest.is_empty() => {
                 let models = self.catalog.models().to_vec();
@@ -1383,14 +1437,20 @@ impl App {
 /// in up to a kilobyte, which is worth having in the prompt and not on screen.
 const SKILL_DESCRIPTION: usize = 60;
 
+/// Why the session cannot move now.
+const RUN_GOING: &str = "a run is going: wait for it to end, or press Esc to stop it";
+
 const HELP: &str = "\
 ── commands ──────────────────────────────────────
   /model  [name]  switch model, or open the picker
   /think  <level>  off | minimal | low | medium | high | xhigh | max
-  /clear  /new     start a fresh conversation
+  /clear  /new     start a new session
+  /tree            the sessions and their branches: jump, fork, rename
+  /fork            the same, to start a branch
+  /rename <name>   name the branch this session is on
   /tools           list the registered tools
   /ps              what the runtime is running, and what it just ran
-  /session         where this session is being written
+  /session         where this session is being written, and its head
   /plugins         list the loaded plugins, their state and their commands
   /reload [name]   reload the plugins from disk
   /skills          list the skills the model can open
@@ -1404,6 +1464,7 @@ const HELP: &str = "\
   Ctrl-C      quits
   Ctrl-P      cycles model
   Ctrl-T      shows reasoning
+  Ctrl-O      opens the session tree
   F6          focus a plugin panel
   PageUp/Dn   scroll transcript
   Mouse wheel scroll transcript
@@ -1613,10 +1674,7 @@ pub async fn run(
     let mut harness = harness::build(options);
     let mut app = App::new(&harness, thinking, &processes);
     app.answers = answers;
-    app.session_label = session.id().zip(session.path()).map_or_else(
-        || "not being saved".to_owned(),
-        |(id, path)| format!("{id} — {}", path.display()),
-    );
+    app.session_label = session_label(&session);
     app.session = Some(session);
     app.host = Some(host.clone());
     app.composition = Some(composition.clone());
@@ -1668,6 +1726,7 @@ pub async fn run(
     ));
 
     let mut executor = Executor::new(harness.agent, &app, events.clone());
+    executor.cwd.clone_from(&cwd);
     executor.plugins = Some(spawn_plugin_hub(
         host.clone(),
         Arc::clone(&composition.bus),
@@ -1752,6 +1811,14 @@ pub(crate) struct Executor {
     /// Keeps the plugin composition in step with the files on disk. `None`
     /// when no plugins were loaded, and there is nothing to reconcile.
     pub(crate) loader: Option<Arc<tokio::sync::Mutex<PluginLoader>>>,
+    /// The file the conversation is written to, which a checkout moves.
+    session: Option<Arc<SessionComponent>>,
+    /// Where the plugins hear that the session changed.
+    bus: Option<Arc<aphid_agent::rt::Bus>>,
+    /// Where the agent works, recorded in a new session's header.
+    pub(crate) cwd: PathBuf,
+    /// Where a new session is written.
+    pub(crate) sessions_dir: PathBuf,
     hub: Hub<Msg>,
 }
 
@@ -1801,6 +1868,13 @@ impl Executor {
             files: None,
             plugins: None,
             loader: None,
+            session: app.session.clone(),
+            bus: app
+                .composition
+                .as_ref()
+                .map(|composition| Arc::clone(&composition.bus)),
+            cwd: app.workspace.root().to_path_buf(),
+            sessions_dir: sessions_dir(),
             hub,
         }
     }
@@ -1815,7 +1889,7 @@ impl Executor {
             Effect::Cancel => self.handle.cancel(),
             // The three that need the agent itself. Each is held when it is
             // away and applied the moment it is back, so nothing is lost.
-            held @ (Effect::SetModel(_) | Effect::SetThinking(_) | Effect::ClearTranscript) => {
+            held @ (Effect::SetModel(_) | Effect::SetThinking(_)) => {
                 match self
                     .idle
                     .lock()
@@ -1827,6 +1901,24 @@ impl Executor {
                     None => self.pending.push(held),
                 }
             }
+            Effect::ListSessions => self.list_sessions(),
+            Effect::Checkout { path, node, how } => {
+                self.with_idle_agent(|this, agent| {
+                    this.checkout(agent, &path, node.as_deref(), how)
+                });
+            }
+            Effect::NewSession => self.with_idle_agent(Self::new_session),
+            Effect::Rename(text) => self.with_idle_agent(|this, _agent| {
+                let Some(session) = &this.session else {
+                    this.hub.send(Msg::Notice(NOT_SAVED.to_owned()));
+                    return;
+                };
+                let said = match session::rename(session, &text) {
+                    Ok(()) => format!("── this branch is now “{text}” ──"),
+                    Err(error) => format!("cannot name the branch: {error}"),
+                };
+                this.hub.send(Msg::Notice(said));
+            }),
             Effect::Bang(command) => {
                 let processes = Arc::clone(&self.processes);
                 let root = self.workspace.root().to_path_buf();
@@ -1968,6 +2060,144 @@ impl Executor {
         });
     }
 
+    /// Run `work` with the agent, if it is here. While a run has it, the
+    /// session cannot move, and the model is told why.
+    fn with_idle_agent(&mut self, work: impl FnOnce(&mut Self, &mut Agent)) {
+        let idle = Arc::clone(&self.idle);
+        let Ok(mut slot) = idle.lock() else { return };
+        match slot.as_mut() {
+            Some(agent) => work(self, agent),
+            None => {
+                self.hub.send(Msg::Notice(RUN_GOING.to_owned()));
+            }
+        }
+    }
+
+    /// Read every session of the workspace, off the loop.
+    fn list_sessions(&self) {
+        let dir = self.sessions_dir.clone();
+        let root = self.workspace.root().to_path_buf();
+        let hub = self.hub.clone();
+        self.runtime.spawn_blocking(move || {
+            hub.send(Msg::Sessions(tree_sessions(&dir, &root)));
+        });
+    }
+
+    /// Tell the plugins the session changed.
+    fn announce(&self, start: bool, reason: &str) {
+        let (Some(bus), Some(session)) = (&self.bus, &self.session) else {
+            return;
+        };
+        let about = crate::events::Session {
+            id: session.id(),
+            path: session.path(),
+            reason: reason.to_owned(),
+            restored: 0,
+        };
+        if start {
+            bus.emit(&mut crate::events::SessionStart(about));
+        } else {
+            bus.emit(&mut crate::events::SessionEnd(about));
+        }
+    }
+
+    /// Move the session to `path`, and there to `node`.
+    fn checkout(
+        &mut self,
+        agent: &mut Agent,
+        path: &std::path::Path,
+        node: Option<&str>,
+        how: session::Move,
+    ) {
+        let Some(session) = self.session.clone() else {
+            self.hub.send(Msg::Notice(NOT_SAVED.to_owned()));
+            return;
+        };
+
+        let mut notices = Vec::new();
+        if session.path().as_deref() != Some(path) {
+            self.announce(false, "switch");
+            match session::open(&session, agent, &session::Resume::head(path.to_path_buf())) {
+                Ok(restored) => {
+                    notices.push(format!("── opened a session of {restored} messages ──"))
+                }
+                Err(error) => {
+                    self.announce(true, "switch");
+                    self.hub
+                        .send(Msg::Notice(format!("cannot open the session: {error}")));
+                    return;
+                }
+            }
+            self.announce(true, "switch");
+        }
+
+        let mut prefill = None;
+        if let Some(node) = node {
+            match session::checkout(&session, agent, node, how) {
+                Ok(done) => {
+                    prefill = done.prefill;
+                    notices.push(match how {
+                        session::Move::Jump => "── jumped to a branch ──".to_owned(),
+                        session::Move::Fork if prefill.is_some() => {
+                            "── new branch: edit the prompt and send it ──".to_owned()
+                        }
+                        session::Move::Fork => {
+                            "── new branch: the next prompt starts it ──".to_owned()
+                        }
+                    });
+                }
+                Err(error) => notices.push(format!("cannot move there: {error}")),
+            }
+        }
+
+        self.hub.send(Msg::CheckedOut {
+            label: session_label(&session),
+            history: crate::tui::scrollback::replayed(agent.transcript()),
+            prefill,
+            notice: notices.join("\n"),
+        });
+    }
+
+    /// Start a new session file, and clear the conversation.
+    fn new_session(&mut self, agent: &mut Agent) {
+        let Some(session) = self.session.clone() else {
+            // Nothing is written, so there is no file to change: only clear.
+            let keep = usize::from(
+                agent
+                    .transcript()
+                    .get(0)
+                    .is_some_and(|m| m.role() == aphid_core::Role::System),
+            );
+            agent.transcript_mut().truncate(keep);
+            self.hub.send(Msg::CheckedOut {
+                label: NOT_SAVED.to_owned(),
+                history: Vec::new(),
+                prefill: None,
+                notice: "── new session ──".to_owned(),
+            });
+            return;
+        };
+        self.announce(false, "switch");
+        let started = session::start(
+            &session,
+            agent,
+            &self.sessions_dir,
+            self.workspace.root(),
+            &self.cwd,
+        );
+        self.announce(true, "new");
+        let notice = match started {
+            Ok(()) => "── new session ──".to_owned(),
+            Err(error) => format!("cannot start a new session: {error}"),
+        };
+        self.hub.send(Msg::CheckedOut {
+            label: session_label(&session),
+            history: Vec::new(),
+            prefill: None,
+            notice,
+        });
+    }
+
     fn start_run(&mut self, prompt: crate::attach::Prompt) {
         let Some(mut agent) = self.idle.lock().ok().and_then(|mut idle| idle.take()) else {
             // Still away with the last run. The queue is pumped again when it
@@ -2047,6 +2277,44 @@ fn spawn_plugin_hub(
     })
 }
 
+/// What `/session` says: the id, the message the session continues from, and
+/// the file.
+pub(crate) fn session_label(session: &SessionComponent) -> String {
+    let Some(path) = session.path() else {
+        return NOT_SAVED.to_owned();
+    };
+    let id = session.id().unwrap_or_default();
+    let tip = session
+        .with_store(|store| store.tip().map(ToOwned::to_owned))
+        .ok()
+        .flatten();
+    match tip {
+        Some(tip) => format!("{id}:{tip} — {}", path.display()),
+        None => format!("{id} — {}", path.display()),
+    }
+}
+
+/// Said when there is no session file to move.
+const NOT_SAVED: &str = "this session is not being saved";
+
+/// The sessions of the workspace at `root`, newest first, for the tree.
+pub(crate) fn tree_sessions(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+) -> Vec<crate::tui::tree::TreeSession> {
+    session::list_for(dir, root)
+        .into_iter()
+        .filter_map(|summary| {
+            let view = session::Tree::read(&summary.path).ok()?.view();
+            Some(crate::tui::tree::TreeSession {
+                path: summary.path,
+                view,
+                open: false,
+            })
+        })
+        .collect()
+}
+
 /// Do one of the effects that only the agent itself can answer.
 fn apply_to_agent(agent: &mut Agent, effect: Effect, hub: &Hub<Msg>) {
     match effect {
@@ -2064,16 +2332,6 @@ fn apply_to_agent(agent: &mut Agent, effect: Effect, hub: &Hub<Msg>) {
             agent.set_model(*model);
         }
         Effect::SetThinking(level) => agent.set_thinking(level),
-        Effect::ClearTranscript => {
-            // Keep the system prompt; drop the conversation.
-            let transcript = agent.transcript_mut();
-            let keep = usize::from(
-                transcript
-                    .get(0)
-                    .is_some_and(|m| m.role() == aphid_core::Role::System),
-            );
-            transcript.truncate(keep);
-        }
         other => debug_assert!(false, "not the agent's to do: {other:?}"),
     }
 }
@@ -2302,6 +2560,10 @@ mod tests {
             files: None,
             plugins: None,
             loader: None,
+            session: None,
+            bus: None,
+            cwd: std::env::temp_dir(),
+            sessions_dir: std::env::temp_dir(),
             hub,
         }
     }
@@ -2798,6 +3060,122 @@ mod tests {
         assert!(app.attached.is_empty());
     }
 
+    fn sessions_for_test() -> Vec<crate::tui::tree::TreeSession> {
+        let turn = crate::session::Turn {
+            id: "q1".to_owned(),
+            parent: None,
+            prompt: "first".to_owned(),
+            reply: "answer".to_owned(),
+            tool_calls: 0,
+            end: Some("a1".to_owned()),
+            label: None,
+            ts: chrono::Utc::now(),
+            on_head: true,
+            is_head: true,
+            running: false,
+        };
+        vec![crate::tui::tree::TreeSession {
+            path: "s.jsonl".into(),
+            view: crate::session::TreeView {
+                session: "s".to_owned(),
+                title: "first".to_owned(),
+                started: chrono::Utc::now(),
+                head: Some("a1".to_owned()),
+                turns: vec![turn],
+            },
+            open: true,
+        }]
+    }
+
+    #[test]
+    fn the_tree_opens_when_the_sessions_arrive_and_asks_to_move() {
+        let agent = agent_with(vec![]);
+        let mut app = app_for(&agent);
+
+        assert_eq!(type_line(&mut app, "/tree"), vec![Effect::ListSessions]);
+        assert!(app.modal.is_none(), "nothing to show yet");
+        app.update(Msg::Sessions(sessions_for_test()));
+        assert!(matches!(app.modal, Some(Modal::Sessions(_))));
+
+        press(&mut app, KeyCode::Down);
+        assert_eq!(
+            press(&mut app, KeyCode::Char('f')),
+            vec![Effect::Checkout {
+                path: "s.jsonl".into(),
+                node: Some("a1".to_owned()),
+                how: crate::session::Move::Fork,
+            }]
+        );
+        assert_eq!(
+            press(&mut app, KeyCode::Char('e')),
+            vec![Effect::Checkout {
+                path: "s.jsonl".into(),
+                node: Some("q1".to_owned()),
+                how: crate::session::Move::Fork,
+            }]
+        );
+    }
+
+    #[test]
+    fn the_session_does_not_move_while_a_run_goes() {
+        let agent = agent_with(vec![]);
+        let mut app = app_for(&agent);
+        app.status.running = true;
+
+        assert!(
+            type_line(&mut app, "/clear")
+                .iter()
+                .all(|effect| !matches!(effect, Effect::NewSession))
+        );
+        app.input.clear();
+        app.awaiting_sessions = true;
+        app.update(Msg::Sessions(sessions_for_test()));
+        press(&mut app, KeyCode::Down);
+        let effects = press(&mut app, KeyCode::Enter);
+        assert!(
+            effects
+                .iter()
+                .all(|effect| !matches!(effect, Effect::Checkout { .. })),
+            "{effects:?}"
+        );
+    }
+
+    #[test]
+    fn clear_starts_a_new_session_and_the_pane_follows_the_checkout() {
+        let agent = agent_with(vec![]);
+        let mut app = app_for(&agent);
+        app.scrollback.push_user("old");
+
+        assert_eq!(type_line(&mut app, "/clear"), vec![Effect::NewSession]);
+        app.update(Msg::CheckedOut {
+            label: "s:abc — /x".to_owned(),
+            history: vec![crate::tui::scrollback::Replayed::User("kept".to_owned())],
+            prefill: Some("edit me".to_owned()),
+            notice: "── new branch ──".to_owned(),
+        });
+        assert!(
+            matches!(&app.scrollback.entries()[0], crate::tui::scrollback::Entry::User(text) if text == "kept")
+        );
+        assert_eq!(app.input.text(), "edit me");
+        assert_eq!(app.session_label, "s:abc — /x");
+    }
+
+    #[test]
+    fn rename_needs_a_name() {
+        let agent = agent_with(vec![]);
+        let mut app = app_for(&agent);
+        assert!(
+            type_line(&mut app, "/rename")
+                .iter()
+                .all(|effect| !matches!(effect, Effect::Rename(_)))
+        );
+        app.input.clear();
+        assert_eq!(
+            type_line(&mut app, "/rename the plan"),
+            vec![Effect::Rename("the plan".to_owned())]
+        );
+    }
+
     #[test]
     fn a_command_leaves_the_draft_alone() {
         let agent = vision_agent(vec![]);
@@ -2918,6 +3296,65 @@ mod tests {
         // system, user, assistant
         assert_eq!(agent.transcript().len(), 3);
         assert_eq!(agent.transcript().get(1).unwrap().role(), Role::User);
+    }
+
+    #[tokio::test]
+    async fn the_executor_forks_and_starts_sessions_on_the_file() {
+        let dir = std::env::temp_dir().join(format!("aphid-tui-session-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store =
+            crate::session::SessionStore::create(&dir, &dir, &dir, None).expect("a session file");
+        let session = Arc::new(SessionComponent::new(
+            store,
+            Arc::new(aphid_agent::TranscriptListeners::default()),
+        ));
+
+        let agent = agent_with(vec![Turn::text("hello back")]);
+        let mut app = app_for(&agent);
+        let (hub, mut inbox) = crate::tui::runtime::channel();
+        let mut ex = executor(agent, hub);
+        ex.session = Some(Arc::clone(&session));
+        ex.sessions_dir.clone_from(&dir);
+        for effect in type_line(&mut app, "hello") {
+            ex.perform(effect);
+        }
+        settle(&mut app, &mut ex, &mut inbox).await;
+        {
+            let parked = parked(&ex).expect("the agent came back");
+            let agent = parked.as_ref().expect("the agent");
+            session
+                .with_store(|store| store.flush(agent.transcript()))
+                .expect("lock")
+                .expect("flush");
+        }
+        let path = session.path().expect("a path");
+        let prompt = session
+            .with_store(|store| store.line()[1].clone())
+            .expect("lock")
+            .expect("an id");
+
+        let next = |inbox: &mut tokio::sync::mpsc::UnboundedReceiver<Msg>| {
+            let msg = inbox.try_recv();
+            msg.expect("an answer")
+        };
+        ex.perform(Effect::Checkout {
+            path: path.clone(),
+            node: Some(prompt),
+            how: crate::session::Move::Fork,
+        });
+        let Msg::CheckedOut {
+            prefill, history, ..
+        } = next(&mut inbox)
+        else {
+            panic!("not a checkout");
+        };
+        assert_eq!(prefill.as_deref(), Some("hello"));
+        assert!(history.is_empty(), "the branch starts before the prompt");
+
+        ex.perform(Effect::NewSession);
+        assert!(matches!(next(&mut inbox), Msg::CheckedOut { .. }));
+        assert_ne!(session.path(), Some(path));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// GPUI owns its main thread, so callbacks there have no entered Tokio

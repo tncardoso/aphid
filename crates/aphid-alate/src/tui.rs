@@ -598,7 +598,7 @@ impl App {
             // The alate's files are on the machine the daemon runs on, and
             // this terminal cannot see them. The `@` has already been typed
             // into the box, which is all it means here.
-            Action::OpenFiles => Cmd::none(),
+            Action::OpenFiles | Action::OpenSessions => Cmd::none(),
             Action::Quit => {
                 self.quit = true;
                 Cmd::one(Effect::Quit)

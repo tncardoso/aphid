@@ -1211,7 +1211,7 @@ impl DesktopView {
                 // The file question is the terminal's `@` list asking what a
                 // chosen file is for, and the composer here has no such list.
                 // Nothing asked for this, so there is nothing to draw.
-                Modal::FileAction { .. } => return None,
+                Modal::FileAction { .. } | Modal::Sessions(_) => return None,
                 Modal::Processes { rows, .. } => {
                     div()
                         .w(px(720.))

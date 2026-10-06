@@ -65,6 +65,20 @@ pub enum Msg {
     /// A run's task did not finish: it panicked or was cancelled outright.
     RunFailed(String),
 
+    // ---- the session ------------------------------------------------------
+    /// The workspace's sessions, read for the tree.
+    Sessions(Vec<crate::tui::tree::TreeSession>),
+    /// The session moved: to another file, another branch, or a new one. The
+    /// conversation it is on now replaces the pane.
+    CheckedOut {
+        /// What `/session` says from now on.
+        label: String,
+        history: Vec<crate::tui::scrollback::Replayed>,
+        /// A prompt to edit and send again, after a fork at a prompt.
+        prefill: Option<String>,
+        notice: String,
+    },
+
     // ---- the plugins ------------------------------------------------------
     /// A gated tool is waiting for an answer. The agent's task is blocked on
     /// the channel this id names.

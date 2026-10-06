@@ -32,6 +32,7 @@ pub mod scrollback;
 pub mod select;
 pub mod status;
 pub mod surface;
+pub mod tree;
 
 pub use app::{App, run};
 pub use effect::Effect;

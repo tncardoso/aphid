@@ -29,9 +29,22 @@ pub enum Effect {
     /// back, rather than dropped as it used to be.
     SetModel(Box<Model>),
     SetThinking(Option<ThinkingLevel>),
-    /// Drop the conversation from the agent's transcript, keeping the system
-    /// prompt. The pane clears itself; this is the other half.
-    ClearTranscript,
+    /// Start a new session file and drop the conversation, keeping the system
+    /// prompt. Answered with [`Msg::CheckedOut`](crate::tui::msg::Msg::CheckedOut).
+    NewSession,
+    /// Read the workspace's sessions, for the tree. Answered with
+    /// [`Msg::Sessions`](crate::tui::msg::Msg::Sessions).
+    ListSessions,
+    /// Move the session: to the session in `path`, and there to `node`, by
+    /// `how`. Without a node, the session continues at its head. Refused while
+    /// a run is in flight.
+    Checkout {
+        path: std::path::PathBuf,
+        node: Option<String>,
+        how: crate::session::Move,
+    },
+    /// Name the branch the session is on.
+    Rename(String),
     /// Run a `!` command in the workspace root.
     Bang(String),
     /// Ask the file index for the paths that match `query`.

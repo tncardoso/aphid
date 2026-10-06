@@ -183,6 +183,28 @@ impl Scrollback {
         self.viewport
     }
 
+    /// Draw a conversation that was already had, as [`replayed`] read it.
+    pub fn replay(&mut self, history: &[Replayed]) {
+        for item in history {
+            match item {
+                Replayed::User(text) => self.push_user(text.clone()),
+                Replayed::Text(text) => self.push_text(text),
+                Replayed::Thinking(text) => self.push_thinking(text),
+                Replayed::Call {
+                    id,
+                    name,
+                    arguments,
+                } => self.push_tool_call(id, name, arguments),
+                Replayed::Result {
+                    id,
+                    text,
+                    is_error,
+                    details,
+                } => self.finish_tool(id, text, *is_error, details.clone()),
+            }
+        }
+    }
+
     pub fn push_user(&mut self, text: impl Into<String>) {
         // A user message starts a new turn. The turn, not the message, is the
         // unit the agent works on, so everything from here to the next user
@@ -798,6 +820,76 @@ fn chunks(text: &str, width: usize) -> Vec<String> {
         .chunks(width)
         .map(|chunk| chunk.iter().collect())
         .collect()
+}
+
+/// One thing a conversation already had shows in the pane.
+///
+/// Plain data, so a conversation read on the executor's side can travel to the
+/// model in a message: a transcript cannot be cloned, and the model never holds
+/// the agent's.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Replayed {
+    User(String),
+    Text(String),
+    Thinking(String),
+    Call {
+        id: String,
+        name: String,
+        arguments: String,
+    },
+    Result {
+        id: String,
+        text: String,
+        is_error: bool,
+        details: Option<Json>,
+    },
+}
+
+/// What the pane shows of `transcript`. System messages are not shown.
+#[must_use]
+pub fn replayed(transcript: &aphid_core::Transcript) -> Vec<Replayed> {
+    use aphid_core::{ContentRef, Role};
+
+    let mut out = Vec::new();
+    for message in transcript.iter() {
+        match message.role() {
+            Role::System => {}
+            Role::User => {
+                let text: String = message.content().filter_map(|c| c.text()).collect();
+                if !text.is_empty() {
+                    out.push(Replayed::User(text));
+                }
+            }
+            Role::Assistant => {
+                for content in message.content() {
+                    match content {
+                        ContentRef::Text(text) => out.push(Replayed::Text(text.text().to_owned())),
+                        ContentRef::Thinking(thinking) => {
+                            out.push(Replayed::Thinking(thinking.text().to_owned()));
+                        }
+                        ContentRef::ToolCall(call) => out.push(Replayed::Call {
+                            id: call.id().to_owned(),
+                            name: call.name().to_owned(),
+                            arguments: call.arguments_raw().to_owned(),
+                        }),
+                        ContentRef::Image(_) => {}
+                    }
+                }
+            }
+            Role::ToolResult => {
+                let Some(meta) = message.tool_result() else {
+                    continue;
+                };
+                out.push(Replayed::Result {
+                    id: meta.tool_call_id.to_string(),
+                    text: message.content().filter_map(|c| c.text()).collect(),
+                    is_error: meta.is_error,
+                    details: meta.details.clone(),
+                });
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

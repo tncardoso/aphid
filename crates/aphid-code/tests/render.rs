@@ -740,3 +740,51 @@ fn the_picker_marks_the_session_you_are_already_on() {
     assert!(joined.contains("▸ first"), "{joined}");
     assert!(joined.contains("* second"), "{joined}");
 }
+
+#[test]
+fn the_session_tree_draws_branches_and_marks_the_head() {
+    use aphid_code::session::{TreeView, Turn};
+    use aphid_code::tui::tree::{SessionTree, TreeSession};
+
+    let turn = |id: &str, parent: Option<&str>, prompt: &str, head: bool| Turn {
+        id: id.to_owned(),
+        parent: parent.map(ToOwned::to_owned),
+        prompt: prompt.to_owned(),
+        reply: format!("answer to {prompt}"),
+        tool_calls: 0,
+        end: Some(format!("{id}e")),
+        label: None,
+        ts: chrono::Utc::now(),
+        on_head: head || id == "a",
+        is_head: head,
+        running: false,
+    };
+    let view = TreeView {
+        session: "s".to_owned(),
+        title: "plan the release".to_owned(),
+        started: chrono::Utc::now(),
+        head: Some("ce".to_owned()),
+        turns: vec![
+            turn("a", None, "plan the release", false),
+            turn("b", Some("a"), "use tags", false),
+            turn("c", Some("a"), "use branches", true),
+        ],
+    };
+    let tree = SessionTree::new(
+        vec![TreeSession {
+            path: "s".into(),
+            view,
+            open: false,
+        }],
+        Some(std::path::Path::new("s")),
+    );
+
+    let rendered = draw(100, 14, |frame| {
+        tree.render(frame, Rect::new(0, 0, 100, 14))
+    });
+    let joined = rendered.join("\n");
+    assert!(joined.contains("▾ plan the release"), "{joined}");
+    assert!(joined.contains("├─   use tags"), "{joined}");
+    assert!(joined.contains("└─ ● use branches"), "{joined}");
+    assert!(joined.contains("answer to use tags"), "{joined}");
+}

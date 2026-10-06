@@ -32,6 +32,8 @@ pub enum Action {
     ToggleThinking,
     /// `@` at the head of a word: open the list of the workspace's files.
     OpenFiles,
+    /// Ctrl-O: open the session tree.
+    OpenSessions,
 }
 
 /// A multi-line editor, backed by `ratatui-textarea`.
@@ -272,6 +274,7 @@ impl Input {
             KeyCode::Char('d') if control && self.textarea.is_empty() => return Action::Quit,
             KeyCode::Char('p') if control => return Action::CycleModel,
             KeyCode::Char('t') if control => return Action::ToggleThinking,
+            KeyCode::Char('o') if control => return Action::OpenSessions,
 
             KeyCode::PageUp => return Action::ScrollUp,
             KeyCode::PageDown => return Action::ScrollDown,

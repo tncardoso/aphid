@@ -40,6 +40,8 @@ pub enum Modal {
         rows: Vec<Process>,
         selected: usize,
     },
+    /// The session tree: every session, and the branches of each.
+    Sessions(crate::tui::tree::SessionTree),
 }
 
 /// A gated tool call waiting on an answer.
@@ -62,7 +64,7 @@ impl Modal {
             // Only the running ones can be selected: a finished process is a
             // report, with nothing left to do to it.
             Modal::Processes { rows, selected } => (running(rows).len(), selected),
-            Modal::Confirm(_) => return,
+            Modal::Confirm(_) | Modal::Sessions(_) => return,
         };
         if len == 0 {
             return;
@@ -75,7 +77,10 @@ impl Modal {
     pub fn selected_model(&self) -> Option<&Model> {
         match self {
             Modal::Models { models, selected } => models.get(*selected),
-            Modal::Confirm(_) | Modal::Processes { .. } | Modal::FileAction { .. } => None,
+            Modal::Confirm(_)
+            | Modal::Processes { .. }
+            | Modal::FileAction { .. }
+            | Modal::Sessions(_) => None,
         }
     }
 
@@ -108,6 +113,7 @@ impl Modal {
             Modal::Processes { rows, selected } => {
                 render_processes(frame, area, rows, *selected);
             }
+            Modal::Sessions(tree) => tree.render(frame, area),
         }
     }
 }
