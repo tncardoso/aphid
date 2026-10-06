@@ -1,6 +1,7 @@
 //! The GPUI desktop front end.
 
 pub mod theme;
+pub mod tree_canvas;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -17,6 +18,8 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::list::ListItem;
 use gpui_component::text::TextView;
+
+use tree_canvas::{Preview, TreeCanvas, TreeEvent};
 
 use crate::events::{Session, SessionEnd, SessionStart};
 use crate::harness::{self, HarnessOptions};
@@ -40,7 +43,9 @@ gpui::actions!(
         /// Stop the run in flight.
         CancelRun,
         /// Put a line break in the text box instead of sending it.
-        NewLine
+        NewLine,
+        /// Switch between the conversation and the session tree.
+        ToggleTree
     ]
 );
 
@@ -52,76 +57,21 @@ gpui::actions!(
 const CONTEXT: &str = "Aphid";
 use theme::{ACCENT, BACKGROUND, BORDER, DANGER, MUTED, PANEL, PANEL_RAISED, TEXT, USER};
 
-#[derive(Clone)]
-struct GuiConfig {
-    workspace: Workspace,
-    cwd: PathBuf,
-    home: Option<PathBuf>,
-    model: aphid_core::Model,
-    thinking: Option<aphid_core::ThinkingLevel>,
-    system: Option<String>,
-    append_system: Option<String>,
-    load_context: bool,
-    max_turns: u32,
-    api_key: Option<compact_str::CompactString>,
-    plugin_files: Vec<crate::scripting::PluginFile>,
-    processes: Arc<aphid_agent::exec::Registry>,
-    stream_fn: Option<aphid_agent::StreamFn>,
-}
-
-impl GuiConfig {
-    fn capture(options: &HarnessOptions) -> Self {
-        Self {
-            workspace: options.workspace.clone(),
-            cwd: options.cwd.clone(),
-            home: options.home.clone(),
-            model: options.model.clone(),
-            thinking: options.thinking,
-            system: options.system.clone(),
-            append_system: options.append_system.clone(),
-            load_context: options.load_context,
-            max_turns: options.max_turns,
-            api_key: options.api_key.clone(),
-            plugin_files: options.plugin_files.clone(),
-            processes: Arc::clone(&options.processes),
-            stream_fn: options.stream_fn.clone(),
-        }
-    }
-
-    fn options(&self) -> HarnessOptions {
-        HarnessOptions {
-            workspace: self.workspace.clone(),
-            cwd: self.cwd.clone(),
-            home: self.home.clone(),
-            model: self.model.clone(),
-            thinking: self.thinking,
-            system: self.system.clone(),
-            append_system: self.append_system.clone(),
-            load_context: self.load_context,
-            scope: None,
-            max_turns: self.max_turns,
-            api_key: self.api_key.clone(),
-            composition: aphid_agent::rt::Composition::new(),
-            plugin_files: self.plugin_files.clone(),
-            host: None,
-            processes: Arc::clone(&self.processes),
-            stream_fn: self.stream_fn.clone(),
-        }
-    }
-}
-
 struct Backend {
     app: CodeApp,
     executor: Executor,
     composition: aphid_agent::rt::Composition,
     host: Arc<crate::scripting::PluginHost>,
-    session_id: Option<String>,
-    session_path: Option<PathBuf>,
     surfaces: Vec<Open>,
     stopped: bool,
 }
 
 impl Backend {
+    /// The file the conversation is written to now. A checkout moves it.
+    fn session_path(&self) -> Option<PathBuf> {
+        self.app.session.as_ref().and_then(|session| session.path())
+    }
+
     fn apply(&mut self, msg: Msg) {
         if let Msg::PluginSurfaces(surfaces) = &msg {
             self.surfaces.clone_from(surfaces);
@@ -152,9 +102,10 @@ impl Backend {
         if let Some(plugins) = self.executor.plugins.take() {
             plugins.stop();
         }
+        let session = self.app.session.as_ref();
         self.composition.bus.emit(&mut SessionEnd(Session {
-            id: self.session_id.clone(),
-            path: self.session_path.clone(),
+            id: session.and_then(|session| session.id()),
+            path: self.session_path(),
             reason: "end".to_owned(),
             restored: 0,
         }));
@@ -264,10 +215,7 @@ async fn bootstrap(
     let mut harness = harness::build(options);
     let mut app = CodeApp::new(&harness, thinking, &processes);
     app.answers = answers;
-    app.session_label = session.id().zip(session.path()).map_or_else(
-        || "not being saved".to_owned(),
-        |(id, path)| format!("{id} — {}", path.display()),
-    );
+    app.session_label = crate::tui::app::session_label(&session);
     app.session = Some(session);
     app.host = Some(host.clone());
     app.composition = Some(composition.clone());
@@ -310,6 +258,7 @@ async fn bootstrap(
     ));
 
     let mut executor = Executor::new(harness.agent, &app, events.clone());
+    executor.cwd.clone_from(&cwd);
     executor.plugins = Some(spawn_plugin_hub(
         host.clone(),
         Arc::clone(&composition.bus),
@@ -333,8 +282,6 @@ async fn bootstrap(
             executor,
             composition,
             host,
-            session_id,
-            session_path,
             surfaces: Vec::new(),
             stopped: false,
         },
@@ -371,9 +318,6 @@ fn spawn_plugin_hub(
 
 struct DesktopView {
     backend: Backend,
-    config: GuiConfig,
-    runtime: tokio::runtime::Handle,
-    confirm: bool,
     workspace: Workspace,
     sessions: Vec<Summary>,
     drawer_open: bool,
@@ -392,16 +336,33 @@ struct DesktopView {
     fingerprints: Vec<u64>,
     expanded_tools: HashSet<usize>,
     expanded_thinking: HashSet<usize>,
-    switching_session: bool,
     session_generation: u64,
+    /// The conversation, or the session tree in its place.
+    mode: Mode,
+    tree: Entity<TreeCanvas>,
+    /// The box a branch's new name is typed in, and the turn it names.
+    rename: Entity<InputState>,
+    renaming: Option<String>,
+    /// A prompt a fork gave back, put in the text box at the next frame: the
+    /// box needs a window to be written, and a message has none.
+    prefill: Option<String>,
+    /// For each entry that is a prompt, which prompt of the conversation it
+    /// is; for the last answer of a turn, the prompt it answers. A fork from
+    /// the pane names the message by these.
+    prompt_of: Vec<Option<usize>>,
+    answer_of: Vec<Option<usize>>,
+}
+
+/// What the middle of the window shows.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Mode {
+    Chat,
+    Tree,
 }
 
 impl DesktopView {
     fn new(
         backend: Backend,
-        config: GuiConfig,
-        runtime: tokio::runtime::Handle,
-        confirm: bool,
         workspace: Workspace,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -416,11 +377,13 @@ impl DesktopView {
         });
         cx.subscribe_in(&composer, window, Self::on_composer)
             .detach();
+        let tree = cx.new(|_| TreeCanvas::new());
+        cx.subscribe(&tree, Self::on_tree).detach();
+        let rename = cx.new(|cx| InputState::new(window, cx).placeholder("A name for the branch"));
+        cx.subscribe_in(&rename, window, Self::on_rename_input)
+            .detach();
         Self {
             backend,
-            config,
-            runtime,
-            confirm,
             workspace,
             sessions,
             drawer_open: true,
@@ -433,8 +396,14 @@ impl DesktopView {
             fingerprints: Vec::new(),
             expanded_tools: HashSet::new(),
             expanded_thinking: HashSet::new(),
-            switching_session: false,
             session_generation: 0,
+            mode: Mode::Chat,
+            tree,
+            rename,
+            renaming: None,
+            prefill: None,
+            prompt_of: Vec::new(),
+            answer_of: Vec::new(),
         }
     }
 
@@ -476,6 +445,32 @@ impl DesktopView {
     /// what makes the list measure them again and keeps every other height.
     fn sync_entries(&mut self) {
         let entries = self.backend.app.scrollback.entries();
+        // Prompts are counted in the order the pane shows them, which is the
+        // order the agent's conversation holds them: the pane is rebuilt from
+        // that conversation whenever the session moves.
+        self.prompt_of = Vec::with_capacity(entries.len());
+        self.answer_of = vec![None; entries.len()];
+        let mut prompts = 0usize;
+        let mut last_answer: Option<usize> = None;
+        for (index, entry) in entries.iter().enumerate() {
+            match entry {
+                Entry::User(_) => {
+                    if let Some(answer) = last_answer.take() {
+                        self.answer_of[answer] = prompts.checked_sub(1);
+                    }
+                    self.prompt_of.push(Some(prompts));
+                    prompts += 1;
+                    continue;
+                }
+                Entry::Assistant(_) => last_answer = Some(index),
+                Entry::Tool { .. } => last_answer = None,
+                _ => {}
+            }
+            self.prompt_of.push(None);
+        }
+        if let Some(answer) = last_answer {
+            self.answer_of[answer] = prompts.checked_sub(1);
+        }
         let fresh: Vec<u64> = entries
             .iter()
             .enumerate()
@@ -509,35 +504,101 @@ impl DesktopView {
         self.fingerprints = fresh;
     }
 
-    fn open_session(&mut self, resume: Option<session::Resume>, cx: &mut Context<Self>) {
-        if self.backend.app.status.running || self.switching_session {
-            return;
+    /// Move the session: to the one in `path`, and there to `node`. The
+    /// executor refuses while a run is going, and says so.
+    fn checkout(
+        &mut self,
+        path: PathBuf,
+        node: Option<String>,
+        how: session::Move,
+        cx: &mut Context<Self>,
+    ) {
+        self.backend.perform(Effect::Checkout { path, node, how });
+        cx.notify();
+    }
+
+    /// Read the session tree again, and mark the turn a run is adding to.
+    fn refresh_tree(&mut self, cx: &mut Context<Self>) {
+        let running = self.backend.app.status.running;
+        let view = self.backend.session_path().and_then(|path| {
+            let mut view = session::Tree::read(&path).ok()?.view();
+            if running && let Some(turn) = view.turns.iter_mut().find(|turn| turn.is_head) {
+                turn.running = true;
+            }
+            Some(view)
+        });
+        self.tree
+            .update(cx, |tree, cx| tree.set_view(view, running, cx));
+    }
+
+    fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
+        self.mode = mode;
+        if mode == Mode::Tree {
+            self.refresh_tree(cx);
         }
-        self.switching_session = true;
-        let work = self
-            .runtime
-            .spawn(bootstrap(self.config.options(), resume, self.confirm));
-        cx.spawn(async move |weak, cx| {
-            let result = match work.await {
-                Ok(result) => result,
-                Err(error) => Err(format!("could not switch sessions: {error}")),
-            };
-            let _ = weak.update(cx, |view, cx| {
-                view.switching_session = false;
-                match result {
-                    Ok((backend, receiver)) => {
-                        view.backend = backend;
-                        view.session_generation = view.session_generation.wrapping_add(1);
-                        view.attach_receiver(receiver, cx);
-                        view.sessions = session::list_for(&sessions_dir(), view.workspace.root());
-                    }
-                    Err(error) => view.backend.app.scrollback.push_notice(error),
-                }
-                view.sync_entries();
+        cx.notify();
+    }
+
+    fn on_toggle_tree(&mut self, _: &ToggleTree, _: &mut Window, cx: &mut Context<Self>) {
+        let next = match self.mode {
+            Mode::Chat => Mode::Tree,
+            Mode::Tree => Mode::Chat,
+        };
+        self.set_mode(next, cx);
+    }
+
+    /// What the canvas asked for.
+    fn on_tree(&mut self, _: Entity<TreeCanvas>, event: &TreeEvent, cx: &mut Context<Self>) {
+        let Some(path) = self.backend.session_path() else {
+            return;
+        };
+        match event {
+            TreeEvent::Selected(Some(id)) => {
+                let preview = preview_of(&path, id);
+                self.tree
+                    .update(cx, |tree, cx| tree.set_preview(preview, cx));
+            }
+            TreeEvent::Selected(None) => {}
+            TreeEvent::Jump(node) => {
+                self.checkout(path, Some(node.clone()), session::Move::Jump, cx);
+                self.set_mode(Mode::Chat, cx);
+            }
+            TreeEvent::Fork(node) => {
+                self.checkout(path, Some(node.clone()), session::Move::Fork, cx);
+                self.set_mode(Mode::Chat, cx);
+            }
+            TreeEvent::Rename(turn) => {
+                self.renaming = Some(turn.clone());
                 cx.notify();
-            });
-        })
-        .detach();
+            }
+        }
+    }
+
+    /// Enter in the rename box names the branch.
+    fn on_rename_input(
+        &mut self,
+        _: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let InputEvent::PressEnter { .. } = event {
+            self.finish_rename(true, window, cx);
+        }
+    }
+
+    fn finish_rename(&mut self, apply: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.rename.read(cx).value().trim().to_owned();
+        let at = self.renaming.take();
+        self.rename
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        if apply && !text.is_empty() {
+            self.backend.perform(Effect::Rename { at, text });
+        }
+        if self.mode == Mode::Tree {
+            self.refresh_tree(cx);
+        }
+        self.focus_composer(window, cx);
         cx.notify();
     }
 
@@ -545,10 +606,33 @@ impl DesktopView {
         if generation != self.session_generation {
             return;
         }
-        let refresh_sessions = matches!(&msg, Msg::RunEnded { .. } | Msg::RunFailed(_));
+        let refresh_sessions = matches!(
+            &msg,
+            Msg::RunEnded { .. } | Msg::RunFailed(_) | Msg::CheckedOut { .. }
+        );
+        let refresh_tree = refresh_sessions
+            || matches!(
+                &msg,
+                Msg::TurnStarted | Msg::TurnEnded { .. } | Msg::Notice(_)
+            );
+        if let Msg::CheckedOut {
+            prefill: Some(prefill),
+            ..
+        } = &msg
+        {
+            self.prefill = Some(prefill.clone());
+        }
         self.backend.apply(msg);
+        // `/tree` typed in the box opens the canvas here, not the terminal's list.
+        if matches!(self.backend.app.modal, Some(Modal::Sessions(_))) {
+            self.backend.app.modal = None;
+            self.set_mode(Mode::Tree, cx);
+        }
         if refresh_sessions {
             self.sessions = session::list_for(&sessions_dir(), self.workspace.root());
+        }
+        if refresh_tree && self.mode == Mode::Tree {
+            self.refresh_tree(cx);
         }
         self.sync_entries();
         if self.backend.app.quitting() {
@@ -579,7 +663,9 @@ impl DesktopView {
     }
 
     fn new_chat(&mut self, cx: &mut Context<Self>) {
-        self.open_session(None, cx);
+        self.backend.perform(Effect::NewSession);
+        self.mode = Mode::Chat;
+        cx.notify();
     }
 
     /// What the text box says happened.
@@ -735,9 +821,128 @@ impl DesktopView {
         cx.notify();
     }
 
+    /// Chat or Tree, in the header.
+    fn render_mode_switch(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let chat = self.mode == Mode::Chat;
+        div()
+            .flex()
+            .gap_1()
+            .child(
+                Button::new("mode-chat")
+                    .map(|button| {
+                        if chat {
+                            button.primary()
+                        } else {
+                            button.ghost()
+                        }
+                    })
+                    .label("Chat")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.set_mode(Mode::Chat, cx);
+                        this.focus_composer(window, cx);
+                    })),
+            )
+            .child(
+                Button::new("mode-tree")
+                    .map(|button| {
+                        if chat {
+                            button.ghost()
+                        } else {
+                            button.primary()
+                        }
+                    })
+                    .label("Tree")
+                    .tooltip("The session's branches (Ctrl-O)")
+                    .on_click(cx.listener(|this, _, _, cx| this.set_mode(Mode::Tree, cx))),
+            )
+            .into_any_element()
+    }
+
+    /// The box a branch's name is typed in.
+    fn render_rename(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        self.renaming.as_ref()?;
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .bg(rgba(0x00000099))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .w(px(420.))
+                        .p_4()
+                        .rounded_lg()
+                        .bg(rgb(PANEL_RAISED))
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child("Rename branch"),
+                        )
+                        .child(Input::new(&self.rename))
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("rename-cancel")
+                                        .ghost()
+                                        .label("Cancel")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.finish_rename(false, window, cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("rename-ok").primary().label("Rename").on_click(
+                                        cx.listener(|this, _, window, cx| {
+                                            this.finish_rename(true, window, cx);
+                                        }),
+                                    ),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The control on a message that starts a branch there.
+    fn fork_button(
+        &self,
+        index: usize,
+        prompt: usize,
+        after: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let running = self.backend.app.status.running;
+        div()
+            .id(SharedString::from(format!("fork-{index}")))
+            .flex_none()
+            .px_2()
+            .text_xs()
+            .text_color(rgb(MUTED))
+            .opacity(0.)
+            .group_hover(format!("entry-{index}"), |style| style.opacity(1.))
+            .cursor_pointer()
+            .child(if after { "⑂ fork after" } else { "⑂ edit" })
+            .when(!running, |this| {
+                this.on_click(cx.listener(move |this, _, _, cx| {
+                    this.backend.perform(Effect::ForkAt { prompt, after });
+                    cx.notify();
+                }))
+            })
+            .into_any_element()
+    }
+
     fn render_drawer(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let open = self.drawer_open;
-        let current = self.backend.session_path.as_ref();
+        let current = self.backend.session_path();
         let mut drawer = div()
             .h_full()
             .flex()
@@ -782,9 +987,9 @@ impl DesktopView {
                     .flex_1()
                     .overflow_scroll()
                     .children(self.sessions.iter().enumerate().map(|(index, summary)| {
-                        let active = current.is_some_and(|path| path == &summary.path);
+                        let active = current.as_ref().is_some_and(|path| path == &summary.path);
                         let path = summary.path.clone();
-                        let disabled = self.backend.app.status.running || self.switching_session;
+                        let disabled = self.backend.app.status.running;
                         ListItem::new(SharedString::from(format!("session-{index}")))
                             .my_1()
                             .py_2()
@@ -795,15 +1000,25 @@ impl DesktopView {
                             // used to dim and take it anyway.
                             .disabled(disabled)
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.open_session(Some(session::Resume::head(path.clone())), cx);
+                                if !active {
+                                    this.checkout(path.clone(), None, session::Move::Jump, cx);
+                                }
                             }))
                             .child(
-                                div().child(summary.header.id.clone()).child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(MUTED))
-                                        .child(format!("{} messages", summary.messages)),
-                                ),
+                                div()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(summary.title.clone())
+                                    .child(div().text_xs().text_color(rgb(MUTED)).child(format!(
+                                            "{} · {} messages",
+                                            summary
+                                                .header
+                                                .started
+                                                .with_timezone(&chrono::Local)
+                                                .format("%Y-%m-%d %H:%M"),
+                                            summary.messages
+                                        ))),
                             )
                     })),
             );
@@ -817,16 +1032,32 @@ impl DesktopView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        // The list draws one entry at a time, so each one carries the padding
+        // the transcript used to put around the column as a whole.
+        let row = div()
+            .group(format!("entry-{index}"))
+            .w_full()
+            .max_w(px(980.))
+            .mx_auto()
+            .px_6()
+            .py_2();
+        let fork = match (
+            self.prompt_of.get(index).copied().flatten(),
+            self.answer_of.get(index).copied().flatten(),
+        ) {
+            (Some(prompt), _) => Some(self.fork_button(index, prompt, false, cx)),
+            (None, Some(prompt)) => Some(self.fork_button(index, prompt, true, cx)),
+            (None, None) => None,
+        };
         let Some(entry) = self.backend.app.scrollback.entries().get(index) else {
             return div().into_any_element();
         };
-        // The list draws one entry at a time, so each one carries the padding
-        // the transcript used to put around the column as a whole.
-        let row = div().w_full().max_w(px(980.)).mx_auto().px_6().py_2();
         match entry {
             Entry::User(text) => row
                 .flex()
                 .justify_end()
+                .items_center()
+                .children(fork)
                 .child(
                     div()
                         .max_w(px(760.))
@@ -841,6 +1072,7 @@ impl DesktopView {
                 .into_any_element(),
             Entry::Assistant(text) => row
                 .text_color(rgb(TEXT))
+                .children(fork.map(|fork| div().flex().justify_end().child(fork)))
                 .child(
                     TextView::markdown(
                         SharedString::from(format!("assistant-{index}")),
@@ -1296,7 +1528,11 @@ impl Focusable for DesktopView {
 }
 
 impl Render for DesktopView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(prefill) = self.prefill.take() {
+            self.composer
+                .update(cx, |state, cx| state.set_value(prefill, window, cx));
+        }
         let status = &self.backend.app.status;
         let status_text = format!(
             "{}{} · {}/{} tokens · ${:.4}",
@@ -1327,37 +1563,41 @@ impl Render for DesktopView {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_cancel))
             .on_action(cx.listener(Self::on_new_line))
+            .on_action(cx.listener(Self::on_toggle_tree))
             .child(self.render_drawer(cx));
         if let Some(left) = self.render_plugin_side(true, cx) {
             content = content.child(left);
         }
 
         let running = status.running;
-        let main = div()
-            .flex_1()
-            .h_full()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .h(px(48.))
-                    .flex_none()
-                    .px_5()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(self.workspace.root().display().to_string()),
-                    )
-                    .child(div().text_sm().text_color(rgb(MUTED)).child(status_text)),
-            )
-            .child(transcript)
-            .child(
+        let main = div().flex_1().h_full().min_w_0().flex().flex_col().child(
+            div()
+                .h(px(48.))
+                .flex_none()
+                .px_5()
+                .flex()
+                .items_center()
+                .justify_between()
+                .border_b_1()
+                .border_color(rgb(BORDER))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(self.workspace.root().display().to_string()),
+                        )
+                        .child(self.render_mode_switch(cx)),
+                )
+                .child(div().text_sm().text_color(rgb(MUTED)).child(status_text)),
+        );
+        let main = if self.mode == Mode::Tree {
+            main.child(div().flex_1().min_h_0().child(self.tree.clone()))
+        } else {
+            main.child(transcript).child(
                 div().flex_none().px_6().pb_5().child(
                     div()
                         .w_full()
@@ -1401,7 +1641,8 @@ impl Render for DesktopView {
                                 })),
                         ),
                 ),
-            );
+            )
+        };
         content = content.child(main);
         if let Some(right) = self.render_plugin_side(false, cx) {
             content = content.child(right);
@@ -1409,8 +1650,39 @@ impl Render for DesktopView {
         if let Some(modal) = self.render_modal(cx) {
             content = content.child(modal);
         }
+        if let Some(rename) = self.render_rename(cx) {
+            content = content.child(rename);
+        }
         content
     }
+}
+
+/// The whole prompt and answer of the turn `id`, read from the session file.
+fn preview_of(path: &std::path::Path, id: &str) -> Option<Preview> {
+    let contents = session::read(path).ok()?;
+    let view = session::Tree::read(path).ok()?.view();
+    let turn = view.get(id)?;
+    let text = |id: &str| {
+        contents.get(id).map(|record| {
+            record
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    session::Block::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+    };
+    Some(Preview {
+        prompt: text(&turn.id)?,
+        reply: turn
+            .end
+            .as_deref()
+            .and_then(text)
+            .unwrap_or_else(|| turn.reply.clone()),
+    })
 }
 
 /// What an entry looks like to the list that measures it.
@@ -1466,13 +1738,11 @@ fn fingerprint(entry: &Entry, tool_open: bool, thinking_open: bool) -> u64 {
 /// cannot start.
 pub fn run(options: Options, resume: Option<session::Resume>, confirm: bool) -> Result<(), String> {
     let workspace = options.workspace.clone();
-    let config = GuiConfig::capture(&options);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|error| format!("could not start the GUI runtime: {error}"))?;
     let (backend, receiver) = runtime.block_on(bootstrap(options, resume, confirm))?;
-    let runtime_handle = runtime.handle().clone();
     let open_error = Arc::new(std::sync::Mutex::new(None::<String>));
     let reported = Arc::clone(&open_error);
 
@@ -1483,6 +1753,7 @@ pub fn run(options: Options, resume: Option<session::Resume>, confirm: bool) -> 
         cx.bind_keys([
             gpui::KeyBinding::new("escape", CancelRun, Some(CONTEXT)),
             gpui::KeyBinding::new("shift-enter", NewLine, Some(CONTEXT)),
+            gpui::KeyBinding::new("ctrl-o", ToggleTree, Some(CONTEXT)),
         ]);
         let bounds = Bounds::centered(None, size(px(1240.), px(820.)), cx);
         match cx.open_window(
@@ -1495,17 +1766,7 @@ pub fn run(options: Options, resume: Option<session::Resume>, confirm: bool) -> 
                 ..Default::default()
             },
             move |window, cx| {
-                let view = cx.new(|cx| {
-                    DesktopView::new(
-                        backend,
-                        config,
-                        runtime_handle,
-                        confirm,
-                        workspace,
-                        window,
-                        cx,
-                    )
-                });
+                let view = cx.new(|cx| DesktopView::new(backend, workspace, window, cx));
                 // The text box and not the view: keys go where the focus is,
                 // and a view holding it means `Enter` reaches the action
                 // bindings instead of the composer, so nothing is ever sent

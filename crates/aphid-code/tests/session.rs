@@ -690,7 +690,7 @@ fn renaming_names_the_branch_the_session_is_on() {
     let temp = Temp::new();
     let (mut agent, session) = agent_with_session(&temp);
     three_turns(&mut agent, &session);
-    session::rename(&session, "first try").expect("rename");
+    session::rename(&session, None, "first try").expect("rename");
     let path = session.path().expect("path");
     assert_eq!(
         session::Tree::read(&path).expect("tree").title(),
@@ -701,7 +701,7 @@ fn renaming_names_the_branch_the_session_is_on() {
     session::checkout(&session, &mut agent, &a1, session::Move::Fork).expect("fork");
     agent.transcript_mut().push_user("other way");
     flush(&agent, &session);
-    session::rename(&session, "second try").expect("rename");
+    session::rename(&session, None, "second try").expect("rename");
 
     let view = session::Tree::read(&path).expect("tree").view();
     assert_eq!(view.title, "first try");

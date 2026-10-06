@@ -371,7 +371,15 @@ impl TreeView {
     /// branch goes there.
     #[must_use]
     pub fn branch_start(&self) -> Option<&Turn> {
-        let mut turn = self.turns.iter().find(|turn| turn.is_head)?;
+        let head = self.turns.iter().find(|turn| turn.is_head)?;
+        self.branch_start_of(&head.id)
+    }
+
+    /// Where the branch that holds the turn `id` starts: the first turn above
+    /// it, itself included, that has a sibling, or the first turn of all.
+    #[must_use]
+    pub fn branch_start_of(&self, id: &str) -> Option<&Turn> {
+        let mut turn = self.get(id)?;
         loop {
             let siblings = self.children(turn.parent.as_deref()).count();
             if siblings > 1 {

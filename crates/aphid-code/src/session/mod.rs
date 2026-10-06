@@ -327,17 +327,21 @@ pub fn start(
     Ok(())
 }
 
-/// Name the branch the session is on: the label goes on the first turn of
-/// that branch. On the first branch, it names the session.
+/// Name a branch: the one that holds the turn `at`, or the one the session is
+/// on. The label goes on the first turn of that branch. On the first branch,
+/// it names the session.
 ///
 /// # Errors
 ///
 /// Fails when the file cannot be read or written, or holds no prompt yet.
-pub fn rename(session: &SessionComponent, text: &str) -> Result<(), String> {
+pub fn rename(session: &SessionComponent, at: Option<&str>, text: &str) -> Result<(), String> {
     let path = session.path().ok_or("the session is not being saved")?;
     let view = Tree::read(&path).map_err(|error| error.to_string())?.view();
-    let start = view
-        .branch_start()
+    let start = match at {
+        Some(at) => view.branch_start_of(at),
+        None => view.branch_start(),
+    };
+    let start = start
         .or_else(|| view.turns.last())
         .ok_or("there is nothing to name yet: send a prompt first")?;
     let node = start.id.clone();

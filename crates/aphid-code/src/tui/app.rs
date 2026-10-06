@@ -1229,7 +1229,10 @@ impl App {
                 if self.status.running {
                     return self.notice(RUN_GOING);
                 }
-                Cmd::one(Effect::Rename(rest.trim().to_owned()))
+                Cmd::one(Effect::Rename {
+                    at: None,
+                    text: rest.trim().to_owned(),
+                })
             }
             "model" if rest.is_empty() => {
                 let models = self.catalog.models().to_vec();
@@ -1908,12 +1911,15 @@ impl Executor {
                 });
             }
             Effect::NewSession => self.with_idle_agent(Self::new_session),
-            Effect::Rename(text) => self.with_idle_agent(|this, _agent| {
+            Effect::ForkAt { prompt, after } => {
+                self.with_idle_agent(|this, agent| this.fork_at(agent, prompt, after));
+            }
+            Effect::Rename { at, text } => self.with_idle_agent(|this, _agent| {
                 let Some(session) = &this.session else {
                     this.hub.send(Msg::Notice(NOT_SAVED.to_owned()));
                     return;
                 };
-                let said = match session::rename(session, &text) {
+                let said = match session::rename(session, at.as_deref(), &text) {
                     Ok(()) => format!("── this branch is now “{text}” ──"),
                     Err(error) => format!("cannot name the branch: {error}"),
                 };
@@ -2156,6 +2162,44 @@ impl Executor {
             prefill,
             notice: notices.join("\n"),
         });
+    }
+
+    /// Start a branch at the `prompt`-th prompt of the agent's conversation,
+    /// or after the answer to it.
+    fn fork_at(&mut self, agent: &mut Agent, prompt: usize, after: bool) {
+        let Some(session) = self.session.clone() else {
+            self.hub.send(Msg::Notice(NOT_SAVED.to_owned()));
+            return;
+        };
+        let transcript = agent.transcript();
+        let role = |index: usize| transcript.get(index).map(|message| message.role());
+        let Some(asked) = (0..transcript.len())
+            .filter(|index| role(*index) == Some(aphid_core::Role::User))
+            .nth(prompt)
+        else {
+            self.hub.send(Msg::Notice(
+                "that prompt is not in the conversation".to_owned(),
+            ));
+            return;
+        };
+        let index = if after {
+            (asked + 1..transcript.len())
+                .take_while(|index| role(*index) != Some(aphid_core::Role::User))
+                .last()
+                .unwrap_or(asked)
+        } else {
+            asked
+        };
+        let node = session
+            .with_store(|store| store.line().get(index).cloned().flatten())
+            .ok()
+            .flatten();
+        let (Some(node), Some(path)) = (node, session.path()) else {
+            self.hub
+                .send(Msg::Notice("that message is not saved yet".to_owned()));
+            return;
+        };
+        self.checkout(agent, &path, Some(&node), session::Move::Fork);
     }
 
     /// Start a new session file, and clear the conversation.
@@ -3167,12 +3211,15 @@ mod tests {
         assert!(
             type_line(&mut app, "/rename")
                 .iter()
-                .all(|effect| !matches!(effect, Effect::Rename(_)))
+                .all(|effect| !matches!(effect, Effect::Rename { .. }))
         );
         app.input.clear();
         assert_eq!(
             type_line(&mut app, "/rename the plan"),
-            vec![Effect::Rename("the plan".to_owned())]
+            vec![Effect::Rename {
+                at: None,
+                text: "the plan".to_owned()
+            }]
         );
     }
 
@@ -3339,7 +3386,7 @@ mod tests {
         };
         ex.perform(Effect::Checkout {
             path: path.clone(),
-            node: Some(prompt),
+            node: Some(prompt.clone()),
             how: crate::session::Move::Fork,
         });
         let Msg::CheckedOut {
@@ -3350,6 +3397,27 @@ mod tests {
         };
         assert_eq!(prefill.as_deref(), Some("hello"));
         assert!(history.is_empty(), "the branch starts before the prompt");
+
+        // Back to the full branch, then fork after the first answer, as the
+        // pane's button does.
+        ex.perform(Effect::Checkout {
+            path: path.clone(),
+            node: Some(prompt.clone()),
+            how: crate::session::Move::Jump,
+        });
+        let _ = next(&mut inbox);
+        ex.perform(Effect::ForkAt {
+            prompt: 0,
+            after: true,
+        });
+        let Msg::CheckedOut {
+            prefill, history, ..
+        } = next(&mut inbox)
+        else {
+            panic!("not a checkout");
+        };
+        assert_eq!(prefill, None);
+        assert_eq!(history.len(), 2, "the prompt and its answer: {history:?}");
 
         ex.perform(Effect::NewSession);
         assert!(matches!(next(&mut inbox), Msg::CheckedOut { .. }));

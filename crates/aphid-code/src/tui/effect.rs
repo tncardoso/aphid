@@ -43,8 +43,18 @@ pub enum Effect {
         node: Option<String>,
         how: crate::session::Move,
     },
-    /// Name the branch the session is on.
-    Rename(String),
+    /// Name a branch: the one that holds the turn `at`, or the one the
+    /// session is on.
+    Rename {
+        at: Option<String>,
+        text: String,
+    },
+    /// Start a branch at the `prompt`-th prompt of the conversation shown, to
+    /// edit it, or `after` the answer to it.
+    ForkAt {
+        prompt: usize,
+        after: bool,
+    },
     /// Run a `!` command in the workspace root.
     Bang(String),
     /// Ask the file index for the paths that match `query`.
