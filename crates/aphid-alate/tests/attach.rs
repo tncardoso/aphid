@@ -489,3 +489,103 @@ fn no_frame_a_terminal_is_sent_is_dropped_in_silence() {
         );
     }
 }
+
+/// A tree the daemon could have answered `/tree` with: one session, one turn.
+fn tree_frame() -> Frame {
+    use aphid_alate::gateway::wire::TreeInfo;
+    use aphid_code::session::{TreeView, Turn};
+
+    Frame::Tree {
+        sessions: vec![TreeInfo {
+            id: "s1".to_owned(),
+            live: true,
+            view: TreeView {
+                session: "file".to_owned(),
+                title: "hello".to_owned(),
+                started: chrono::Utc::now(),
+                head: Some("a1".to_owned()),
+                turns: vec![Turn {
+                    id: "q1".to_owned(),
+                    parent: None,
+                    prompt: "hello".to_owned(),
+                    reply: "hi".to_owned(),
+                    tool_calls: 0,
+                    end: Some("a1".to_owned()),
+                    label: None,
+                    ts: chrono::Utc::now(),
+                    on_head: true,
+                    is_head: true,
+                    running: false,
+                }],
+            },
+        }],
+    }
+}
+
+#[test]
+fn the_tree_forks_into_a_new_session_and_the_terminal_follows() {
+    let mut app = attached();
+
+    assert_eq!(type_line(&mut app, "/tree"), [sent(Request::Tree)]);
+    app.update(wire(None, tree_frame()));
+    assert_eq!(
+        press(&mut app, KeyCode::Char('f')),
+        [sent(Request::Fork {
+            id: "s1:a1".to_owned()
+        })]
+    );
+
+    // The replay that follows is the new session's, and the terminal moves.
+    app.update(wire(
+        Some("s1:a1"),
+        Frame::HistoryStart {
+            id: "s1:a1".to_owned(),
+        },
+    ));
+    app.update(wire(
+        Some("s1:a1"),
+        Frame::Prompt {
+            text: "hello".to_owned(),
+        },
+    ));
+    assert!(
+        shown(&app, "s1:a1")
+            .iter()
+            .any(|line| line.contains("hello"))
+    );
+    assert_eq!(
+        type_line(&mut app, "next"),
+        [sent(Request::Prompt {
+            text: "next".to_owned()
+        })]
+    );
+}
+
+#[test]
+fn a_fork_at_a_prompt_puts_it_back_in_the_box() {
+    let mut app = attached();
+    app.update(wire(
+        Some("s2"),
+        Frame::Prefill {
+            text: "edit me".to_owned(),
+        },
+    ));
+    assert_eq!(
+        press(&mut app, KeyCode::Enter),
+        [sent(Request::Prompt {
+            text: "edit me".to_owned()
+        })]
+    );
+}
+
+#[test]
+fn rename_takes_an_address_and_a_name() {
+    let mut app = attached();
+    assert_eq!(
+        type_line(&mut app, "/rename s1:q1 the plan"),
+        [sent(Request::Rename {
+            id: "s1:q1".to_owned(),
+            text: "the plan".to_owned()
+        })]
+    );
+}

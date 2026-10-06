@@ -480,6 +480,11 @@ fn an_address_splits_into_session_and_message() {
     assert_eq!(session::split_address("abc:12ef"), ("abc", Some("12ef")));
     assert_eq!(session::split_address("abc"), ("abc", None));
     assert_eq!(session::split_address("abc:"), ("abc", None));
+    assert_eq!(
+        session::split_address("abc:12ef:99aa"),
+        ("abc:12ef", Some("99aa")),
+        "a fork's id keeps its own address"
+    );
 }
 
 /// An agent with a system prompt and a session that writes for it, flushed by

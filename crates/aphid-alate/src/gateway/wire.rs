@@ -57,9 +57,22 @@ pub enum Request {
     },
     /// Watch this session instead. It is replayed from the beginning, whether
     /// it is running or long finished on disk, and then followed live.
+    ///
+    /// `<session>:<message>` watches one branch of a stored session: the
+    /// newest one under that message.
     Watch { id: String },
     /// What sessions are there. Answered to this connection alone.
     Sessions,
+    /// The sessions and the branches of each, for a tree. Answered with
+    /// [`Frame::Tree`], to this connection alone.
+    Tree,
+    /// Start a branch at `<session>:<message>`, in a new session that this
+    /// connection then watches. At a prompt, the branch starts before it and
+    /// the prompt comes back in [`Frame::Prefill`] to be edited; at an answer
+    /// that ends its turn, the branch starts after it.
+    Fork { id: String },
+    /// Name the branch that holds `<session>:<message>`.
+    Rename { id: String, text: String },
     /// Open another session on this connection.
     New,
 }
@@ -118,6 +131,17 @@ impl From<Risk> for PermissionRisk {
             Risk::Destructive => PermissionRisk::Destructive,
         }
     }
+}
+
+/// One session, as a tree draws it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TreeInfo {
+    /// What [`Request::Watch`] takes to show it.
+    pub id: String,
+    /// Open now, as opposed to read off the disk.
+    #[serde(default)]
+    pub live: bool,
+    pub view: aphid_code::session::TreeView,
 }
 
 /// One frame, and which conversation it belongs to.
@@ -205,6 +229,14 @@ pub enum Frame {
     /// The replay is done. What comes next is live.
     HistoryEnd {
         id: String,
+    },
+    /// The sessions and their branches. An answer to [`Request::Tree`].
+    Tree {
+        sessions: Vec<TreeInfo>,
+    },
+    /// Text to put in the input box: the prompt a fork at a prompt gave back.
+    Prefill {
+        text: String,
     },
     TurnStarted,
     Text {
@@ -315,6 +347,8 @@ impl Frame {
                 | Frame::Sessions { .. }
                 | Frame::HistoryStart { .. }
                 | Frame::HistoryEnd { .. }
+                | Frame::Tree { .. }
+                | Frame::Prefill { .. }
         )
     }
 }

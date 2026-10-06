@@ -26,6 +26,7 @@ use aphid_code::tui::runtime::{
 };
 use aphid_code::tui::scrollback::{Scrollback, Viewport};
 use aphid_code::tui::status::Status;
+use aphid_code::tui::tree::{SessionTree, TreeAction, TreeSession};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout};
@@ -48,6 +49,9 @@ const PAGE_LINES: usize = 10;
 const HELP: &str = "\
 /sessions      pick a conversation, with a filter you type
 /session <id>  look at one of them
+/tree          the conversations and their branches (also Ctrl-O)
+/fork <id>:<message>  continue a branch from that message, in a new session
+/rename <id>:<message> <name>  name the branch that holds that message
 /new           start another conversation here
 /log           show or hide notices, heartbeats and jobs
 /clear         clear this screen, not the alate's memory
@@ -100,6 +104,13 @@ pub struct App {
     /// said there was, so a list that changes under the cursor is a `set_rows`
     /// and not a reopen.
     picker: Option<Picker>,
+    /// The session tree on screen, while one is.
+    tree: Option<SessionTree>,
+    /// `/tree` asked, and the tree opens when the daemon answers.
+    tree_wanted: bool,
+    /// A fork was asked for: the next replay is of the new session, and the
+    /// terminal moves to it.
+    forking: bool,
     /// The confirmation on screen, and the channel the modal answers into. The
     /// modal type wants a sender, so it gets a local one and the answer is
     /// carried to the daemon from the other end.
@@ -201,6 +212,9 @@ impl App {
             instance: instance.to_owned(),
             modal: None,
             picker: None,
+            tree: None,
+            tree_wanted: false,
+            forking: false,
             show_log: true,
             quit: false,
         }
@@ -356,6 +370,9 @@ impl Draw for App {
         if let Some(picker) = &self.picker {
             picker.render(frame, frame.area());
         }
+        if let Some(tree) = &self.tree {
+            tree.render(frame, frame.area());
+        }
         // Last, so it is on top: the permission question is the daemon's, and
         // it is the one thing here that something else is waiting on.
         if let Some(modal) = &self.modal {
@@ -402,6 +419,13 @@ impl App {
                 );
                 self.scrollback().push_notice(greeting);
             }
+            Wire::HistoryStart { id } if self.forking => {
+                // The new session a fork opened: this terminal goes with it.
+                self.forking = false;
+                self.current.clone_from(&id);
+                self.view_of(&id).clear();
+                self.filling = Some(id);
+            }
             Wire::HistoryStart { id } => {
                 // Whatever was drawn for this session is stale; the replay that
                 // follows is the whole of it.
@@ -409,6 +433,26 @@ impl App {
                 self.filling = Some(id);
             }
             Wire::HistoryEnd { .. } => self.filling = None,
+            Wire::Tree { sessions } => {
+                let sessions: Vec<TreeSession> = sessions
+                    .into_iter()
+                    .map(|info| TreeSession {
+                        path: info.id.into(),
+                        view: info.view,
+                        open: false,
+                    })
+                    .collect();
+                if let Some(tree) = &mut self.tree {
+                    tree.update(sessions);
+                } else if self.tree_wanted {
+                    let current = std::path::PathBuf::from(&self.current);
+                    let mut tree = SessionTree::new(sessions, Some(&current));
+                    tree.running = self.status.running;
+                    self.tree = Some(tree);
+                }
+                self.tree_wanted = false;
+            }
+            Wire::Prefill { text } => self.input.set_text(&text),
             Wire::Sessions { live, stored } => {
                 let current = self.current.clone();
                 let rows: Vec<Row> = live
@@ -447,6 +491,9 @@ impl App {
                 // A list on screen must not go stale while it is being read.
                 // The daemon says when one opens, so the refresh needs no timer
                 // of the kind the coding terminal's process list has.
+                if self.tree.is_some() {
+                    return ask(Request::Tree);
+                }
                 let refresh = self.picker.is_some();
                 if self.show_log && info.id != self.current {
                     self.scrollback()
@@ -467,6 +514,9 @@ impl App {
                     .push_notice(format!("── woke at {at} ──\n{note}"));
             }
             Wire::SessionClosed { id } => {
+                if self.tree.is_some() {
+                    return ask(Request::Tree);
+                }
                 let refresh = self.picker.is_some();
                 if id == self.current {
                     self.scrollback().push_notice("── this session ended ──");
@@ -491,6 +541,7 @@ impl App {
                 // with the answer, so nothing local has to remember it. It
                 // takes the screen from a list that is only being browsed.
                 self.picker = None;
+                self.tree = None;
                 self.modal = Some(Modal::Confirm(Confirm {
                     id,
                     tool,
@@ -592,13 +643,17 @@ impl App {
         if self.picker.is_some() {
             return self.key_in_picker(key);
         }
+        if self.tree.is_some() {
+            return self.key_in_tree(key);
+        }
 
         match self.input.handle(key) {
             Action::None => Cmd::none(),
             // The alate's files are on the machine the daemon runs on, and
             // this terminal cannot see them. The `@` has already been typed
             // into the box, which is all it means here.
-            Action::OpenFiles | Action::OpenSessions => Cmd::none(),
+            Action::OpenFiles => Cmd::none(),
+            Action::OpenSessions => self.open_tree(),
             Action::Quit => {
                 self.quit = true;
                 Cmd::one(Effect::Quit)
@@ -687,6 +742,47 @@ impl App {
         Cmd::none()
     }
 
+    /// Ask for the tree; it opens when the daemon answers.
+    fn open_tree(&mut self) -> Cmd<Effect> {
+        self.tree_wanted = true;
+        ask(Request::Tree)
+    }
+
+    /// Handle a keypress the session tree is claiming: all of them.
+    fn key_in_tree(&mut self, key: KeyEvent) -> Cmd<Effect> {
+        let Some(tree) = &mut self.tree else {
+            return Cmd::none();
+        };
+        let action = tree.handle(key);
+        if !matches!(action, TreeAction::None) {
+            self.tree = None;
+        }
+        let address = |path: &std::path::Path, node: &str| format!("{}:{node}", path.display());
+        match action {
+            TreeAction::None | TreeAction::Close => Cmd::none(),
+            TreeAction::Open { path } => self.watch(&path.display().to_string()),
+            // A look at that branch. Continuing it is a fork.
+            TreeAction::Jump { path, node } => self.watch(&address(&path, &node)),
+            TreeAction::Fork { path, node } => self.fork(&address(&path, &node)),
+            TreeAction::Rename { path, node } => {
+                let target = match node {
+                    Some(node) => address(&path, &node),
+                    None => path.display().to_string(),
+                };
+                self.input.set_text(&format!("/rename {target} "));
+                Cmd::none()
+            }
+        }
+    }
+
+    /// Continue a branch in a new session, and move to it when it opens.
+    fn fork(&mut self, address: &str) -> Cmd<Effect> {
+        self.forking = true;
+        ask(Request::Fork {
+            id: address.to_owned(),
+        })
+    }
+
     /// Look at one session, whether it was typed or picked off the list.
     fn watch(&mut self, id: &str) -> Cmd<Effect> {
         // The daemon resolves a shortened id, because it is the one
@@ -723,6 +819,20 @@ impl App {
                 ask(Request::Sessions)
             }
             "new" => ask(Request::New),
+            "tree" => self.open_tree(),
+            "fork" if rest.trim().is_empty() => self.open_tree(),
+            "fork" => self.fork(rest.trim()),
+            "rename" => match rest.trim().split_once(' ') {
+                Some((address, text)) if !text.trim().is_empty() => ask(Request::Rename {
+                    id: address.to_owned(),
+                    text: text.trim().to_owned(),
+                }),
+                _ => {
+                    self.scrollback()
+                        .push_notice("usage: /rename <id>:<message> <name>; /tree finds them");
+                    Cmd::none()
+                }
+            },
             "session" => {
                 let id = rest.trim();
                 if id.is_empty() {

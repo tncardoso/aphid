@@ -210,7 +210,7 @@ impl Input {
     ///
     /// What a message refused at the last moment goes back through: the box is
     /// cleared before the line is handed over, so nothing else can put it back.
-    pub(crate) fn set_text(&mut self, text: &str) {
+    pub fn set_text(&mut self, text: &str) {
         self.textarea.clear();
         self.textarea.insert_str(text);
     }

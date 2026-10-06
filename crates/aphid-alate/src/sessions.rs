@@ -147,6 +147,33 @@ impl Session {
         self.plugin.path()
     }
 
+    /// The message this session's next one hangs from: where its branch of
+    /// the file ends.
+    #[must_use]
+    pub fn tip(&self) -> Option<String> {
+        self.plugin
+            .with_store(|store| store.tip().map(ToOwned::to_owned))
+            .ok()
+            .flatten()
+    }
+
+    /// Move this session within its file, while it is idle.
+    ///
+    /// # Errors
+    ///
+    /// Fails while a run is in flight, and as [`session::checkout`] does.
+    pub fn checkout(
+        &mut self,
+        node: &str,
+        how: session::Move,
+    ) -> Result<session::Checkout, String> {
+        let agent = self
+            .agent
+            .as_mut()
+            .ok_or("a run is going: wait for it to end, or cancel it")?;
+        session::checkout(&self.plugin, agent, node, how)
+    }
+
     /// Ask the run in flight to stop at its next checkpoint.
     pub fn cancel(&self) {
         self.handle.cancel();
@@ -394,6 +421,25 @@ impl Blueprint {
     ///
     /// Fails when the session file cannot be opened.
     pub fn open(&self, kind: Kind) -> Result<Session, String> {
+        self.open_at(kind, None)
+    }
+
+    /// Open a session of this kind that continues a stored one, at the message
+    /// `resume` names, under the id `id`.
+    ///
+    /// The file is the stored session's own. A fork of a conversation that is
+    /// still open is a second writer of the same file, which is safe: each
+    /// writes whole lines at the end, and each message names its parent.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the session file cannot be opened or the message is not in
+    /// it.
+    pub fn open_at(
+        &self,
+        kind: Kind,
+        resume: Option<(&session::Resume, &str)>,
+    ) -> Result<Session, String> {
         let mut options = HarnessOptions::new(self.workspace.clone(), self.model.clone());
         options.system = Some(crate::prompts::SYSTEM.to_owned());
         options.cwd = self.workspace.root().to_path_buf();
@@ -411,12 +457,12 @@ impl Blueprint {
         // before any of them can send a frame.
         let directory = &self.sessions_dir;
         let model_id = options.model.id.to_string();
-        let (plugin, _resumed) = session::attach(
+        let (plugin, resumed) = session::attach(
             directory,
             self.workspace.root(),
             &options.cwd,
             Some(&model_id),
-            None,
+            resume.map(|(resume, _)| resume),
             Arc::clone(&options.composition.transcript),
         )
         .map_err(|error| {
@@ -425,7 +471,10 @@ impl Blueprint {
                 directory.display()
             )
         })?;
-        let id = plugin.id().ok_or("the new session has no id")?;
+        let id = match resume {
+            Some((_, id)) => id.to_owned(),
+            None => plugin.id().ok_or("the new session has no id")?,
+        };
 
         // The scope every announcement from this session is stamped with, so
         // its gateway, its transcript and its memory notes reach its own
@@ -546,7 +595,10 @@ impl Blueprint {
             .composition
             .mount(plugin.clone(), serde_json::Value::Null)?;
 
-        let harness = harness::build(options);
+        let mut harness = harness::build(options);
+        if let Some(restored) = &resumed {
+            session::splice(&mut harness.agent, restored, Some(&plugin));
+        }
         Ok(Session {
             id,
             kind,

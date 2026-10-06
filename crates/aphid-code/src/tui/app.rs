@@ -829,7 +829,7 @@ impl App {
                     TreeAction::Open { path } => self.checkout(path, None, Move::Jump),
                     TreeAction::Jump { path, node } => self.checkout(path, Some(node), Move::Jump),
                     TreeAction::Fork { path, node } => self.checkout(path, Some(node), Move::Fork),
-                    TreeAction::Rename { path } => {
+                    TreeAction::Rename { path, .. } => {
                         let current = self.session.as_ref().and_then(|session| session.path());
                         if current.as_deref() != Some(path.as_path()) {
                             return self.notice("open that session first, then name its branch");

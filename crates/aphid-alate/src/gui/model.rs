@@ -18,7 +18,7 @@ use std::collections::HashMap;
 
 use aphid_core::{Json, Usage};
 
-use crate::gateway::wire::{Answer, Envelope, Frame, Request, Risk};
+use crate::gateway::wire::{Answer, Envelope, Frame, Request, Risk, TreeInfo};
 use crate::sessions::Info;
 
 /// How far a tool call has got.
@@ -298,6 +298,13 @@ pub struct Model {
     pub status: Status,
     pub confirm: Option<Confirm>,
     pub sessions: Sessions,
+    /// The sessions and their branches, as the daemon last drew them.
+    pub trees: Vec<TreeInfo>,
+    /// A fork was asked for: the next replay is the new session's, and the
+    /// window moves to it.
+    forking: bool,
+    /// A prompt a fork gave back, for the text box. The window takes it.
+    pub prefill: Option<String>,
     /// The alate this window is watching.
     pub instance: String,
     pub link: Link,
@@ -318,6 +325,9 @@ impl Model {
             status: Status::default(),
             confirm: None,
             sessions: Sessions::default(),
+            trees: Vec::new(),
+            forking: false,
+            prefill: None,
             instance: instance.to_owned(),
             link: Link::Connecting,
             show_log: true,
@@ -399,6 +409,20 @@ impl Model {
         match name {
             "sessions" => vec![Request::Sessions],
             "new" => vec![Request::New],
+            "tree" => vec![Request::Tree],
+            "fork" if !rest.trim().is_empty() => self.fork(rest.trim()),
+            "rename" => match rest.trim().split_once(' ') {
+                Some((address, text)) if !text.trim().is_empty() => vec![Request::Rename {
+                    id: address.to_owned(),
+                    text: text.trim().to_owned(),
+                }],
+                _ => {
+                    self.view().push(Entry::Notice(
+                        "usage: /rename <id>:<message> <name>".to_owned(),
+                    ));
+                    Vec::new()
+                }
+            },
             "session" => {
                 let id = rest.trim();
                 if id.is_empty() {
@@ -429,6 +453,31 @@ impl Model {
                 Vec::new()
             }
         }
+    }
+
+    /// Continue the branch at `<session>:<message>` in a new session, and
+    /// move to it when its replay arrives.
+    #[must_use]
+    pub fn fork(&mut self, address: &str) -> Vec<Request> {
+        self.forking = true;
+        vec![Request::Fork {
+            id: address.to_owned(),
+        }]
+    }
+
+    /// The tree of the conversation on screen. A branch watched by its
+    /// address, `<session>:<message>`, is drawn with its session's tree.
+    #[must_use]
+    pub fn tree(&self) -> Option<&TreeInfo> {
+        let find = |id: &str| {
+            self.trees
+                .iter()
+                .find(|info| info.id == id || info.view.session == id)
+        };
+        find(&self.current).or_else(|| {
+            let (session, node) = aphid_code::session::split_address(&self.current);
+            node.and_then(|_| find(session))
+        })
     }
 
     /// Watch this conversation instead.
@@ -483,6 +532,13 @@ impl Model {
                 }
                 self.panes.entry(self.current.clone()).or_default();
             }
+            Frame::HistoryStart { id } if self.forking => {
+                // The session a fork opened: the window goes with it.
+                self.forking = false;
+                self.current.clone_from(&id);
+                self.view_of(&id).clear();
+                self.filling = Some(id);
+            }
             Frame::HistoryStart { id } => {
                 // Whatever was drawn for this conversation is stale; what
                 // follows is the whole of it.
@@ -491,6 +547,8 @@ impl Model {
             }
             Frame::HistoryEnd { .. } => self.filling = None,
             Frame::Sessions { live, stored } => self.sessions = Sessions { live, stored },
+            Frame::Tree { sessions } => self.trees = sessions,
+            Frame::Prefill { text } => self.prefill = Some(text),
             Frame::SessionOpened { info } => {
                 if self.show_log && info.id != self.current {
                     let text = format!("{} started: {}", info.kind, info.id);
@@ -909,5 +967,57 @@ mod tests {
             stored: Vec::new(),
         }));
         assert_eq!(model.sessions.live, vec![info]);
+    }
+
+    fn tree_info(id: &str, session: &str) -> TreeInfo {
+        TreeInfo {
+            id: id.to_owned(),
+            live: true,
+            view: aphid_code::session::TreeView {
+                session: session.to_owned(),
+                title: "t".to_owned(),
+                started: chrono::Utc::now(),
+                head: None,
+                turns: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn the_tree_on_screen_follows_the_conversation_and_its_branches() {
+        let mut model = model();
+        model.arrived(Envelope::daemon(Frame::Tree {
+            sessions: vec![tree_info("s1", "file1"), tree_info("other", "file2")],
+        }));
+        assert_eq!(model.tree().map(|info| info.id.as_str()), Some("s1"));
+
+        // A branch watched by its address is drawn with its session's tree.
+        let _ = model.watch("file2:abcd");
+        assert_eq!(model.tree().map(|info| info.id.as_str()), Some("other"));
+    }
+
+    #[test]
+    fn a_fork_moves_the_window_to_the_session_it_opened() {
+        let mut model = model();
+        assert_eq!(
+            model.fork("s1:abcd"),
+            vec![Request::Fork {
+                id: "s1:abcd".to_owned()
+            }]
+        );
+        model.arrived(Envelope::from(
+            "s1:abcd",
+            Frame::HistoryStart {
+                id: "s1:abcd".to_owned(),
+            },
+        ));
+        assert_eq!(model.current(), "s1:abcd");
+        model.arrived(Envelope::from(
+            "s1:abcd",
+            Frame::Prefill {
+                text: "again".to_owned(),
+            },
+        ));
+        assert_eq!(model.prefill.as_deref(), Some("again"));
     }
 }

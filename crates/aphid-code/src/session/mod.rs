@@ -17,8 +17,8 @@ pub mod tree;
 pub use format::{AssistantRecord, Block, Header, Line, Record, ToolResultRecord};
 pub use plugin::SessionComponent;
 pub use store::{
-    Contents, SessionStore, Summary, list, list_for, newest_for, read, resolve, sessions_dir,
-    split_address,
+    Contents, SessionStore, Summary, append_label, list, list_for, newest_for, read, resolve,
+    sessions_dir, split_address,
 };
 pub use tree::{Tree, TreeView, Turn};
 

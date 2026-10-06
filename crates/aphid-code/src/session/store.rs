@@ -236,11 +236,7 @@ impl SessionStore {
     ///
     /// Fails on a write error.
     pub fn label(&mut self, node: &str, text: &str) -> std::io::Result<()> {
-        self.write(&Line::Label(LabelRecord {
-            node: node.to_owned(),
-            text: text.to_owned(),
-            ts: chrono::Utc::now(),
-        }))
+        self.write(&label_line(node, text))
     }
 
     /// Everything in the file now, including what other writers appended.
@@ -274,6 +270,27 @@ impl SessionStore {
         self.file.write_all(text.as_bytes())?;
         self.file.flush()
     }
+}
+
+fn label_line(node: &str, text: &str) -> Line {
+    Line::Label(LabelRecord {
+        node: node.to_owned(),
+        text: text.to_owned(),
+        ts: chrono::Utc::now(),
+    })
+}
+
+/// Name the branch that starts at `node`, in a session file nobody here is
+/// writing. One line, appended in one write, as [`SessionStore`] writes.
+///
+/// # Errors
+///
+/// Fails when the file cannot be opened or written.
+pub fn append_label(path: &Path, node: &str, text: &str) -> std::io::Result<()> {
+    let mut line = serde_json::to_string(&label_line(node, text))?;
+    line.push('\n');
+    let mut file = OpenOptions::new().append(true).open(path)?;
+    file.write_all(line.as_bytes())
 }
 
 /// What a session file says about itself, without replaying it.
@@ -341,11 +358,12 @@ pub fn resolve(dir: &Path, id: &str) -> Option<Summary> {
         .cloned()
 }
 
-/// Take `<session>:<node>` apart. A session id has no `:`, so a bare id comes
-/// back with no node.
+/// Take `<session>:<node>` apart, at the last `:`. A message id has no `:`,
+/// so a bare id comes back with no node, and an alate's id for a fork, which
+/// is itself an address, keeps its own `:`.
 #[must_use]
 pub fn split_address(address: &str) -> (&str, Option<&str>) {
-    match address.split_once(':') {
+    match address.rsplit_once(':') {
         Some((session, node)) if !node.is_empty() => (session, Some(node)),
         Some((session, _)) => (session, None),
         None => (address, None),

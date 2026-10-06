@@ -1209,3 +1209,168 @@ async fn a_job_is_written_with_the_conversation_that_asked_for_it() {
 
     daemon.abort();
 }
+
+/// The tree the daemon reports for `id`.
+async fn tree_of(client: &mut Client, id: &str) -> aphid_code::session::TreeView {
+    client.send(&Request::Tree).await.expect("send");
+    let Frame::Tree { sessions } = until(client, |envelope| {
+        matches!(envelope.frame, Frame::Tree { .. })
+    })
+    .await
+    .frame
+    else {
+        unreachable!("matched above")
+    };
+    sessions
+        .into_iter()
+        .find(|info| info.id == id)
+        .unwrap_or_else(|| panic!("{id} is not in the tree"))
+        .view
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fork_opens_a_second_session_on_the_same_file() {
+    let temp = Temp::new("daemon");
+    let config = quiet();
+    let home = home(&temp, &config);
+    let socket = home.socket();
+
+    let (stream_fn, _script) = scripted([Turn::text("one"), Turn::text("two")]);
+    let daemon = tokio::spawn(daemon::run(Options {
+        home,
+        config,
+        model: Some(dummy_model()),
+        stream_fn: Some(stream_fn),
+        sessions_dir: temp.path("sessions"),
+    }));
+
+    let mut client = attach(&socket).await;
+    let first = greeting(&mut client).await;
+    client
+        .send(&Request::Prompt {
+            text: "first".to_owned(),
+        })
+        .await
+        .expect("send");
+    until(&mut client, |envelope| {
+        matches!(envelope.frame, Frame::RunEnded { .. })
+    })
+    .await;
+
+    let view = tree_of(&mut client, &first).await;
+    assert_eq!(view.turns.len(), 1);
+    let turn = view.turns[0].clone();
+    let end = turn.end.clone().expect("the turn has an answer");
+
+    // After the answer: a new session, with the conversation so far.
+    client
+        .send(&Request::Fork {
+            id: format!("{first}:{end}"),
+        })
+        .await
+        .expect("send");
+    let started = until(&mut client, |envelope| {
+        matches!(envelope.frame, Frame::HistoryStart { .. })
+    })
+    .await;
+    let Frame::HistoryStart { id: fork } = started.frame else {
+        unreachable!("matched above")
+    };
+    assert_ne!(fork, first);
+    until(
+        &mut client,
+        |envelope| matches!(&envelope.frame, Frame::Text { text } if text == "one"),
+    )
+    .await;
+    until(&mut client, |envelope| {
+        matches!(envelope.frame, Frame::HistoryEnd { .. })
+    })
+    .await;
+
+    // What is said there goes into the fork, after the answer it forked at.
+    client
+        .send(&Request::Prompt {
+            text: "second".to_owned(),
+        })
+        .await
+        .expect("send");
+    let reply = until(&mut client, |envelope| {
+        matches!(envelope.frame, Frame::Text { .. })
+    })
+    .await;
+    assert_eq!(reply.session.as_deref(), Some(fork.as_str()));
+    until(&mut client, |envelope| {
+        matches!(envelope.frame, Frame::RunEnded { .. })
+    })
+    .await;
+
+    let view = tree_of(&mut client, &fork).await;
+    assert_eq!(view.turns.len(), 2, "one file, both turns");
+    let head = view.turns.iter().find(|turn| turn.is_head).expect("a head");
+    assert_eq!(head.prompt, "second");
+    assert_eq!(head.parent.as_deref(), Some(turn.id.as_str()));
+
+    // At the prompt: the prompt comes back to be edited.
+    client
+        .send(&Request::Fork {
+            id: format!("{first}:{}", turn.id),
+        })
+        .await
+        .expect("send");
+    let prefill = until(&mut client, |envelope| {
+        matches!(envelope.frame, Frame::Prefill { .. })
+    })
+    .await;
+    assert!(matches!(&prefill.frame, Frame::Prefill { text } if text == "first"));
+
+    // A name for the branch, and a watch of the first branch by its message.
+    client
+        .send(&Request::Rename {
+            id: format!("{fork}:{}", head.id),
+            text: "the other way".to_owned(),
+        })
+        .await
+        .expect("send");
+    until(
+        &mut client,
+        |envelope| matches!(&envelope.frame, Frame::Notice { text } if text.contains("the other way")),
+    )
+    .await;
+    // Nothing branched off yet, so the branch that holds it starts at the
+    // first prompt, and its name is the session's.
+    let view = tree_of(&mut client, &fork).await;
+    assert_eq!(view.title, "the other way");
+
+    daemon.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fork_needs_a_message() {
+    let temp = Temp::new("daemon");
+    let config = quiet();
+    let home = home(&temp, &config);
+    let socket = home.socket();
+
+    let (stream_fn, _script) = scripted([]);
+    let daemon = tokio::spawn(daemon::run(Options {
+        home,
+        config,
+        model: Some(dummy_model()),
+        stream_fn: Some(stream_fn),
+        sessions_dir: temp.path("sessions"),
+    }));
+
+    let mut client = attach(&socket).await;
+    let session = greeting(&mut client).await;
+    client
+        .send(&Request::Fork { id: session })
+        .await
+        .expect("send");
+    until(
+        &mut client,
+        |envelope| matches!(&envelope.frame, Frame::Notice { text } if text.contains("name a message")),
+    )
+    .await;
+
+    daemon.abort();
+}

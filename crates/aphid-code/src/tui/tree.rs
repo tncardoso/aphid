@@ -49,9 +49,11 @@ pub enum TreeAction {
         path: PathBuf,
         node: String,
     },
-    /// Name the branch the session is on.
+    /// Name a branch: the one that holds the turn `node`, when the cursor is
+    /// on one.
     Rename {
         path: PathBuf,
+        node: Option<String>,
     },
 }
 
@@ -303,8 +305,15 @@ impl SessionTree {
             KeyCode::Char('r') => {
                 if let Some(row) = self.rows.get(self.selected) {
                     let (Kind::Session(session) | Kind::Turn(session, _)) = row.kind;
+                    let node = match row.kind {
+                        Kind::Turn(session, turn) => {
+                            Some(self.sessions[session].view.turns[turn].id.clone())
+                        }
+                        Kind::Session(_) => None,
+                    };
                     return TreeAction::Rename {
                         path: self.sessions[session].path.clone(),
+                        node,
                     };
                 }
             }
@@ -630,7 +639,10 @@ mod tests {
         );
         assert_eq!(
             tree.handle(key(KeyCode::Char('r'))),
-            TreeAction::Rename { path: "s".into() }
+            TreeAction::Rename {
+                path: "s".into(),
+                node: Some("b2".to_owned())
+            }
         );
         tree.handle(key(KeyCode::Down));
         assert_eq!(

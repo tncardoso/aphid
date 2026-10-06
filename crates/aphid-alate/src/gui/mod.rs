@@ -48,6 +48,7 @@ use crate::gateway::wire::{Answer, Envelope, Frame as Wire, Request, Risk};
 use crate::gateway::{Client, Reader, Writer};
 use crate::home::{DEFAULT_NAME, Home};
 
+use aphid_code::gui::tree_canvas::{TreeCanvas, TreeEvent};
 use balloon::Balloon;
 use config::{Config, Familiar, Mode};
 use control::{Command, Control, Reply};
@@ -136,6 +137,9 @@ struct AlateView {
     expanded: bool,
     /// Whether the session list is on top of the transcript.
     picking: bool,
+    /// Whether the session tree is on top of it, and the canvas it is drawn on.
+    branching: bool,
+    tree: Entity<TreeCanvas>,
     /// Whether the tray's menu is on top of it. There is nowhere else for it on
     /// a panel that draws no menus of its own.
     menu: bool,
@@ -218,6 +222,8 @@ impl AlateView {
                 .placeholder("Say something, or /sessions…")
         });
         let expanded = config.mode == Mode::Companion;
+        let tree = cx.new(|_| TreeCanvas::new());
+        cx.subscribe(&tree, Self::on_tree).detach();
         let (width, height) = render::size_of(config.familiar);
         let body = render::Body::start(config.familiar, width, height);
         // A desktop with no tray of either kind is worth saying once, in the
@@ -246,6 +252,8 @@ impl AlateView {
             config_path,
             expanded,
             picking: false,
+            branching: false,
+            tree,
             menu: false,
             down: None,
             watching,
@@ -357,7 +365,25 @@ impl AlateView {
             Msg::Wire(envelope) => {
                 self.mood.arrived(&envelope.frame, self.age());
                 self.speak(&envelope.frame);
+                // What changes the tree on screen asks for it again; the tree
+                // itself is drawn when it comes.
+                let stale = matches!(
+                    envelope.frame,
+                    Wire::SessionOpened { .. }
+                        | Wire::SessionClosed { .. }
+                        | Wire::TurnStarted
+                        | Wire::TurnEnded { .. }
+                        | Wire::RunEnded { .. }
+                        | Wire::HistoryEnd { .. }
+                );
+                let tree = matches!(envelope.frame, Wire::Tree { .. });
                 self.model.arrived(*envelope);
+                if self.branching && stale {
+                    self.ask(vec![Request::Tree]);
+                }
+                if tree || stale {
+                    self.draw_tree(cx);
+                }
             }
             Msg::Down(reason) => {
                 self.outbox = None;
@@ -692,6 +718,50 @@ impl AlateView {
         cx.notify();
     }
 
+    /// Draw the tree of the conversation on screen on the canvas.
+    fn draw_tree(&mut self, cx: &mut Context<Self>) {
+        let running = self.model.status.running;
+        let view = self.model.tree().map(|info| info.view.clone());
+        self.tree
+            .update(cx, |tree, cx| tree.set_view(view, running, cx));
+    }
+
+    fn toggle_tree(&mut self, cx: &mut Context<Self>) {
+        self.branching = !self.branching;
+        if self.branching {
+            self.picking = false;
+            self.expanded = true;
+            self.ask(vec![Request::Tree]);
+            self.draw_tree(cx);
+        }
+        cx.notify();
+    }
+
+    /// What the canvas asked for. A jump watches that branch; a fork continues
+    /// it in a new session.
+    fn on_tree(&mut self, _: Entity<TreeCanvas>, event: &TreeEvent, cx: &mut Context<Self>) {
+        let Some(id) = self.model.tree().map(|info| info.id.clone()) else {
+            return;
+        };
+        match event {
+            TreeEvent::Selected(_) => return,
+            TreeEvent::Jump(node) => {
+                let requests = self.model.watch(&format!("{id}:{node}"));
+                self.ask(requests);
+            }
+            TreeEvent::Fork(node) => {
+                let requests = self.model.fork(&format!("{id}:{node}"));
+                self.ask(requests);
+            }
+            TreeEvent::Rename(node) => {
+                self.model.prefill = Some(format!("/rename {id}:{node} "));
+            }
+        }
+        self.branching = false;
+        self.sync_entries();
+        cx.notify();
+    }
+
     fn watch(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         let requests = self.model.watch(&id);
         self.ask(requests);
@@ -792,6 +862,13 @@ impl AlateView {
                             .text_color(rgb(MUTED))
                             .child(format!("{state}{tokens}")),
                     ),
+            )
+            .child(
+                Button::new("branches")
+                    .ghost()
+                    .label("⑂")
+                    .tooltip("Branches")
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_tree(cx))),
             )
             .child(
                 Button::new("sessions")
@@ -1448,8 +1525,23 @@ impl Render for AlateView {
             );
         }
 
+        if let Some(prefill) = self.model.prefill.take() {
+            self.composer
+                .update(cx, |state, cx| state.set_value(prefill, window, cx));
+        }
         if self.picking {
             content = content.child(self.render_sessions(cx));
+        }
+        if self.branching {
+            content = content.child(
+                div()
+                    .absolute()
+                    .top(px(56.))
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .child(self.tree.clone()),
+            );
         }
         if self.menu {
             content = content.child(self.render_menu(cx));

@@ -423,6 +423,209 @@ impl Alate {
         }
     }
 
+    /// Where the session `id` is written, and the message its replay ends at.
+    ///
+    /// An open session replays its own branch, which ends where it will write
+    /// next: its file can hold branches that other sessions write. A stored
+    /// one replays its head, or with `<session>:<message>`, the newest branch
+    /// under that message. Says why to `connection` when there is no such
+    /// session or message.
+    fn locate(&self, connection: u64, id: &str) -> Option<(PathBuf, Option<String>)> {
+        if let Some(session) = self.sessions.get(id) {
+            return session.path().map(|path| (path, session.tip()));
+        }
+        let say = |text: String| {
+            self.server
+                .reply(connection, Envelope::daemon(Frame::Notice { text }));
+        };
+        // `<session>:<message>`, where the session is open or stored.
+        let (source, node) = match aphid_code::session::split_address(id) {
+            (source, Some(node)) if self.file_of(source).is_some() => (source, Some(node)),
+            _ => (id, None),
+        };
+        let Some(path) = self.file_of(source) else {
+            say(format!("there is no session {id}"));
+            return None;
+        };
+        let at = match node {
+            Some(node) => {
+                let leaf = aphid_code::session::read(&path).ok().and_then(|contents| {
+                    let node = contents.resolve(node)?;
+                    contents.newest_leaf_under(&node)
+                });
+                if leaf.is_none() {
+                    say(format!("there is no message {node} in {source}"));
+                    return None;
+                }
+                leaf
+            }
+            None => None,
+        };
+        Some((path, at))
+    }
+
+    /// The file of the session `<session>` in an address, open or stored.
+    fn file_of(&self, session: &str) -> Option<PathBuf> {
+        self.sessions
+            .get(session)
+            .and_then(crate::sessions::Session::path)
+            .or_else(|| {
+                aphid_code::session::resolve(&self.sessions_dir, session).map(|found| found.path)
+            })
+    }
+
+    /// Every open session and the newest stored ones, with their branches.
+    fn tree(&self, connection: u64) {
+        let mut sessions = Vec::new();
+        for info in self.sessions.list() {
+            let Some(session) = self.sessions.get(&info.id) else {
+                continue;
+            };
+            let Some(mut tree) = session
+                .path()
+                .and_then(|path| aphid_code::session::Tree::read(&path).ok())
+            else {
+                continue;
+            };
+            // Its own branch, not the file's last writer's.
+            tree.head = session.tip();
+            let mut view = tree.view();
+            if info.running
+                && let Some(turn) = view.turns.iter_mut().find(|turn| turn.is_head)
+            {
+                turn.running = true;
+            }
+            sessions.push(crate::gateway::wire::TreeInfo {
+                id: info.id,
+                live: true,
+                view,
+            });
+        }
+        for summary in aphid_code::session::list_for(&self.sessions_dir, self.workspace.root())
+            .into_iter()
+            .filter(|summary| !self.sessions.contains(&summary.header.id))
+            .take(crate::sessions::RECENT)
+        {
+            if let Ok(tree) = aphid_code::session::Tree::read(&summary.path) {
+                sessions.push(crate::gateway::wire::TreeInfo {
+                    id: summary.header.id,
+                    live: false,
+                    view: tree.view(),
+                });
+            }
+        }
+        self.server
+            .reply(connection, Envelope::daemon(Frame::Tree { sessions }));
+    }
+
+    /// Start a branch at `<session>:<message>` in a new session, and point
+    /// `connection` at it.
+    fn fork(&mut self, connection: u64, address: &str) {
+        let say = |alate: &Self, text: String| {
+            alate
+                .server
+                .reply(connection, Envelope::daemon(Frame::Notice { text }));
+        };
+        let (source, Some(node)) = aphid_code::session::split_address(address) else {
+            say(
+                self,
+                "name a message to fork at: <session>:<message>".to_owned(),
+            );
+            return;
+        };
+        if self
+            .sessions
+            .get(source)
+            .is_some_and(|session| session.info().running)
+        {
+            say(
+                self,
+                format!("{source} is running: wait for it to end, or cancel it"),
+            );
+            return;
+        }
+        let Some(path) = self.file_of(source) else {
+            say(self, format!("there is no session {source}"));
+            return;
+        };
+        let Some((file, node)) = aphid_code::session::read(&path)
+            .ok()
+            .and_then(|contents| Some((contents.header.id.clone(), contents.resolve(node)?)))
+        else {
+            say(self, format!("there is no message {node} in {source}"));
+            return;
+        };
+
+        // The id names where the branch came from; a second fork at the same
+        // message gets a number.
+        let mut id = format!("{file}:{node}");
+        let mut count = 2;
+        while self.sessions.contains(&id) {
+            id = format!("{file}:{node}.{count}");
+            count += 1;
+        }
+        let kind = Kind::Attached {
+            connection,
+            channel: self.server.channel(connection),
+            attachments: self.server.attachment_sender(connection).is_some(),
+        };
+        let resume = aphid_code::session::Resume {
+            path,
+            at: Some(node.clone()),
+        };
+        let mut session = match self.blueprint.open_at(kind, Some((&resume, &id))) {
+            Ok(session) => session,
+            Err(error) => {
+                say(self, error);
+                return;
+            }
+        };
+        let prefill = match session.checkout(&node, aphid_code::session::Move::Fork) {
+            Ok(done) => done.prefill,
+            Err(error) => {
+                say(self, error);
+                return;
+            }
+        };
+        self.sessions.insert(session);
+        self.opened(&id);
+        self.watch(connection, &id);
+        if let Some(text) = prefill {
+            self.server
+                .reply(connection, Envelope::from(&id, Frame::Prefill { text }));
+        }
+    }
+
+    /// Name the branch that holds `<session>:<message>`.
+    fn rename(&self, connection: u64, address: &str, text: &str) {
+        let say = |text: String| {
+            self.server
+                .reply(connection, Envelope::daemon(Frame::Notice { text }));
+        };
+        let (source, Some(node)) = aphid_code::session::split_address(address) else {
+            say("name a message: <session>:<message>".to_owned());
+            return;
+        };
+        let Some(path) = self.file_of(source) else {
+            say(format!("there is no session {source}"));
+            return;
+        };
+        let start = aphid_code::session::Tree::read(&path)
+            .ok()
+            .and_then(|tree| {
+                let view = tree.view();
+                view.branch_start_of(node).map(|turn| turn.id.clone())
+            });
+        let Some(start) = start else {
+            say(format!("there is no prompt {node} in {source}"));
+            return;
+        };
+        match aphid_code::session::append_label(&path, &start, text) {
+            Ok(()) => say(format!("the branch is now “{text}”")),
+            Err(error) => say(format!("could not name the branch: {error}")),
+        }
+    }
+
     /// Put words into a session, and show everybody watching it what was said.
     fn enqueue(&mut self, id: &str, text: String) {
         let Some(session) = self.sessions.get_mut(id) else {
@@ -470,23 +673,7 @@ impl Alate {
     /// as a finished one's, so there is one way to draw a conversation and no
     /// second one to keep in step.
     fn watch(&self, connection: u64, id: &str) {
-        let path = match self
-            .sessions
-            .get(id)
-            .and_then(crate::sessions::Session::path)
-        {
-            Some(path) => Some(path),
-            None => {
-                aphid_code::session::resolve(&self.sessions_dir, id).map(|summary| summary.path)
-            }
-        };
-        let Some(path) = path else {
-            self.server.reply(
-                connection,
-                Envelope::daemon(Frame::Notice {
-                    text: format!("there is no session {id}"),
-                }),
-            );
+        let Some((path, at)) = self.locate(connection, id) else {
             return;
         };
 
@@ -496,7 +683,7 @@ impl Alate {
             Envelope::from(id, Frame::HistoryStart { id: id.to_owned() }),
         );
 
-        match aphid_code::session::load(&path) {
+        match aphid_code::session::load_at(&path, at.as_deref()) {
             Ok((_header, transcript)) => {
                 for frame in replay(&transcript) {
                     self.server.reply(connection, Envelope::from(id, frame));
@@ -639,6 +826,9 @@ fn handle(alate: &mut Alate, event: Event) {
                 }
             }
             Request::Watch { id } => alate.watch(connection, &id),
+            Request::Tree => alate.tree(connection),
+            Request::Fork { id } => alate.fork(connection, &id),
+            Request::Rename { id, text } => alate.rename(connection, &id, &text),
             Request::Sessions => {
                 let live = alate.sessions.list();
                 let stored = stored(&alate.workspace, &alate.sessions_dir, &alate.sessions);
