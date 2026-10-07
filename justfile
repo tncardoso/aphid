@@ -1,3 +1,12 @@
+# Format, lint and test before a commit.
+#
+# Four jobs and not one per CPU: gpui and gpui-component take some GB of
+# memory each to check, and sixteen compilers at once can fill the RAM.
+pre-commit:
+    cargo fmt
+    cargo clippy -j 4
+    cargo test -j 4
+
 # Build vhs gifs for the landing page
 gifs: gif-aphid gif-alate gif-colony
 
