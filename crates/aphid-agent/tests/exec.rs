@@ -364,9 +364,7 @@ async fn a_backgrounded_command_that_keeps_the_pipes_does_not_hold_the_run() {
     let pid: u32 = collected
         .on(Stream::Stdout)
         .lines()
-        .next()
-        .expect("a pid")
-        .parse()
+        .find_map(|line| line.parse().ok())
         .expect("a pid");
     assert!(collected.on(Stream::Stdout).contains("done"));
     assert!(collected.on(Stream::Stderr).contains("[aphid]"));
@@ -387,7 +385,8 @@ async fn settles(processes: &Registry, done: impl Fn(&Status) -> bool) -> Status
 
 #[tokio::test]
 async fn a_background_process_keeps_running_and_writing_after_the_run() {
-    // Closing the pipes would kill it with SIGPIPE on its next tick.
+    // Closing the pipes would kill it with SIGPIPE on its next tick. The
+    // first tick can come before the pid, because the child can run first.
     let processes = Arc::new(Registry::new());
     let collected = Collected::default();
     let status = exec::run(
@@ -406,9 +405,7 @@ async fn a_background_process_keeps_running_and_writing_after_the_run() {
     let pid: u32 = collected
         .on(Stream::Stdout)
         .lines()
-        .next()
-        .expect("a pid")
-        .parse()
+        .find_map(|line| line.parse().ok())
         .expect("a pid");
 
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -437,9 +434,7 @@ async fn killing_a_detached_process_stops_its_group() {
     let pid: u32 = collected
         .on(Stream::Stdout)
         .lines()
-        .next()
-        .expect("a pid")
-        .parse()
+        .find_map(|line| line.parse().ok())
         .expect("a pid");
 
     let id = processes.snapshot()[0].id;
@@ -487,9 +482,7 @@ async fn cancelling_while_the_pipes_drain_stops_the_run() {
     let pid: u32 = collected
         .on(Stream::Stdout)
         .lines()
-        .next()
-        .expect("a pid")
-        .parse()
+        .find_map(|line| line.parse().ok())
         .expect("a pid");
     tokio::time::sleep(Duration::from_millis(100)).await;
     if alive(pid).await {
