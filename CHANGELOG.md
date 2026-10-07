@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **A plugin gets one call at a time.** A tool, a listener and a tick of the
+  same plugin could run at the same time, and a change one of them made to the
+  memory of the plugin could be lost. Now a call waits until the call before it
+  ends.
+
 ## [0.4.0] - 2026-10-06
 
 ### Fixed

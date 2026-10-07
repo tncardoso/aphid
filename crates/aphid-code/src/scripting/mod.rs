@@ -70,6 +70,7 @@ mod cx;
 mod discover;
 mod entries;
 mod facade;
+mod gate;
 mod host;
 pub mod hub;
 mod script;

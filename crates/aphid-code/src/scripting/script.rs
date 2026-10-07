@@ -16,6 +16,7 @@ use aphid_agent::Sink;
 use super::caps::Capabilities;
 use super::command::{Action, CommandSpec};
 use super::discover::PluginFile;
+use super::gate::Gate;
 use super::store::Store;
 use super::worker::Worker;
 
@@ -58,6 +59,8 @@ pub struct ScriptPlugin {
     self_ref: Arc<Mutex<Option<Arc<ScriptPlugin>>>>,
     sink: Arc<dyn Sink>,
     store: Arc<Store>,
+    /// Every call into the plugin goes through here. See [`Gate`].
+    gate: Gate,
 }
 
 impl ScriptPlugin {
@@ -118,6 +121,7 @@ impl ScriptPlugin {
             self_ref,
             sink: Arc::clone(sink),
             store,
+            gate: Gate::default(),
         })
     }
 
@@ -196,6 +200,7 @@ impl ScriptPlugin {
         if !self.defines("apply") {
             return Ok(());
         }
+        let _pass = self.gate.enter();
         self.wiring.begin(ctx, composition);
         let outcome = {
             let mut scope = match self.scope.lock() {
@@ -280,6 +285,7 @@ impl ScriptPlugin {
     ///
     /// Propagates whatever the script raised.
     pub fn call_fn(&self, body: &FnPtr, args: impl FuncArgs) -> Result<Dynamic, String> {
+        let _pass = self.gate.enter();
         body.call::<Dynamic>(&self.engine, &self.ast, args)
             .map_err(|error| error.to_string())
     }
@@ -335,6 +341,7 @@ impl ScriptPlugin {
             return None;
         }
 
+        let _pass = self.gate.enter();
         let mut scope = self.scope.lock().ok()?;
         match self
             .engine

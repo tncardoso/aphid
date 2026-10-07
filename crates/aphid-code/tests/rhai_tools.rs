@@ -381,3 +381,56 @@ fn apply(ctx) {
         "the command is known, it just produced nothing"
     );
 }
+
+/// A plugin keeps its memory in a map its closures capture. Two threads that
+/// change it at once must not lose an update, or race into a Rhai error.
+#[test]
+fn calls_from_two_threads_take_turns() {
+    let fixture = Fixture::new(
+        r#"const inject = ["commands"];
+
+fn apply(ctx) {
+    let mem = #{ n: 0 };
+    command(#{
+        name: "bump",
+        description: "Count one, slowly.",
+        run: |args| {
+            let n = mem.n;
+            let k = 0;
+            while k < 200 { k += 1; }
+            mem.bump(n);
+        }
+    });
+    command(#{
+        name: "count",
+        description: "Say the count.",
+        run: |args| notice("" + mem.n)
+    });
+}
+
+fn bump(n) { this.n = n + 1; }
+"#,
+    );
+    let loaded = Arc::new(fixture.host());
+
+    let threads: Vec<_> = (0..4)
+        .map(|_| {
+            let loaded = Arc::clone(&loaded);
+            std::thread::spawn(move || {
+                for _ in 0..25 {
+                    loaded.run_command("bump", "");
+                }
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().expect("no panic");
+    }
+
+    assert_eq!(
+        loaded.run_command("count", ""),
+        Some(vec![aphid_code::scripting::Action::Notice(
+            "100".to_owned()
+        )])
+    );
+}

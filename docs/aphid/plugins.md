@@ -154,10 +154,17 @@ headless mode.
 `code/notice` is not reentrant either, and for the same kind of reason: a
 listener that shows the user something would announce itself.
 
-Every call into a plugin — a listener, a tick, a command, a panel — runs on one
-thread, one at a time. So a change a tick makes to the state is what the next
-panel render reads, and two calls can never both read the state, change it, and
-write it back over each other.
+Calls into a plugin come from different threads. A listener of the agent runs
+on the thread of the agent, a tool on a thread of its own, and a tick, a command
+or a panel on the plugin thread. But aphid lets only one call into a plugin at a
+time. A call waits while another call into the same plugin runs. Thus a change
+that a tick makes is what the next panel render reads, and two calls can never
+both read the state, change it, and write it back over each other. This is also
+true for a map that the closures of `apply` capture.
+
+A call that waits for another call into the same plugin cannot continue until
+that call ends. Thus keep each call short. A call into a different plugin does
+not wait.
 
 ## What each listener is handed
 
@@ -468,9 +475,9 @@ the input box. Clicking a panel also focuses it. While a panel has focus, its
 `update` receives the keys, mouse messages and pastes. `F6`, `Esc` and `Ctrl-C`
 stay with the app and are not sent to a plugin.
 
-Render and event callbacks run on the same thread as every other script call,
-which is not the thread that draws the screen. Keep them short: a slow one
-delays the other plugins, but it does not hold the terminal.
+Render and event callbacks run on the plugin thread, which is not the thread
+that draws the screen. Keep them short: a slow one delays the other plugins, but
+it does not hold the terminal.
 
 ### Moving a surface written for the older shape
 
