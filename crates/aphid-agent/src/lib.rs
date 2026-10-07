@@ -112,6 +112,7 @@ mod events;
 pub mod exec;
 mod plugin;
 mod registry;
+mod request;
 pub mod rt;
 mod run;
 mod sink;
@@ -125,8 +126,9 @@ pub use agent::{
     create_agent,
 };
 pub use events::{
-    AGENT_EVENTS, Blocked, Edit, Message, Moment, Prompt, Run, RunEnd, RunStart, StreamListeners,
-    ToolArguments, ToolProgress, ToolRequest, ToolResult, TranscriptListeners, TurnEnd, TurnStart,
+    AGENT_EVENTS, Blocked, Edit, History, Hold, Message, Moment, Prompt, Request, RequestShape,
+    Run, RunEnd, RunStart, StreamListeners, ToolArguments, ToolProgress, ToolRequest, ToolResult,
+    TranscriptListeners, TurnEnd, TurnStart,
 };
 pub use plugin::{StreamCx, TurnSummary};
 pub use registry::Tools;

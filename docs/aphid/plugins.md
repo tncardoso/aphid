@@ -110,6 +110,7 @@ Subscribe with `on`. These come from the agent loop:
 | `agent/prompt` | Before aphid puts your prompt in the transcript |
 | `agent/run-start` | The run starts |
 | `agent/turn-start` | Before each request to the model |
+| `agent/request` | After `agent/turn-start`. Changes what the request sends |
 | `agent/event` | For each protocol event. This is the fast path |
 | `agent/message` | After the answer of the model is in the transcript |
 | `agent/tool-call` | A tool call is asked for, but did not run |
@@ -174,6 +175,7 @@ not wait.
   `details`
 - `agent/message`: `cx`, then `text`, `thinking`, `tool_calls`
 - `agent/event`: `kind`, `turn`, and then `index`, `block`, `text` or `stop`
+- `agent/request`: `cx`, then `turn`, `run_start`, `length`
 - `agent/turn-end`: `cx`, then `stop_reason`, `tool_calls`, `input`, `output`,
   `error`
 - `agent/run-end`: `cx`, then `stop`, `turns`, `input`, `output`, `error`
@@ -204,6 +206,7 @@ Return nothing to change nothing.
 | `#{ content: "…" }` | From `agent/tool-result`: use this result |
 | `#{ append: "…" }` | From `code/system-prompt`: add this to the prompt |
 | `#{ replace: "…" }` | From `code/system-prompt`: use this prompt |
+| `#{ history: …, system: …, … }` | From `agent/request`: send a different request. Refer to [The request](#the-request) |
 | `"allow"`, `"deny"` | From `code/permission` |
 
 `code/permission` also accepts `"allow_always"` and `"ask"`. Use `"ask"` when
@@ -233,11 +236,72 @@ fn apply(ctx) {
 | `cx.note(text)` | Adds a system message at the end of the transcript |
 | `cx.push_user(text)` | Adds a user message at the end of the transcript |
 | `cx.cancel()` | Stops the run at the next safe point |
+| `cx.cancelled` | `true` if something stopped the run |
+| `cx.hold()` | From `agent/request`: keeps the request back. Refer to [The request](#the-request) |
 | `cx.model` | The identifier of the model |
 | `cx.turn` | The number of the turn, from zero |
 | `cx.input_tokens`, `cx.output_tokens` | The tokens of the run until now |
 
 The transcript only grows. A listener adds to it, and cannot rewrite it.
+
+## The request
+
+`agent/request` changes what one request sends to the model. It does not change
+the transcript. The transcript, and the session file, keep all the messages.
+`/tree` and `--resume` thus show the conversation as the user had it.
+
+Aphid announces `agent/request` before each request, after `agent/turn-start`.
+The listener gets `cx` and a map with `turn`, `run_start` and `length`.
+`run_start` is the position of the prompt of this run in the transcript.
+`length` is the number of messages in the transcript.
+
+The listener returns a map. Each field is optional:
+
+| Field | Result |
+| --- | --- |
+| `history` | `"run"` sends only the messages of this run. `"all"` sends all the messages. The default is `"all"` |
+| `system` | Sends this text as the system prompt. The text replaces the full prompt of aphid |
+| `prefix` | An array of `#{ role, text }`. Aphid sends these messages after the system prompt. `role` is `"system"` or `"user"` |
+| `prompt_prefix` | Aphid puts this text before the first user message, in the same message, with an empty line between |
+| `exclude_tools` | An array of tool names. Aphid does not offer these tools in this request |
+
+When more than one listener returns a map, a field from a later listener
+replaces the same field from an earlier one. `prefix` and `exclude_tools` add to
+what is there.
+
+```rhai
+fn apply(ctx) {
+    on("agent/request", |cx, request| {
+        #{ history: "run", prompt_prefix: "Today is a Tuesday." }
+    });
+}
+```
+
+### Hold a request
+
+`cx.hold()` keeps the request back. It returns a handle. Keep the handle, and
+call `release()` on it when the request can go. Aphid then announces
+`agent/request` again, and the listener can shape the request from what it
+waited for. A tick, a command, or the reply of a model can release the handle.
+
+```rhai
+fn apply(ctx) {
+    let mem = #{ ready: false, hold: () };
+    on("agent/request", |cx, request| {
+        if !mem.ready { mem.hold = cx.hold(); return; }
+        #{ prompt_prefix: "ready" }
+    });
+    on("code/tick", || {
+        mem.ready = true;
+        if type_of(mem.hold) == "Hold" { mem.hold.release(); }
+    });
+}
+```
+
+While the request waits, the listener does not run and nothing is blocked. The
+user can push `Esc`. The run then stops and aphid sends nothing. Do not keep a
+request back without a plan to release it: aphid waits until the release or
+`Esc`.
 
 ## Capabilities
 

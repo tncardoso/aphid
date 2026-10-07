@@ -9,7 +9,7 @@
 //! returns — so `cx.note(…)` works whatever Rhai does with the value on the
 //! way in, and works from wherever the listener happens to run.
 
-use aphid_agent::Run;
+use aphid_agent::{Hold, Run};
 use rhai::Engine;
 
 /// The run, as a script sees it.
@@ -36,6 +36,14 @@ impl ScriptCx {
 
     pub(crate) fn cancel(&mut self) {
         self.run.cancel();
+    }
+
+    pub(crate) fn cancelled(&mut self) -> bool {
+        self.run.is_cancelled()
+    }
+
+    pub(crate) fn hold(&mut self) -> Hold {
+        self.run.hold()
     }
 
     pub(crate) fn model(&mut self) -> String {
@@ -66,12 +74,23 @@ pub(crate) fn register(engine: &mut Engine) {
         .register_fn("note", ScriptCx::note)
         .register_fn("push_user", ScriptCx::push_user)
         .register_fn("cancel", ScriptCx::cancel)
+        .register_fn("hold", ScriptCx::hold)
+        .register_get("cancelled", ScriptCx::cancelled)
         .register_get("model", ScriptCx::model)
         .register_get("turn", ScriptCx::turn)
         .register_get("input_tokens", ScriptCx::input_tokens)
         .register_get("output_tokens", ScriptCx::output_tokens)
         .register_fn("to_string", |cx: &mut ScriptCx| format!("{cx:?}"))
         .register_fn("to_debug", |cx: &mut ScriptCx| format!("{cx:?}"));
+
+    // What `cx.hold()` hands back. Keep it, from a closure or a model reply,
+    // and release it when the request may go.
+    engine
+        .register_type_with_name::<Hold>("Hold")
+        .register_fn("release", |hold: &mut Hold| hold.release())
+        .register_get("released", |hold: &mut Hold| hold.is_released())
+        .register_fn("to_string", |hold: &mut Hold| format!("{hold:?}"))
+        .register_fn("to_debug", |hold: &mut Hold| format!("{hold:?}"));
 }
 
 impl std::fmt::Debug for ScriptCx {

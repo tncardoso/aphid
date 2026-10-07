@@ -49,6 +49,7 @@ pub struct Run {
     /// Tokens and cost accumulated so far.
     pub usage: Usage,
     edits: Arc<Mutex<Vec<Edit>>>,
+    holds: Arc<Mutex<Vec<Hold>>>,
     cancel: Arc<AtomicBool>,
 }
 
@@ -59,6 +60,7 @@ impl Run {
             turn,
             usage,
             edits: Arc::default(),
+            holds: Arc::default(),
             cancel,
         }
     }
@@ -76,6 +78,35 @@ impl Run {
     /// Ask the run to stop at the next checkpoint.
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether something asked the run to stop.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// Keep the next request from going out until the returned handle is
+    /// released.
+    ///
+    /// Honoured only by [`Request`]: the loop waits, then announces the request
+    /// again, so the listener that held it can shape it from what it waited
+    /// for. Any other announcement ignores a hold. A cancel ends the wait, and
+    /// the run, with nothing sent.
+    #[must_use]
+    pub fn hold(&self) -> Hold {
+        let hold = Hold::default();
+        if let Ok(mut holds) = self.holds.lock() {
+            holds.push(hold.clone());
+        }
+        hold
+    }
+
+    pub(crate) fn take_holds(&self) -> Vec<Hold> {
+        self.holds
+            .lock()
+            .map(|mut holds| std::mem::take(&mut *holds))
+            .unwrap_or_default()
     }
 
     fn record(&self, edit: Edit) {
@@ -156,6 +187,125 @@ impl Event for TurnStart {
     const NAME: &'static str = "agent/turn-start";
 }
 impl Emitted for TurnStart {}
+
+/// A request is about to go to the model, and this is what it will carry.
+///
+/// Changes the request and not the transcript: the transcript, and the session
+/// file written from it, keep every message whatever a listener does here. Use
+/// it to send the model a different view of the conversation than the one the
+/// user sees.
+///
+/// Announced on every turn, after [`TurnStart`]. Listeners run in order and
+/// change the same [`RequestShape`]. A listener that calls [`Run::hold`] keeps
+/// the request back until the hold is released, and is then asked again.
+#[derive(Debug)]
+pub struct Request {
+    pub run: Run,
+    /// Where the messages of this run begin in the transcript: the prompt that
+    /// started it, or the end of the transcript for a resumed run.
+    pub run_start: usize,
+    /// How many messages the transcript holds.
+    pub length: usize,
+    pub shape: RequestShape,
+}
+impl Event for Request {
+    const NAME: &'static str = "agent/request";
+}
+impl Emitted for Request {}
+
+/// Which messages of the transcript a request carries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum History {
+    /// Every message.
+    #[default]
+    All,
+    /// The messages of the current run only. The model sees no earlier run.
+    Run,
+}
+
+/// What one request carries, as [`Request`] listeners leave it.
+///
+/// The default sends the transcript as it is.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RequestShape {
+    pub history: History,
+    /// The system prompt to send in place of the transcript's own.
+    pub system: Option<String>,
+    /// Messages to send after the system prompt and before the history. Only
+    /// [`Role::System`](aphid_core::Role::System) and
+    /// [`Role::User`](aphid_core::Role::User) are sent; other roles are sent
+    /// as user messages.
+    pub prefix: Vec<(aphid_core::Role, String)>,
+    /// Text to put in front of the first user message of the history, in the
+    /// same message, with a blank line between.
+    pub prompt_prefix: Option<String>,
+    /// Tools to leave out of this request.
+    pub exclude_tools: Vec<String>,
+}
+
+impl RequestShape {
+    /// Whether this sends the transcript and the tools as they are.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == RequestShape::default()
+    }
+}
+
+/// A request held back by a listener. See [`Run::hold`].
+///
+/// Clone it freely and release it from any thread; releasing twice is the same
+/// as releasing once.
+#[derive(Clone, Default)]
+pub struct Hold {
+    inner: Arc<HoldInner>,
+}
+
+#[derive(Default)]
+struct HoldInner {
+    released: AtomicBool,
+    wake: tokio::sync::Notify,
+}
+
+impl Hold {
+    /// Let the request go.
+    pub fn release(&self) {
+        self.inner.released.store(true, Ordering::Release);
+        self.inner.wake.notify_one();
+    }
+
+    /// Whether [`Hold::release`] was called.
+    #[must_use]
+    pub fn is_released(&self) -> bool {
+        self.inner.released.load(Ordering::Acquire)
+    }
+
+    /// Wait for the release, or for `cancel`. `false` means it was cancelled.
+    ///
+    /// The cancel flag is a plain atomic with nobody to wake a waiter, so it is
+    /// read on a short interval.
+    pub(crate) async fn wait(&self, cancel: &AtomicBool) -> bool {
+        loop {
+            if self.is_released() {
+                return true;
+            }
+            if cancel.load(Ordering::Relaxed) {
+                return false;
+            }
+            tokio::select! {
+                () = self.inner.wake.notified() => {}
+                () = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for Hold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Hold")
+            .field("released", &self.is_released())
+            .finish()
+    }
+}
 
 /// An assistant message has been committed, before its tool calls are read.
 #[derive(Debug)]
@@ -327,6 +477,7 @@ pub const AGENT_EVENTS: &[&str] = &[
     Prompt::NAME,
     RunStart::NAME,
     TurnStart::NAME,
+    Request::NAME,
     Message::NAME,
     TurnEnd::NAME,
     RunEnd::NAME,

@@ -885,3 +885,181 @@ async fn a_transcript_listener_sees_every_committed_response() {
 
     assert_eq!(seen.lock().expect("lock").len(), 2, "one per turn");
 }
+
+/// The messages of one encoded request, as `(role, content)`.
+fn sent(body: &str) -> Vec<(String, String)> {
+    let body: serde_json::Value = serde_json::from_str(body).expect("a JSON body");
+    body["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .map(|message| {
+            (
+                message["role"].as_str().unwrap_or_default().to_owned(),
+                match &message["content"] {
+                    serde_json::Value::String(text) => text.clone(),
+                    other => other.to_string(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn pair(role: &str, content: &str) -> (String, String) {
+    (role.to_owned(), content.to_owned())
+}
+
+#[tokio::test]
+async fn a_request_can_carry_only_the_current_run() {
+    let (backend, script) = scripted([Turn::text("one"), Turn::text("two")]);
+
+    let (composition, owner) = composed().await;
+    composition
+        .bus
+        .on::<aphid_agent::Request>(owner, |request| {
+            request.shape.history = aphid_agent::History::Run;
+            request.shape.system = Some("fresh system".to_owned());
+            request.shape.prompt_prefix = Some("<chat>view</chat>".to_owned());
+        });
+
+    let mut agent = Agent::builder()
+        .model(model())
+        .system("base prompt")
+        .compose(&composition)
+        .stream_fn(backend)
+        .build();
+
+    agent.prompt("first").await;
+    agent.prompt("second").await;
+
+    assert_eq!(
+        sent(&script.requests()[1]),
+        vec![
+            pair("system", "fresh system"),
+            pair("user", "<chat>view</chat>\n\nsecond"),
+        ]
+    );
+    // The transcript keeps both runs, so the session file does too.
+    assert_eq!(agent.transcript().len(), 5);
+}
+
+#[tokio::test]
+async fn a_request_shape_holds_for_every_turn_of_the_run() {
+    let (backend, script) = scripted([
+        Turn::call("call_1", "echo", r#"{"value":"pong"}"#),
+        Turn::text("done"),
+    ]);
+
+    let (composition, owner) = composed().await;
+    composition
+        .bus
+        .on::<aphid_agent::Request>(owner, |request| {
+            request.shape.history = aphid_agent::History::Run;
+            request.shape.prompt_prefix = Some("P".to_owned());
+        });
+
+    let mut agent = Agent::builder()
+        .model(model())
+        .system("base")
+        .tool(echo("echo"))
+        .compose(&composition)
+        .stream_fn(backend)
+        .build();
+
+    agent.prompt("go").await;
+
+    let second = sent(&script.requests()[1]);
+    assert_eq!(second[0], pair("system", "base"));
+    assert_eq!(second[1], pair("user", "P\n\ngo"));
+    assert_eq!(second.len(), 4, "system, prompt, call, result: {second:?}");
+}
+
+#[tokio::test]
+async fn a_request_can_leave_tools_out() {
+    let (backend, script) = scripted([Turn::text("done")]);
+
+    let (composition, owner) = composed().await;
+    composition
+        .bus
+        .on::<aphid_agent::Request>(owner, |request| {
+            request.shape.exclude_tools.push("hidden".to_owned());
+        });
+
+    let mut agent = Agent::builder()
+        .model(model())
+        .tool(echo("shown"))
+        .tool(echo("hidden"))
+        .compose(&composition)
+        .stream_fn(backend)
+        .build();
+
+    agent.prompt("go").await;
+
+    let body = &script.requests()[0];
+    assert!(body.contains("shown"));
+    assert!(!body.contains("hidden"));
+}
+
+#[tokio::test]
+async fn a_held_request_waits_and_is_asked_again() {
+    let (backend, script) = scripted([Turn::text("done")]);
+
+    let (composition, owner) = composed().await;
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&asked);
+    composition
+        .bus
+        .on::<aphid_agent::Request>(owner, move |request| {
+            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                let hold = request.run.hold();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(100));
+                    hold.release();
+                });
+            } else {
+                request.shape.prompt_prefix = Some("ready".to_owned());
+            }
+        });
+
+    let mut agent = Agent::builder()
+        .model(model())
+        .compose(&composition)
+        .stream_fn(backend)
+        .build();
+
+    agent.prompt("go").await;
+
+    assert_eq!(asked.load(Ordering::SeqCst), 2);
+    assert_eq!(script.request_count(), 1);
+    assert!(script.requests()[0].contains("ready\\n\\ngo"));
+}
+
+#[tokio::test]
+async fn cancelling_a_held_request_sends_nothing() {
+    let (backend, script) = scripted([Turn::text("never")]);
+
+    let (composition, owner) = composed().await;
+    composition
+        .bus
+        .on::<aphid_agent::Request>(owner, |request| {
+            let _hold = request.run.hold();
+            let run = request.run.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                run.cancel();
+            });
+        });
+
+    let mut agent = Agent::builder()
+        .model(model())
+        .compose(&composition)
+        .stream_fn(backend)
+        .build();
+
+    let outcome = agent.prompt("go").await;
+
+    assert_eq!(outcome.stop, StopReason::Aborted);
+    assert_eq!(script.request_count(), 0);
+    // The prompt is kept: nothing answered it, but the user did ask.
+    assert_eq!(agent.transcript().len(), 1);
+}

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Plugins can change what a request sends.** The new `agent/request` event
+  lets a plugin send only the current run, replace the system prompt, put text
+  before the prompt, or leave tools out. The session keeps every message. With
+  `cx.hold()` a plugin can keep a request back until it is ready.
+
 ### Fixed
 
 - **A plugin gets one call at a time.** A tool, a listener and a tick of the

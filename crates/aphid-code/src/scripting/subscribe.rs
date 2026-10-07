@@ -24,8 +24,8 @@ use std::sync::Arc;
 
 use aphid_agent::rt::{Composition, Next, Uid};
 use aphid_agent::{
-    Blocked, Moment, Prompt, RunEnd, RunStart, ToolContent, ToolProgress, ToolRequest, ToolResult,
-    TurnEnd, TurnStart,
+    Blocked, History, Moment, Prompt, Request, RunEnd, RunStart, ToolContent, ToolProgress,
+    ToolRequest, ToolResult, TurnEnd, TurnStart,
 };
 use rhai::{Dynamic, FnPtr, Map};
 
@@ -47,6 +47,7 @@ pub(crate) const EVENTS: &[&str] = &[
     "agent/prompt",
     "agent/run-start",
     "agent/turn-start",
+    "agent/request",
     "agent/message",
     "agent/tool-call",
     "agent/tool-progress",
@@ -116,6 +117,9 @@ pub(crate) fn on(
         "agent/turn-start" => bus.on::<TurnStart>(owner, move |start| {
             let cx = ScriptCx::new(&start.0);
             deliver(&script, &body, (cx,));
+        }),
+        "agent/request" => bus.on::<Request>(owner, move |request| {
+            shape_request(&script, &body, request);
         }),
         "agent/tool-call" => bus.on::<ToolRequest>(owner, move |request| {
             tool_call(&script, &body, request);
@@ -286,6 +290,7 @@ pub(crate) fn unsubscribe(composition: &Composition, owner: Uid) {
     bus.unsubscribe::<Prompt>(owner);
     bus.unsubscribe::<RunStart>(owner);
     bus.unsubscribe::<TurnStart>(owner);
+    bus.unsubscribe::<Request>(owner);
     bus.unsubscribe::<ToolRequest>(owner);
     bus.unsubscribe::<ToolProgress>(owner);
     bus.unsubscribe::<ToolResult>(owner);
@@ -300,6 +305,83 @@ pub(crate) fn unsubscribe(composition: &Composition, owner: Uid) {
     bus.unsubscribe_waterfall::<SystemPrompt>(owner);
     composition.stream.unsubscribe(owner);
     composition.transcript.unsubscribe(owner);
+}
+
+/// Let one script shape the request about to go out.
+///
+/// The script returns a map of the fields it wants, and the fields it leaves
+/// out stay as the listeners before it left them. `prefix` adds to what is
+/// there rather than replacing it, because two plugins that each add context
+/// both mean it. Failure is open: a listener that raised changes nothing.
+fn shape_request(plugin: &ScriptPlugin, body: &FnPtr, request: &mut Request) {
+    let mut payload = Map::new();
+    payload.insert("turn".into(), i64::from(request.run.turn).into());
+    payload.insert(
+        "run_start".into(),
+        i64::try_from(request.run_start).unwrap_or(i64::MAX).into(),
+    );
+    payload.insert(
+        "length".into(),
+        i64::try_from(request.length).unwrap_or(i64::MAX).into(),
+    );
+    let cx = ScriptCx::new(&request.run);
+
+    let Some(returned) = deliver(plugin, body, (cx, payload)) else {
+        return;
+    };
+    let Some(patch) = as_map(&returned) else {
+        return;
+    };
+    let shape = &mut request.shape;
+
+    if let Some(history) = patch.get("history").filter(|value| value.is_string()) {
+        match history.to_string().as_str() {
+            "run" => shape.history = History::Run,
+            "all" => shape.history = History::All,
+            other => plugin.report(&format!(
+                "agent/request: `history` is \"run\" or \"all\", not {other:?}"
+            )),
+        }
+    }
+    let text = |key: &str| {
+        patch
+            .get(key)
+            .filter(|value| value.is_string())
+            .map(ToString::to_string)
+    };
+    if let Some(system) = text("system") {
+        shape.system = Some(system);
+    }
+    if let Some(prefix) = text("prompt_prefix") {
+        shape.prompt_prefix = Some(prefix);
+    }
+    if let Some(items) = patch
+        .get("prefix")
+        .and_then(|value| value.read_lock::<rhai::Array>())
+    {
+        for item in items.iter() {
+            let Some(item) = item.read_lock::<Map>() else {
+                continue;
+            };
+            let text = item
+                .get("text")
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let role = match item.get("role").map(ToString::to_string).as_deref() {
+                Some("system") => aphid_core::Role::System,
+                _ => aphid_core::Role::User,
+            };
+            shape.prefix.push((role, text));
+        }
+    }
+    if let Some(names) = patch
+        .get("exclude_tools")
+        .and_then(|value| value.read_lock::<rhai::Array>())
+    {
+        shape
+            .exclude_tools
+            .extend(names.iter().map(ToString::to_string));
+    }
 }
 
 fn prompt(plugin: &ScriptPlugin, body: &FnPtr, prompt: &mut Prompt) {

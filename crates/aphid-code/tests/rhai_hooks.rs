@@ -616,3 +616,64 @@ async fn compose(host: std::sync::Arc<aphid_code::scripting::PluginHost>) -> Com
         .expect("the script host has no dependencies and no schema");
     composition
 }
+
+#[tokio::test]
+async fn a_script_shapes_the_request_and_holds_it_until_ready() {
+    let fixture = Fixture::new(
+        "shaper",
+        r#"
+        fn apply(ctx) {
+            let mem = #{ ready: false, hold: (), asked: 0 };
+            on("agent/request", |cx, request| {
+                mem.asked += 1;
+                if !mem.ready {
+                    mem.hold = cx.hold();
+                    return;
+                }
+                #{
+                    history: "run",
+                    system: "a fresh system",
+                    prompt_prefix: "<chat>" + mem.asked + "</chat>",
+                    exclude_tools: ["echo"],
+                }
+            });
+            on("code/tick", || {
+                mem.ready = true;
+                if type_of(mem.hold) == "Hold" { mem.hold.release(); }
+            });
+        }
+        "#,
+    );
+    let sink = Recorder::default();
+    let (backend, script) = scripted([Turn::text("one"), Turn::text("two")]);
+    let composition = compose(host(&fixture, &sink)).await;
+    let mut agent = Agent::builder()
+        .model(deepseek::flash())
+        .system("base")
+        .tool(echo_tool())
+        .compose(&composition)
+        .stream_fn(backend)
+        .build();
+
+    let bus = composition.bus.clone();
+    let ticker = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        bus.emit(&mut aphid_code::events::Tick);
+    });
+    agent.prompt("first").await;
+    ticker.join().expect("the tick ran");
+    agent.prompt("second").await;
+
+    assert!(sink.lines().is_empty(), "{:?}", sink.lines());
+    let body: serde_json::Value = serde_json::from_str(&script.requests()[1]).expect("a JSON body");
+    let messages = body["messages"].as_array().expect("messages");
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert_eq!(messages[0]["content"], "a fresh system");
+    assert_eq!(messages[1]["content"], "<chat>3</chat>\n\nsecond");
+    assert!(
+        body.get("tools")
+            .is_none_or(|tools| !tools.to_string().contains("echo"))
+    );
+    // Held once, asked again after the release, then once for the second prompt.
+    assert_eq!(script.request_count(), 2);
+}

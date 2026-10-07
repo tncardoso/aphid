@@ -148,6 +148,7 @@ You never call `teardown` yourself.
 | `agent/prompt` | `draft` | the text, or `reject("why")` |
 | `agent/run-start` | `cx` | notes on `cx` |
 | `agent/turn-start` | `cx` | notes on `cx` |
+| `agent/request` | `cx`, `request` | what the request sends, and `cx.hold()` |
 | `agent/message` | `cx`, `message` | notes on `cx` |
 | `agent/tool-call` | `tool` | `block("why")`, or `#{ arguments: … }` |
 | `agent/tool-progress` | `id`, `tool`, `chunk` | nothing |

@@ -24,8 +24,9 @@ use futures_core::Stream;
 use tokio::task::JoinSet;
 
 use crate::agent::{Agent, RunOutcome};
-use crate::events::{self, Blocked, Edit, Moment, Run};
+use crate::events::{self, Blocked, Edit, Moment, RequestShape, Run};
 use crate::plugin::{StreamCx, TurnSummary};
+use crate::request;
 use crate::rt::{Bus, Scope};
 use crate::tool::{Execution, ToolCall, ToolContent, ToolCx, ToolHandler, ToolOutcome};
 
@@ -37,8 +38,9 @@ impl Agent {
             Ok(text) => text,
             Err(reason) => return RunOutcome::rejected(reason),
         };
+        let start = self.transcript.len();
         self.transcript.push_user(&text);
-        self.run().await
+        self.run(start).await
     }
 
     /// Append a user message built from mixed content — text and images — and
@@ -61,13 +63,15 @@ impl Agent {
                         .filter(|part| !matches!(part, ContentInput::Text(_)))
                         .copied(),
                 );
+                let start = self.transcript.len();
                 self.transcript.push_user_parts(&replaced);
-                return self.run().await;
+                return self.run(start).await;
             }
         }
 
+        let start = self.transcript.len();
         self.transcript.push_user_parts(parts);
-        self.run().await
+        self.run(start).await
     }
 
     /// Show a prompt to the plugins before anything is appended.
@@ -108,7 +112,16 @@ impl Agent {
     /// Use this to resume a loaded session, or to continue after a run stopped
     /// early.
     pub async fn resume(&mut self) -> RunOutcome {
-        self.run().await
+        // The run being resumed began at the last prompt.
+        let start = (0..self.transcript.len())
+            .rev()
+            .find(|&index| {
+                self.transcript
+                    .get(index)
+                    .is_some_and(|message| message.role() == aphid_core::Role::User)
+            })
+            .unwrap_or(self.transcript.len());
+        self.run(start).await
     }
 
     /// Load anything mounted since the last time through.
@@ -122,7 +135,45 @@ impl Agent {
         }
     }
 
-    async fn run(&mut self) -> RunOutcome {
+    /// Announce the request about to go out, and wait while a listener holds
+    /// it.
+    ///
+    /// `None` means the run was cancelled before anything was sent.
+    async fn shape_request(
+        &mut self,
+        turn: u32,
+        usage: Usage,
+        start: usize,
+    ) -> Option<RequestShape> {
+        if !self.bus.has_listeners::<events::Request>() {
+            return Some(RequestShape::default());
+        }
+        loop {
+            let mut request = events::Request {
+                run: self.run_payload(turn, usage),
+                run_start: start,
+                length: self.transcript.len(),
+                shape: RequestShape::default(),
+            };
+            self.bus.emit_scoped(&self.scope, &mut request);
+            apply_edits(&mut self.transcript, &request.run);
+            if self.cancel.load(Ordering::Relaxed) {
+                return None;
+            }
+            let holds = request.run.take_holds();
+            if holds.is_empty() {
+                return Some(request.shape);
+            }
+            for hold in holds {
+                if !hold.wait(&self.cancel).await {
+                    return None;
+                }
+            }
+        }
+    }
+
+    /// `start` is where this run's messages begin in the transcript.
+    async fn run(&mut self, start: usize) -> RunOutcome {
         // Assembly code that could not await gets to be ordinary assembly
         // code: whatever it mounted is loaded by the time anything is
         // announced. `prompt` settles earlier still, because the prompt is
@@ -165,15 +216,29 @@ impl Agent {
                 apply_edits(&mut self.transcript, &start.0);
             }
 
+            let Some(shape) = self.shape_request(turn, outcome.usage, start).await else {
+                aborted = true;
+                break;
+            };
+
             // The stream borrows nothing once it resolves, so the immutable
             // borrows of the transcript and the tool table end here.
             let backend = self.stream_fn.clone();
             // Read afresh each turn rather than once at build, which is what
             // lets a component contribute or withdraw a tool mid-session.
             let declarations = self.tools.declarations_for(self.scope.as_deref());
-            let mut stream = backend
-                .stream(&self.model, &self.transcript, &declarations, &self.options)
-                .await;
+            let mut stream = if shape.is_default() {
+                backend
+                    .stream(&self.model, &self.transcript, &declarations, &self.options)
+                    .await
+            } else {
+                // Sent, then dropped: the stored transcript keeps every message.
+                let scratch = request::shaped(&self.transcript, start, &shape);
+                let declarations = request::tools(declarations, &shape);
+                backend
+                    .stream(&self.model, &scratch, &declarations, &self.options)
+                    .await
+            };
 
             // Taken once per stream, not once per token: the list cannot
             // change under a response, and the read costs nothing thereafter.
