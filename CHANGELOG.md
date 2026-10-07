@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-06
+
 ### Fixed
 
 - **The first prompt after `/clear` is kept.** `/clear` and `/new` now start a
