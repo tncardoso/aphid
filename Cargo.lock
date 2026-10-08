@@ -223,6 +223,7 @@ dependencies = [
  "chrono",
  "compact_str",
  "fff-search",
+ "futures-core",
  "gpui",
  "gpui-component",
  "ratatui",

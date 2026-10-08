@@ -59,6 +59,7 @@ impl PluginHost {
         let shared = Shared {
             worker: Arc::new(Worker::spawn(processes)),
             prompt: Arc::default(),
+            models: Arc::default(),
         };
         let mut plugins = Vec::new();
         let mut diagnostics = Vec::new();

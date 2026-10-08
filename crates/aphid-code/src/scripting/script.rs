@@ -93,6 +93,7 @@ impl ScriptPlugin {
         let wiring = super::wiring::Wiring::new();
         let self_ref: Arc<Mutex<Option<Arc<ScriptPlugin>>>> = Arc::default();
         super::wiring::register(&mut engine, &wiring, &self_ref);
+        super::models::register(&mut engine, caps.models.as_ref(), &shared.models, &self_ref);
         engine.register_type_with_name::<ScriptCtx>("Ctx");
 
         let ast = engine

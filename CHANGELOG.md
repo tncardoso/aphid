@@ -11,6 +11,9 @@
 - **Plugins can read the parts of the system prompt.** `system_prompt()`,
   `agents_md()`, `skills()` and `tool_list()` give a plugin what aphid made its
   prompt from, so a plugin that replaces the prompt can keep them.
+- **Plugins can call a model.** `model_ask` sends a request to a model of
+  `models.json` and gives the answer to a function of the plugin. Many requests
+  can run at the same time, and the agent does not wait for them.
 
 ### Fixed
 

@@ -364,6 +364,47 @@ command started in the background keeps the output. `exec` does not return the
 output of that process. To keep it, send it to a file:
 `exec("server > server.log 2>&1 &")`. `/ps` shows the process with `↻ bg`.
 
+## Models
+
+A plugin can send a request to a model of `~/.aphid/models.json`, without the
+agent and without the transcript. Use it for work in the background, for
+example to make a summary.
+
+| Function | Result |
+| --- | --- |
+| `model_ask(request, reply)` | Sends the request and returns its number at once. Aphid calls `reply` with the result when the model answers |
+| `model_busy()` | The number of requests of this plugin that did not get an answer yet |
+| `model_list()` | The models, as an array of `#{ id, name, provider, input_cost, output_cost, reasoning }` |
+
+The request is a map:
+
+| Field | Result |
+| --- | --- |
+| `model` | The model. Aphid finds it as `/model` does: the full id, the last part of the id, or the start of the id |
+| `system` | Optional. The system prompt |
+| `messages` | An array of `#{ role, text }`. `role` is `"user"` or `"assistant"` |
+| `thinking` | Optional. `"off"`, or a level such as `"low"` or `"medium"`. The default is `"off"` |
+| `max_tokens` | Optional. The most tokens of the answer |
+| `timeout_ms` | Optional. Aphid stops the request after this time. The default is 5 minutes |
+
+`reply` gets a map: `id`, `ok`, `text`, `error`, `stop`, `input`, `output`,
+`cache_read` and `cost`. `text` is the text of the answer, without the thinking.
+When `ok` is `false`, `error` tells why.
+
+```rhai
+model_ask(#{ model: "flash", messages: [#{ role: "user", text: "Say hi." }] }, |reply| {
+    if reply.ok { notify(reply.text); } else { notify("failed: " + reply.error); }
+});
+```
+
+Many requests can wait for an answer at the same time. A `reply` is a call into
+the plugin like a listener, so only one call into the plugin runs at a time.
+Aphid reads the key of the model from the variable that `api_key_env` names.
+The tokens of these requests are not in the cost of the session.
+
+`model_ask` raises an error at once when it does not know the model, or when the
+request is not correct. In an alate, `model_ask` is not available.
+
 ## Settings and memory
 
 `config()` returns the settings of the plugin. Write them here:

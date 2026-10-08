@@ -37,7 +37,8 @@ pub fn discover(workspace: &Workspace, home: Option<&Path>) -> (Vec<PluginFile>,
 /// load at all, not what a loaded one may do.
 #[must_use]
 pub fn capabilities(workspace: &Workspace) -> Capabilities {
-    let caps = Capabilities::full(workspace.root());
+    let mut caps = Capabilities::full(workspace.root());
+    caps.models = Some(Arc::new(crate::scripting::ModelAccess::live()));
     match crate::home_dir() {
         Some(home) => caps.with_home(&home),
         None => caps,

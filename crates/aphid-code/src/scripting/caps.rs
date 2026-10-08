@@ -22,6 +22,7 @@ use super::worker::{Job, Worker};
 pub(crate) struct Shared {
     pub worker: Arc<Worker>,
     pub prompt: Arc<PromptParts>,
+    pub models: Arc<super::models::Models>,
 }
 
 /// How long `exec` and `http` may take before they are given up on.
@@ -60,6 +61,8 @@ pub struct Capabilities {
     pub config_dirs: Vec<PathBuf>,
     /// Where `save_state` is persisted. `None` keeps state for the session only.
     pub state_dir: Option<PathBuf>,
+    /// The models `model_ask` may call. `None` makes it raise.
+    pub models: Option<Arc<super::models::ModelAccess>>,
 }
 
 impl Default for Capabilities {
@@ -74,6 +77,7 @@ impl Default for Capabilities {
             max_operations: DEFAULT_MAX_OPERATIONS,
             config_dirs: Vec::new(),
             state_dir: None,
+            models: None,
         }
     }
 }
