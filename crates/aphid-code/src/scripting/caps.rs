@@ -364,7 +364,9 @@ fn register_fs(engine: &mut Engine, caps: &Capabilities) {
     let locks = Arc::clone(&held);
     engine.register_fn("fs_lock", move |path: &str| {
         if !allowed {
-            return Err(fail("locking files is not available to this plugin".to_owned()));
+            return Err(fail(
+                "locking files is not available to this plugin".to_owned(),
+            ));
         }
         let path = resolve(root.as_deref(), free, path).map_err(fail)?;
         let mut locks = locks
@@ -433,10 +435,17 @@ fn register_env(engine: &mut Engine) {
         map.insert("unix_ms".into(), now.timestamp_millis().into());
         map.insert(
             "iso".into(),
-            now.to_rfc3339_opts(chrono::SecondsFormat::Secs, false).into(),
+            now.to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
+                .into(),
         );
         map.insert("day".into(), now.format("%Y-%m-%d").to_string().into());
         map
+    });
+    // Rhai's own `parse_json` raises a parse error, which `try` cannot catch,
+    // so a script reading a file a crash may have cut needs this one.
+    engine.register_fn("try_parse_json", |text: &str| {
+        serde_json::from_str::<serde_json::Value>(text)
+            .map_or(Dynamic::UNIT, |value| super::convert::to_dynamic(&value))
     });
     engine.register_fn("aphid_home", || {
         aphid_core::catalog::aphid_dir().map_or_else(String::new, |dir| dir.display().to_string())

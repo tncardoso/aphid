@@ -321,6 +321,7 @@ A Rhai script can only calculate. Aphid gives it these functions:
 | `fs_unlock(path)` | Releases a lock that `fs_lock` took |
 | `time_now()` | The time, as `#{ unix_ms, iso, day }`. `day` is the local date, such as `2026-10-07` |
 | `aphid_home()` | The directory of aphid, usually `~/.aphid` |
+| `try_parse_json(text)` | The value in a JSON text, or `()` if the text is not correct JSON |
 | `exec(command)` | Runs a shell command |
 | `http_get(url)` | Makes a GET request |
 | `http_post(url, body, headers)` | Makes a POST request |
@@ -348,6 +349,9 @@ A relative path in `fs_read` and the other file functions starts at the
 workspace. In a coding session the path can go out of the workspace, because the
 same plugin has `exec`, and a shell reads and writes anywhere. An embedder that
 makes its own capabilities keeps the file functions in the workspace.
+
+Use `try_parse_json` for a file that a crash can cut. The `parse_json` of Rhai
+raises an error that `try` cannot catch.
 
 `fs_append` and `fs_write` make the directories that are not there.
 `fs_append` writes the text with one write, then makes sure the disk has it. A
@@ -746,6 +750,7 @@ The `crates/aphid-code/examples/plugins` directory holds plugins that work:
 | `review.rhai` | Adds a `/review` command |
 | `panel.rhai` | Adds an interactive right-hand side panel |
 | `herdr.rhai` | Reports the session to [Herdr](#herdr), so its sidebar shows the pane as working, blocked or idle |
+| `optchat.rhai` | One chat that does not end, and that the agent remembers. Refer to [OptChat](#optchat) |
 
 ## Herdr
 
@@ -791,6 +796,70 @@ calls, not twenty.
 
 A report is display only. It does not make the pane an agent that other panes
 can prompt: `herdr agent prompt aphid` does not find it.
+
+## OptChat
+
+`crates/aphid-code/examples/plugins/optchat.rhai` makes one chat that does not
+end. The agent remembers all of it, and the size of what it reads stays the
+same. The design is [OptChat](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449),
+by Victor Taelin.
+
+- Aphid keeps each message — your prompts, the answers, the tool calls and
+  their results — in a log, and never changes it.
+- In the background, a cheap model writes a summary of one line for each
+  message. Then it merges two lines into one line, and two of those into one,
+  and so on. This makes a tree of summaries.
+- Each prompt starts the model with no history. The model gets a "view" of all
+  the chat: recent messages one line each, older messages more for each line.
+  Then it gets your prompt.
+- When a line does not tell enough, the model calls `zoom` to open the line
+  into the two lines below it, down to the full message. `date` gives the time
+  of a message.
+
+Copy the file to `~/.aphid/plugins/optchat.rhai`.
+
+| Command | Result |
+| --- | --- |
+| `/optchat on` | Starts a new session in OptChat mode |
+| `/optchat off` | Stops OptChat mode, and starts a new session |
+| `/optchat status` | Shows the size of the log, the tree and the view, and what the compactor used |
+| `/optchat browse` | Writes the view, the log and the tree to `browse.html`, and opens it |
+| `/optchat` | Turns the mode on, or off |
+
+The mode is only for the session that `/optchat on` started. `/new`,
+`/sessions` and `--resume` stop it. The session file keeps the messages of the
+session as usual. Only the request to the model is different.
+
+A prompt waits until each line of the view is a summary. This takes some
+seconds after a long answer. Push `Esc` to stop the wait: your prompt stays in
+the log without an answer.
+
+The chat is in `~/.aphid/optchat`: `main/` holds the log and `tree/` holds the
+summaries, one file for each day. `view.json` makes the start fast, and aphid
+can make it again. Only one aphid at a time can use the chat.
+
+Settings go in `optchat.json`, in `.aphid/plugins` or `~/.aphid/plugins`:
+
+| Setting | Default | Result |
+| --- | --- | --- |
+| `dir` | `~/.aphid/optchat` | Where the chat is |
+| `compactor_model` | the cheapest model of the provider of the session | The model that writes the summaries |
+| `compactor_thinking` | `"medium"` | The thinking level of the compactor. Aphid sets it to `"off"` if the model refuses it |
+| `node` | `512` | The size of a line of the tree, in bytes |
+| `view` | `128000` | The size of the view, in bytes |
+| `jobs` | `8` | The most compactor requests at the same time |
+| `tries` | `5` | How many times the compactor tries to make a line short enough |
+| `retry_ms` | `10000` | How long to wait before a failed line is tried again |
+| `cap` | `30000` | The most characters of a tool result. Aphid keeps the start and the end |
+| `browser` | `"xdg-open"` | The command that opens `browse.html` |
+
+Differences from the specification:
+
+- A message you send while the agent works becomes a new prompt. It does not
+  go to the agent between two tool calls.
+- Aphid does not send cache breakpoints. A provider that caches the start of a
+  request, such as DeepSeek, still reads most of the view from its cache.
+- There are no subagents.
 
 ## The web chat
 

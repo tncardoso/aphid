@@ -4,6 +4,10 @@
 
 ### Added
 
+- **OptChat mode.** The new example plugin `optchat.rhai` makes one chat that
+  does not end. A cheap model folds every message into a tree of summaries, and
+  each prompt starts the model fresh with a view of the whole chat, which it
+  can open with `zoom`. Use `/optchat on`, `off`, `status` and `browse`.
 - **Plugins can change what a request sends.** The new `agent/request` event
   lets a plugin send only the current run, replace the system prompt, put text
   before the prompt, or leave tools out. The session keeps every message. With
@@ -18,7 +22,8 @@
   aphid does what `/new` does.
 - **New plugin functions for files and time.** `fs_append` adds to a file and
   syncs it, `fs_lock` and `fs_unlock` keep two processes away from the same
-  file, `time_now()` gives the time and `aphid_home()` the directory of aphid.
+  file, `time_now()` gives the time, `aphid_home()` the directory of aphid, and
+  `try_parse_json` reads JSON that a crash may have cut.
 - **A plugin can raise its own limits** with `const max_operations`,
   `max_string_size`, `max_array_size` and `max_map_size`.
 

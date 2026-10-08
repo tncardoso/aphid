@@ -183,6 +183,71 @@ pub fn scripted(turns: impl IntoIterator<Item = Turn>) -> (StreamFn, Arc<Script>
     (Arc::clone(&script) as StreamFn, script)
 }
 
+/// The answer to one request, worked out from what was sent.
+type Answer = dyn Fn(&str) -> Turn + Send + Sync;
+
+/// A backend that answers each request with a function of its encoded body.
+///
+/// [`Script`] fits a run whose requests come in a known order. This fits
+/// requests that come in any order, or any number — several running at once,
+/// say — where the right answer depends on what was asked.
+pub struct Responder {
+    answer: Box<Answer>,
+    requests: Mutex<Vec<String>>,
+}
+
+impl Responder {
+    /// The encoded body of every request made so far, in the order they came.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a previous caller panicked while holding the lock.
+    #[must_use]
+    pub fn requests(&self) -> Vec<String> {
+        self.requests.lock().expect("responder lock").clone()
+    }
+}
+
+impl std::fmt::Debug for Responder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Responder")
+            .field("requests", &self.requests.lock().map(|r| r.len()).ok())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Backend for Responder {
+    fn stream<'a>(
+        &'a self,
+        model: &'a Model,
+        transcript: &'a Transcript,
+        tools: &'a [Tool],
+        options: &'a SimpleStreamOptions,
+    ) -> BoxFuture<'a, BoxStream> {
+        let body = match encode_request(model, transcript, tools, options) {
+            Ok(body) => body,
+            Err(error) => format!("<encode failed: {error}>"),
+        };
+        let turn = (self.answer)(&body);
+        self.requests.lock().expect("responder lock").push(body);
+        Box::pin(std::future::ready(
+            Box::new(ScriptedStream::new(model, &turn)) as BoxStream,
+        ))
+    }
+}
+
+/// Answer each request with `answer`, called with the request's encoded body.
+#[must_use]
+pub fn responding(
+    answer: impl Fn(&str) -> Turn + Send + Sync + 'static,
+) -> (StreamFn, Arc<Responder>) {
+    let responder = Arc::new(Responder {
+        answer: Box::new(answer),
+        requests: Mutex::new(Vec::new()),
+    });
+    (Arc::clone(&responder) as StreamFn, responder)
+}
+
 /// One scripted turn, replayed as protocol events.
 ///
 /// The whole message is built up front, so `text` resolves spans exactly the way

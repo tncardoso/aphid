@@ -54,11 +54,7 @@ impl ModelAccess {
 
     /// The seam a test uses: its own models, a scripted backend and a key.
     #[must_use]
-    pub fn new(
-        catalog: Catalog,
-        backend: StreamFn,
-        key: KeyFn,
-    ) -> Self {
+    pub fn new(catalog: Catalog, backend: StreamFn, key: KeyFn) -> Self {
         Self {
             catalog,
             backend,

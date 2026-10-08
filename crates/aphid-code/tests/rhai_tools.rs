@@ -549,3 +549,24 @@ fn apply(ctx) {{
     let plain = Fixture::new(&source(""));
     assert_eq!(plain.host().run_command("big", ""), Some(vec![]));
 }
+
+/// A line a crash cut short is not JSON, and reading it must not stop the
+/// script: `parse_json` raises an error `try` cannot catch.
+#[test]
+fn json_that_does_not_parse_is_unit() {
+    let fixture = Fixture::new(
+        r#"const inject = ["commands"];
+fn apply(ctx) {
+    command(#{ name: "read", description: "", run: |args| {
+        notice(type_of(try_parse_json(`{"i":1,"ki`)) + " " + try_parse_json(`{"i":1}`).i)
+    }});
+}
+"#,
+    );
+    assert_eq!(
+        fixture.host().run_command("read", ""),
+        Some(vec![aphid_code::scripting::Action::Notice(
+            "() 1".to_owned()
+        )])
+    );
+}
