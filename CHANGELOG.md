@@ -16,6 +16,11 @@
   can run at the same time, and the agent does not wait for them.
 - **A plugin command can start a new session.** It returns `new_session()`, and
   aphid does what `/new` does.
+- **New plugin functions for files and time.** `fs_append` adds to a file and
+  syncs it, `fs_lock` and `fs_unlock` keep two processes away from the same
+  file, `time_now()` gives the time and `aphid_home()` the directory of aphid.
+- **A plugin can raise its own limits** with `const max_operations`,
+  `max_string_size`, `max_array_size` and `max_map_size`.
 
 ### Fixed
 

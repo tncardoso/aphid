@@ -316,6 +316,11 @@ A Rhai script can only calculate. Aphid gives it these functions:
 | `fs_write(path, text)` | Writes a file |
 | `fs_exists(path)` | Returns `true` if the path is there |
 | `fs_list(path)` | Returns the names in a directory |
+| `fs_append(path, text)` | Adds text at the end of a file, and writes it to the disk before it returns |
+| `fs_lock(path)` | Takes a lock on a file. Returns `false` if another process, or another plugin, has the lock |
+| `fs_unlock(path)` | Releases a lock that `fs_lock` took |
+| `time_now()` | The time, as `#{ unix_ms, iso, day }`. `day` is the local date, such as `2026-10-07` |
+| `aphid_home()` | The directory of aphid, usually `~/.aphid` |
 | `exec(command)` | Runs a shell command |
 | `http_get(url)` | Makes a GET request |
 | `http_post(url, body, headers)` | Makes a POST request |
@@ -343,6 +348,14 @@ A relative path in `fs_read` and the other file functions starts at the
 workspace. In a coding session the path can go out of the workspace, because the
 same plugin has `exec`, and a shell reads and writes anywhere. An embedder that
 makes its own capabilities keeps the file functions in the workspace.
+
+`fs_append` and `fs_write` make the directories that are not there.
+`fs_append` writes the text with one write, then makes sure the disk has it. A
+crash does not lose a line that `fs_append` returned for.
+
+A lock from `fs_lock` stays until `fs_unlock`, until the plugin unloads, or until
+aphid stops. The system releases it when the process stops, so a crash does not
+leave a lock behind.
 
 `exec` returns `#{ status, stdout, stderr }`. The http functions return
 `#{ status, body, headers }`.
@@ -642,6 +655,20 @@ itself.
 
 Each call into a plugin can do 5 000 000 operations. Strings can be 8 MB. Arrays and maps can
 hold 100 000 items. A call that goes past a limit stops with an error.
+
+A plugin can change these limits for itself, with a `const` at the top of the
+file. `0` removes the limit:
+
+```rhai
+const max_operations = 0;          // operations in one call
+const max_string_size = 67108864;  // bytes in one string
+const max_array_size = 0;          // items in one array
+const max_map_size = 0;            // items in one map
+```
+
+Use this only when the plugin keeps a large memory. When there is a limit on the
+size of an array or a map, aphid measures it again at each change, and a large
+array then becomes slow. A limit of `0` does not have this cost.
 
 ## Command-line options
 

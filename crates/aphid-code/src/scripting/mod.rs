@@ -97,7 +97,7 @@ pub use host::{PluginHost, ScriptHost, silent_sink};
 pub use hub::{Job, Open, PluginHub, Report};
 pub use models::{KeyFn, ModelAccess};
 pub use parts::{Parts, PromptParts};
-pub use script::{Declares, ScriptPlugin};
+pub use script::{Declares, Limits, ScriptPlugin};
 pub use store::Store;
 pub use surface::{
     Host, Placement, RegisteredSurface, Side, SurfaceAction, SurfaceEvent, SurfaceRender,

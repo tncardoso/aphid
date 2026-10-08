@@ -453,3 +453,99 @@ fn apply(ctx) {
         ])
     );
 }
+
+#[test]
+fn an_append_adds_to_what_is_there() {
+    let fixture = Fixture::new(
+        r#"const inject = ["commands"];
+fn apply(ctx) {
+    command(#{ name: "add", description: "", run: |args| {
+        fs_append("log/one.jsonl", args + "\n");
+        notice(fs_read("log/one.jsonl"))
+    }});
+}
+"#,
+    );
+    let loaded = fixture.host();
+    loaded.run_command("add", "first");
+    assert_eq!(
+        loaded.run_command("add", "second"),
+        Some(vec![aphid_code::scripting::Action::Notice(
+            "first\nsecond\n".to_owned()
+        )])
+    );
+}
+
+#[test]
+fn a_lock_is_held_until_it_is_released() {
+    const LOCKER: &str = r#"const inject = ["commands"];
+fn apply(ctx) {
+    command(#{ name: "lock", description: "", run: |args| notice("" + fs_lock("state/lock")) });
+    command(#{ name: "unlock", description: "", run: |args| { fs_unlock("state/lock"); notice("done") } });
+}
+"#;
+    let fixture = Fixture::new(LOCKER);
+    let first = fixture.host();
+    let second = fixture.host();
+    let said = |loaded: &common::Loaded, name: &str| {
+        format!("{:?}", loaded.run_command(name, "").expect("ran"))
+    };
+
+    assert_eq!(said(&first, "lock"), r#"[Notice("true")]"#);
+    // Asking again for a lock it holds is not a refusal.
+    assert_eq!(said(&first, "lock"), r#"[Notice("true")]"#);
+    assert_eq!(said(&second, "lock"), r#"[Notice("false")]"#);
+    said(&first, "unlock");
+    assert_eq!(said(&second, "lock"), r#"[Notice("true")]"#);
+}
+
+#[test]
+fn the_clock_gives_a_day_an_instant_and_milliseconds() {
+    let fixture = Fixture::new(
+        r#"const inject = ["commands"];
+fn apply(ctx) {
+    command(#{ name: "now", description: "", run: |args| {
+        let now = time_now();
+        notice(`${now.iso.starts_with(now.day)} ${now.unix_ms > 1700000000000} ${type_of(aphid_home())}`)
+    }});
+}
+"#,
+    );
+    assert_eq!(
+        fixture.host().run_command("now", ""),
+        Some(vec![aphid_code::scripting::Action::Notice(
+            "true true string".to_owned()
+        )])
+    );
+}
+
+#[test]
+fn a_plugin_can_raise_its_own_limits() {
+    let source = |declared: &str| {
+        format!(
+            r#"const inject = ["commands"];
+{declared}
+fn apply(ctx) {{
+    command(#{{ name: "big", description: "", run: |args| {{
+        let text = "x";
+        for i in 0..24 {{ text += text; }}
+        notice("" + text.len())
+    }}}});
+}}
+"#
+        )
+    };
+
+    // Sixteen million characters, past the default of eight megabytes. Zero
+    // means no limit.
+    let raised = Fixture::new(&source("const max_string_size = 0;"));
+    assert_eq!(
+        raised.host().run_command("big", ""),
+        Some(vec![aphid_code::scripting::Action::Notice(
+            "16777216".to_owned()
+        )])
+    );
+
+    let plain = Fixture::new(&source(""));
+    assert_eq!(plain.host().run_command("big", ""), Some(vec![]));
+}

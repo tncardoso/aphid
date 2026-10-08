@@ -100,13 +100,15 @@ impl ScriptPlugin {
             .compile(&text)
             .map_err(|error| format!("does not compile: {error}"))?;
 
+        let declares = Declares::read(&ast);
+        declares.limits.apply(&mut engine);
+
         let mut scope = Scope::new();
         engine
             .run_ast_with_scope(&mut scope, &ast)
             .map_err(|error| format!("failed while loading: {error}"))?;
 
         let hooks = declared(&ast);
-        let declares = Declares::read(&ast);
 
         Ok(Self {
             name: file.name.clone(),
@@ -398,6 +400,39 @@ pub struct Declares {
     pub inject: Vec<String>,
     pub provides: Vec<String>,
     pub emits: Vec<String>,
+    /// Limits that replace the defaults for this plugin.
+    pub limits: Limits,
+}
+
+/// What a plugin may raise the engine's limits to, with
+/// `const max_operations = …;` and the like. Zero means no limit.
+///
+/// The defaults suit a plugin that reacts to a hook. A plugin that keeps a
+/// large memory — a log of every message, say — outgrows them, and the person
+/// who installed it is the one who knows it should.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct Limits {
+    pub max_operations: Option<u64>,
+    pub max_string_size: Option<usize>,
+    pub max_array_size: Option<usize>,
+    pub max_map_size: Option<usize>,
+}
+
+impl Limits {
+    fn apply(self, engine: &mut Engine) {
+        if let Some(most) = self.max_operations {
+            engine.set_max_operations(most);
+        }
+        if let Some(most) = self.max_string_size {
+            engine.set_max_string_size(most);
+        }
+        if let Some(most) = self.max_array_size {
+            engine.set_max_array_size(most);
+        }
+        if let Some(most) = self.max_map_size {
+            engine.set_max_map_size(most);
+        }
+    }
 }
 
 impl Declares {
@@ -406,6 +441,20 @@ impl Declares {
         for (name, is_const, value) in ast.iter_literal_variables(true, false) {
             if !is_const {
                 continue;
+            }
+            let limit = value.as_int().ok().and_then(|n| u64::try_from(n).ok());
+            match name {
+                "max_operations" => declares.limits.max_operations = limit,
+                "max_string_size" => {
+                    declares.limits.max_string_size = limit.and_then(|n| usize::try_from(n).ok());
+                }
+                "max_array_size" => {
+                    declares.limits.max_array_size = limit.and_then(|n| usize::try_from(n).ok());
+                }
+                "max_map_size" => {
+                    declares.limits.max_map_size = limit.and_then(|n| usize::try_from(n).ok());
+                }
+                _ => {}
             }
             let target = match name {
                 "inject" => &mut declares.inject,

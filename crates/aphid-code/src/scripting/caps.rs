@@ -204,6 +204,7 @@ pub(crate) fn register(
     register_verdicts(engine);
     register_output(engine, plugin, sink);
     register_fs(engine, caps);
+    register_env(engine);
     register_exec(engine, plugin, caps, worker);
     register_http(engine, caps, worker);
     register_storage(engine, plugin, caps, store);
@@ -339,6 +340,106 @@ fn register_fs(engine: &mut Engine, caps: &Capabilities) {
         }
         std::fs::write(&path, contents)
             .map_err(|error| fail(format!("could not write {}: {error}", path.display())))
+    });
+
+    // One write, then a sync: a line appended here survives a crash, and a
+    // crash cannot leave half of it behind and the other half in a later line.
+    let root = caps.root.clone();
+    engine.register_fn("fs_append", move |path: &str, contents: &str| {
+        if !allowed {
+            return Err(fail(
+                "writing files is not available to this plugin".to_owned(),
+            ));
+        }
+        let path = resolve(root.as_deref(), free, path).map_err(fail)?;
+        append(&path, contents)
+            .map_err(|error| fail(format!("could not append to {}: {error}", path.display())))
+    });
+
+    // Held until `fs_unlock` or until the plugin goes. The operating system
+    // drops the lock when the process ends, so a crash leaves none behind.
+    let held: Arc<std::sync::Mutex<std::collections::HashMap<PathBuf, std::fs::File>>> =
+        Arc::default();
+    let root = caps.root.clone();
+    let locks = Arc::clone(&held);
+    engine.register_fn("fs_lock", move |path: &str| {
+        if !allowed {
+            return Err(fail("locking files is not available to this plugin".to_owned()));
+        }
+        let path = resolve(root.as_deref(), free, path).map_err(fail)?;
+        let mut locks = locks
+            .lock()
+            .map_err(|_| fail("the lock table is poisoned".to_owned()))?;
+        if locks.contains_key(&path) {
+            return Ok(true);
+        }
+        let file = lock(&path)
+            .map_err(|error| fail(format!("could not lock {}: {error}", path.display())))?;
+        Ok(file.is_some_and(|file| {
+            locks.insert(path, file);
+            true
+        }))
+    });
+
+    let root = caps.root.clone();
+    engine.register_fn("fs_unlock", move |path: &str| {
+        let path = resolve(root.as_deref(), free, path).map_err(fail)?;
+        if let Ok(mut locks) = held.lock() {
+            // Closing the file releases the lock.
+            locks.remove(&path);
+        }
+        Ok::<_, Box<EvalAltResult>>(())
+    });
+}
+
+fn append(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    file.write_all(contents.as_bytes())?;
+    file.sync_data()
+}
+
+/// Take an exclusive lock on a file, or `None` when somebody holds it.
+///
+/// The lock belongs to the open file, so a second open in the same process is
+/// refused too: two sessions of one alate cannot both take it.
+fn lock(path: &Path) -> std::io::Result<Option<std::fs::File>> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
+    }
+}
+
+/// The clock and where aphid keeps its files.
+fn register_env(engine: &mut Engine) {
+    engine.register_fn("time_now", || {
+        let now = chrono::Local::now();
+        let mut map = Map::new();
+        map.insert("unix_ms".into(), now.timestamp_millis().into());
+        map.insert(
+            "iso".into(),
+            now.to_rfc3339_opts(chrono::SecondsFormat::Secs, false).into(),
+        );
+        map.insert("day".into(), now.format("%Y-%m-%d").to_string().into());
+        map
+    });
+    engine.register_fn("aphid_home", || {
+        aphid_core::catalog::aphid_dir().map_or_else(String::new, |dir| dir.display().to_string())
     });
 }
 
