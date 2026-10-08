@@ -298,8 +298,10 @@ fn spawn_plugin_hub(
     PluginHub::spawn(host, bus, registries, move |report| match report {
         PluginReport::Command(actions) => {
             for action in actions {
-                let PluginAction::Notice(text) = action;
-                hub.send(Msg::Notice(text));
+                hub.send(match action {
+                    PluginAction::Notice(text) => Msg::Notice(text),
+                    PluginAction::NewSession => Msg::NewSession,
+                });
             }
         }
         PluginReport::Surface {

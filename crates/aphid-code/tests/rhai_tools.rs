@@ -434,3 +434,22 @@ fn bump(n) { this.n = n + 1; }
         )])
     );
 }
+
+#[test]
+fn a_command_can_ask_for_a_new_session() {
+    let fixture = Fixture::new(
+        r#"const inject = ["commands"];
+fn apply(ctx) {
+    command(#{ name: "fresh", description: "", run: |args| [notice("starting over"), new_session()] });
+}
+"#,
+    );
+    let loaded = fixture.host();
+    assert_eq!(
+        loaded.run_command("fresh", ""),
+        Some(vec![
+            aphid_code::scripting::Action::Notice("starting over".to_owned()),
+            aphid_code::scripting::Action::NewSession,
+        ])
+    );
+}

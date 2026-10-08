@@ -90,6 +90,8 @@ pub enum Msg {
     },
     /// Something a plugin wants the user to see.
     Notice(String),
+    /// A plugin command asked for a new session.
+    NewSession,
     /// Text a plugin sent to the model, which is queued as a typed line is.
     Prompt(String),
 

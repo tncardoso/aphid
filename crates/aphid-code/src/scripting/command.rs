@@ -33,6 +33,8 @@ pub struct CommandSpec {
 pub enum Action {
     /// Show this to the user.
     Notice(String),
+    /// Start a new session, as `/new` does. Refused while a run is going.
+    NewSession,
 }
 
 impl std::fmt::Debug for Registered {
@@ -108,6 +110,7 @@ pub fn actions(value: &Dynamic) -> Vec<Action> {
 
         return match kind.as_deref() {
             Some("notice") => vec![Action::Notice(text)],
+            Some("new_session") => vec![Action::NewSession],
             _ => Vec::new(),
         };
     }

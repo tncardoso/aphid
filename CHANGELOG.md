@@ -14,6 +14,8 @@
 - **Plugins can call a model.** `model_ask` sends a request to a model of
   `models.json` and gives the answer to a function of the plugin. Many requests
   can run at the same time, and the agent does not wait for them.
+- **A plugin command can start a new session.** It returns `new_session()`, and
+  aphid does what `/new` does.
 
 ### Fixed
 

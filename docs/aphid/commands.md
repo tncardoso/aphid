@@ -226,6 +226,10 @@ Return `notice(text)`, a text, or an array of them to show text to the user. To
 send text to the model, call `prompt(text)`. Aphid shows the notices first, and
 then the prompt, whatever the order in the command.
 
+Return `new_session()`, alone or in the array, to start a new session as `/new`
+does. Aphid does not start a new session while a run is in progress: it shows a
+notice in its place.
+
 A standard command always wins, and thus a plugin cannot take `/quit` away. If
 two plugins use one name, aphid keeps both: the second becomes `/review:2`.
 

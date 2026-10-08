@@ -377,6 +377,13 @@ impl App {
                 self.scrollback.push_notice(text);
                 Cmd::none()
             }
+            // The same rule as a typed `/new`.
+            Msg::NewSession => {
+                if self.status.running {
+                    return self.notice(RUN_GOING);
+                }
+                Cmd::one(Effect::NewSession)
+            }
             // A plugin's prompt takes the path a typed line takes, minus the
             // command set: a plugin has no business running `/quit`.
             Msg::Prompt(text) => {
@@ -2300,8 +2307,10 @@ fn spawn_plugin_hub(
         match report {
             PluginReport::Command(actions) => {
                 for action in actions {
-                    let PluginAction::Notice(text) = action;
-                    hub.send(Msg::Notice(text));
+                    hub.send(match action {
+                        PluginAction::Notice(text) => Msg::Notice(text),
+                        PluginAction::NewSession => Msg::NewSession,
+                    });
                 }
             }
             PluginReport::Surface {
@@ -3181,6 +3190,25 @@ mod tests {
                 .iter()
                 .all(|effect| !matches!(effect, Effect::Checkout { .. })),
             "{effects:?}"
+        );
+    }
+
+    #[test]
+    fn a_plugin_starts_a_new_session_only_when_no_run_is_going() {
+        let agent = agent_with(vec![]);
+        let mut app = app_for(&agent);
+
+        assert_eq!(
+            app.update(Msg::NewSession).into_effects(),
+            vec![Effect::NewSession]
+        );
+
+        app.status.running = true;
+        assert!(
+            app.update(Msg::NewSession)
+                .into_effects()
+                .iter()
+                .all(|effect| !matches!(effect, Effect::NewSession))
         );
     }
 
@@ -4607,8 +4635,9 @@ fn apply(ctx) {
             .run_command(registries.commands(), "greet", "Ana")
             .expect("the command")
         {
-            let crate::scripting::Action::Notice(text) = action;
-            app.update(Msg::Notice(text));
+            if let crate::scripting::Action::Notice(text) = action {
+                app.update(Msg::Notice(text));
+            }
         }
         assert_eq!(notices(&app), vec!["greeting Ana"]);
 

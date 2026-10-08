@@ -266,6 +266,8 @@ fn register_verdicts(engine: &mut Engine) {
     engine.register_fn("stop", || verdict("stop", ""));
     engine.register_fn("allow", || verdict("allow", ""));
     engine.register_fn("notice", |text: &str| verdict("notice", text));
+    // From a command: start a new session, as `/new` does.
+    engine.register_fn("new_session", || verdict("new_session", ""));
 
     // A surface's update says what should happen next rather than doing it,
     // so that working out the new model stays a pure step.
