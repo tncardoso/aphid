@@ -129,7 +129,7 @@ impl Fixture {
         let (host, problems) = PluginHost::load(
             &[file],
             &caps,
-            Arc::new(Said::default()),
+            Arc::new(Said),
             &Arc::new(exec::Registry::new()),
         );
         assert!(problems.is_empty(), "{problems:?}");

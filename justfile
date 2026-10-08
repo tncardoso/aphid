@@ -4,8 +4,11 @@
 # memory each to check, and sixteen compilers at once can fill the RAM.
 pre-commit:
     cargo fmt
-    cargo clippy -j 4
-    cargo test -j 4
+    cargo clippy --workspace --all-targets -j 2 -- -D warnings
+    cargo test -j 2
+
+build:
+    cargo build -j 4
 
 # Build vhs gifs for the landing page
 gifs: gif-aphid gif-alate gif-colony
