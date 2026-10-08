@@ -30,8 +30,9 @@ use rhai::{Dynamic, Map};
 
 use aphid_agent::{Silent, Sink};
 
-use super::caps::Capabilities;
+use super::caps::{Capabilities, Shared};
 use super::discover::{Diagnostic, PluginFile};
+use super::parts::PromptParts;
 use super::script::ScriptPlugin;
 use super::worker::Worker;
 
@@ -39,6 +40,7 @@ use super::worker::Worker;
 pub struct PluginHost {
     plugins: Vec<Arc<ScriptPlugin>>,
     diagnostics: Vec<Diagnostic>,
+    prompt: Arc<PromptParts>,
 }
 
 impl PluginHost {
@@ -54,12 +56,15 @@ impl PluginHost {
         sink: Arc<dyn Sink>,
         processes: &Arc<aphid_agent::exec::Registry>,
     ) -> (Self, Vec<Diagnostic>) {
-        let worker = Arc::new(Worker::spawn(processes));
+        let shared = Shared {
+            worker: Arc::new(Worker::spawn(processes)),
+            prompt: Arc::default(),
+        };
         let mut plugins = Vec::new();
         let mut diagnostics = Vec::new();
 
         for file in files {
-            match ScriptPlugin::load(file, caps, &sink, &worker) {
+            match ScriptPlugin::load(file, caps, &sink, &shared) {
                 Ok(plugin) => {
                     let plugin = Arc::new(plugin);
                     plugin.wire();
@@ -75,6 +80,7 @@ impl PluginHost {
         let host = Self {
             plugins,
             diagnostics: diagnostics.clone(),
+            prompt: shared.prompt,
         };
         (host, diagnostics)
     }
@@ -85,7 +91,15 @@ impl PluginHost {
         Self {
             plugins: Vec::new(),
             diagnostics: Vec::new(),
+            prompt: Arc::default(),
         }
+    }
+
+    /// Where the harness puts the pieces of its system prompt, for
+    /// `system_prompt()`, `agents_md()`, `skills()` and `tool_list()`.
+    #[must_use]
+    pub fn prompt_parts(&self) -> &Arc<PromptParts> {
+        &self.prompt
     }
 
     #[must_use]

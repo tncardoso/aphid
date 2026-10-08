@@ -267,3 +267,62 @@ async fn switching_model_mid_session_keeps_the_conversation() {
     assert!(script.requests()[0].contains("deepseek-v4-flash"));
     assert!(script.requests()[1].contains("deepseek-v4-pro"));
 }
+
+/// A plugin that replaces the system prompt builds it from the same pieces
+/// aphid used: the project's instructions and the tools of this session.
+#[tokio::test]
+async fn a_plugin_builds_its_own_system_prompt_from_the_harness_pieces() {
+    use std::sync::Arc;
+
+    use aphid_code::scripting::{Capabilities, PluginHost, ScriptHost, explicit, silent_sink};
+
+    let temp = Temp::new();
+    temp.write("AGENTS.md", "Always answer in haiku.");
+    temp.write(
+        ".aphid/plugins/own.rhai",
+        r#"
+fn apply(ctx) {
+    on("agent/request", |cx, request| {
+        let names = tool_list().map(|tool| tool.name + ":" + (tool.snippet != ""));
+        // Rhai sorts in place and gives back nothing.
+        names.sort();
+        let rules = agents_md().map(|file| file.text);
+        let base = if system_prompt().contains("haiku") { "base" } else { "none" };
+        #{ system: "OWN " + names + " " + rules + " " + base }
+    });
+}
+"#,
+    );
+
+    let file = explicit(&temp.root.join(".aphid/plugins/own.rhai")).expect("readable");
+    let (host, problems) = PluginHost::load(
+        &[file],
+        &Capabilities::full(&temp.root),
+        silent_sink(),
+        &Arc::new(aphid_agent::exec::Registry::new()),
+    );
+    assert!(problems.is_empty(), "{problems:?}");
+    let host = Arc::new(host);
+
+    let (backend, script) = scripted([Turn::text("ok")]);
+    let mut options = temp.options();
+    options.stream_fn = Some(backend);
+    options
+        .composition
+        .add(
+            Arc::new(ScriptHost::new(Arc::clone(&host), &options.composition)),
+            serde_json::Value::Null,
+        )
+        .await
+        .expect("the script host mounts");
+    options.host = Some(host);
+    let mut harness = harness::build(options);
+
+    harness.agent.prompt("hi").await;
+
+    let body: serde_json::Value = serde_json::from_str(&script.requests()[0]).expect("a JSON body");
+    assert_eq!(
+        body["messages"][0]["content"],
+        r#"OWN ["bash:true", "edit:true", "read:true", "write:true"] ["Always answer in haiku."] base"#
+    );
+}

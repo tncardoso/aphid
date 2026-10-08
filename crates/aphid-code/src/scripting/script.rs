@@ -14,11 +14,11 @@ use rhai::{AST, Dynamic, Engine, FnPtr, FuncArgs, Map, Scope};
 use aphid_agent::Sink;
 
 use super::caps::Capabilities;
+use super::caps::Shared;
 use super::command::{Action, CommandSpec};
 use super::discover::PluginFile;
 use super::gate::Gate;
 use super::store::Store;
-use super::worker::Worker;
 
 /// Every hook name the host knows, and the interest it implies.
 ///
@@ -74,11 +74,11 @@ impl ScriptPlugin {
     ///
     /// Fails when the file cannot be read, does not compile, or its top-level
     /// body raises.
-    pub fn load(
+    pub(crate) fn load(
         file: &PluginFile,
         caps: &Capabilities,
         sink: &Arc<dyn Sink>,
-        worker: &Arc<Worker>,
+        shared: &Shared,
     ) -> Result<Self, String> {
         let text = std::fs::read_to_string(&file.path)
             .map_err(|error| format!("could not read: {error}"))?;
@@ -86,7 +86,7 @@ impl ScriptPlugin {
         let store = Arc::new(Store::load(caps.state_dir.as_deref(), &file.name));
 
         let mut engine = Engine::new();
-        super::caps::register(&mut engine, &file.name, caps, sink, worker, &store);
+        super::caps::register(&mut engine, &file.name, caps, sink, shared, &store);
 
         // Filled in for the length of `apply`, which is the only time a
         // registration is legal.

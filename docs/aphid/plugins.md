@@ -320,6 +320,20 @@ A Rhai script can only calculate. Aphid gives it these functions:
 | `http_get(url)` | Makes a GET request |
 | `http_post(url, body, headers)` | Makes a POST request |
 
+These functions give the parts that aphid made its system prompt from. Use them
+when `agent/request` replaces the system prompt:
+
+| Function | Result |
+| --- | --- |
+| `system_prompt()` | The system prompt of aphid, as aphid sends it |
+| `agents_md()` | The `AGENTS.md` files, as an array of `#{ path, text }`. The global file is first |
+| `skills()` | The skills, as an array of `#{ name, description, path, project }` |
+| `tool_list()` | The tools of this session, as an array of `#{ name, description, snippet }`. `snippet` is the short guideline of a built-in tool, and `""` for other tools |
+
+`tool_list()` reads the tools when you call it. Thus it also gives a tool that a
+plugin added later. Before the session starts, and in an alate, these functions
+give empty values.
+
 `prompt` is a call, not a value that a listener returns. A listener, a tool
 and a command all use it the same way. The text goes in the queue that a typed line
 goes in, and the terminal UI shows it as a message from the user. Only the

@@ -12,7 +12,17 @@ use std::time::Duration;
 use aphid_agent::Sink;
 use rhai::{Dynamic, Engine, EvalAltResult, Map};
 
+use super::parts::PromptParts;
 use super::worker::{Job, Worker};
+
+/// What every plugin of one host shares.
+///
+/// One of each per host rather than per plugin: a worker thread per plugin
+/// would be a thread per file, and the prompt pieces are the same for all.
+pub(crate) struct Shared {
+    pub worker: Arc<Worker>,
+    pub prompt: Arc<PromptParts>,
+}
 
 /// How long `exec` and `http` may take before they are given up on.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -171,9 +181,10 @@ pub(crate) fn register(
     plugin: &str,
     caps: &Capabilities,
     sink: &Arc<dyn Sink>,
-    worker: &Arc<Worker>,
+    shared: &Shared,
     store: &Arc<super::store::Store>,
 ) {
+    let worker = &shared.worker;
     engine.set_max_operations(caps.max_operations);
     engine.set_max_call_levels(64);
     // Rhai's default depth inside a function is 32, which was fine when a hook
@@ -192,6 +203,7 @@ pub(crate) fn register(
     register_exec(engine, plugin, caps, worker);
     register_http(engine, caps, worker);
     register_storage(engine, plugin, caps, store);
+    super::parts::register(engine, &shared.prompt);
 }
 
 /// A plugin's settings and its memory.

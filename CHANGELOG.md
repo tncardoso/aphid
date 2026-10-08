@@ -8,6 +8,9 @@
   lets a plugin send only the current run, replace the system prompt, put text
   before the prompt, or leave tools out. The session keeps every message. With
   `cx.hold()` a plugin can keep a request back until it is ready.
+- **Plugins can read the parts of the system prompt.** `system_prompt()`,
+  `agents_md()`, `skills()` and `tool_list()` give a plugin what aphid made its
+  prompt from, so a plugin that replaces the prompt can keep them.
 
 ### Fixed
 

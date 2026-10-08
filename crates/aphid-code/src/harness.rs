@@ -120,8 +120,9 @@ pub fn build(options: HarnessOptions) -> Harness {
         // Taken by the front end before it calls this, so anything left here
         // was never loaded and has nothing to contribute.
         plugin_files: _,
-        // Kept for its state and its commands; nothing here dispatches to it.
-        host: _,
+        // Kept for its state and its commands; nothing here dispatches to it,
+        // but its plugins are told what the system prompt was built from.
+        host,
         processes,
         stream_fn,
         composition,
@@ -168,12 +169,12 @@ pub fn build(options: HarnessOptions) -> Harness {
 
     let mut builder = Agent::builder()
         .model(model)
-        .system(system_prompt)
+        .system(system_prompt.clone())
         // Before anything else on the builder: components mounted on this
         // composition subscribed when they loaded, and the loop has to announce
         // to the same bus they are on.
         .compose(&composition)
-        .scope(scope.map(Into::into))
+        .scope(scope.clone().map(Into::into))
         .tools(tools::all(
             &workspace,
             Some(Arc::clone(&composition.bus)),
@@ -191,8 +192,23 @@ pub fn build(options: HarnessOptions) -> Harness {
         builder = builder.stream_fn(stream_fn);
     }
 
+    let agent = builder.build();
+    if let Some(host) = &host {
+        host.prompt_parts().set(crate::scripting::Parts {
+            system: system_prompt,
+            context_files: context_files.clone(),
+            skills: skills.clone(),
+            snippets: tools::snippets()
+                .into_iter()
+                .map(|(name, snippet)| (name.to_owned(), snippet.to_owned()))
+                .collect(),
+            tools: Some(Arc::clone(agent.tools())),
+            scope,
+        });
+    }
+
     Harness {
-        agent: builder.build(),
+        agent,
         workspace,
         catalog,
         context_files,

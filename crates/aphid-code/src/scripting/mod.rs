@@ -73,6 +73,7 @@ mod facade;
 mod gate;
 mod host;
 pub mod hub;
+mod parts;
 mod script;
 mod store;
 mod subscribe;
@@ -93,6 +94,7 @@ pub use entries::{IsolateSpec, Row, Scripts, compose, read};
 pub use facade::{Facade, ScriptService};
 pub use host::{PluginHost, ScriptHost, silent_sink};
 pub use hub::{Job, Open, PluginHub, Report};
+pub use parts::{Parts, PromptParts};
 pub use script::{Declares, ScriptPlugin};
 pub use store::Store;
 pub use surface::{
